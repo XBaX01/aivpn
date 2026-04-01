@@ -104,10 +104,15 @@ swiftc \
 # Create universal helper binary
 # ──────────────────────────────────────────────
 echo "🔗 Creating universal helper binary..."
+# lipo writes a temporary file next to the output path; use /tmp to avoid
+# permission issues inside the pkg root directory.
+HELPER_UNIVERSAL_TMP="$(mktemp /tmp/aivpn-helper.XXXXXX)"
 lipo -create \
     "$HELPER_BUILD/arm64/aivpn-helper" \
     "$HELPER_BUILD/x86_64/aivpn-helper" \
-    -output "$PKG_ROOT/Library/PrivilegedHelperTools/aivpn-helper"
+    -output "$HELPER_UNIVERSAL_TMP"
+cp "$HELPER_UNIVERSAL_TMP" "$PKG_ROOT/Library/PrivilegedHelperTools/aivpn-helper"
+rm -f "$HELPER_UNIVERSAL_TMP"
 chmod 755 "$PKG_ROOT/Library/PrivilegedHelperTools/aivpn-helper"
 echo "  ✅ $(file "$PKG_ROOT/Library/PrivilegedHelperTools/aivpn-helper" | sed 's/.*: //')"
 

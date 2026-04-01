@@ -42,6 +42,9 @@ pub struct Tunnel {
     saved_default_gw: Option<String>,
     /// Server IP for bypass route cleanup
     server_ip: Option<String>,
+    /// Active IPv6 interface name saved before we add the blackhole route.
+    /// Used to restore the route on disconnect instead of guessing (e.g. hard-coding en0).
+    saved_ipv6_iface: Option<String>,
 }
 
 impl Tunnel {
@@ -52,6 +55,7 @@ impl Tunnel {
             writer: None,
             saved_default_gw: None,
             server_ip: None,
+            saved_ipv6_iface: None,
         }
     }
     
@@ -130,7 +134,7 @@ impl Tunnel {
     
     /// Configure TUN device on macOS (ifconfig + route)
     #[cfg(target_os = "macos")]
-    fn configure_macos(&self) -> Result<()> {
+    fn configure_macos(&mut self) -> Result<()> {
         use std::process::Command;
         
         let tun_name = &self.config.tun_name;
@@ -196,11 +200,36 @@ impl Tunnel {
             info!("✓ Added subnet route 10.0.0.0/24 via {} (gateway {})", tun_name, tun_addr);
         }
 
-        // Disable IPv6 to prevent traffic leak (IPv6 bypasses VPN tunnel)
-        info!("Disabling IPv6 to prevent traffic leak...");
+        // Block IPv6 to prevent traffic leaks (IPv6 bypasses the IPv4-only VPN tunnel).
+        // First, discover and save the current IPv6 default interface so we can restore
+        // it precisely on disconnect — avoids the "hardcode en0" problem.
+        info!("Blocking IPv6 to prevent traffic leak...");
+        let ipv6_iface = Command::new("/sbin/route")
+            .args(["-n", "get", "-inet6", "default"])
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8(out.stdout).ok()
+            })
+            .and_then(|text| {
+                text.lines()
+                    .find(|l| l.trim().starts_with("interface:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|s| s.trim().to_string())
+            });
+        if let Some(ref iface) = ipv6_iface {
+            info!("Saving IPv6 default interface: {} (will restore on disconnect)", iface);
+        } else {
+            info!("No IPv6 default route found — nothing to restore on disconnect");
+        }
+        self.saved_ipv6_iface = ipv6_iface;
+
+        // Add a blackhole for ::/0 — any IPv6 packet hits a dead end inside the OS.
         let _ = Command::new("/sbin/route").args(["-n", "delete", "-inet6", "default"]).status();
-        let _ = Command::new("/sbin/route").args(["-n", "add", "-inet6", "-net", "::/0", "-blackhole"]).status();
-        info!("IPv6 disabled - all traffic will use IPv4 VPN tunnel");
+        let _ = Command::new("/sbin/route")
+            .args(["-n", "add", "-inet6", "-net", "::/0", "-blackhole"])
+            .status();
+        info!("IPv6 blocked — all v6 traffic goes to blackhole (no leak possible)");
 
         // Verify routes
         info!("Verifying routes...");
@@ -506,23 +535,38 @@ impl Tunnel {
     #[cfg(target_os = "macos")]
     fn restore_ipv6(&self) {
         use std::process::Command;
-        
+
         info!("Restoring IPv6...");
-        // Remove blackhole route
-        let _ = Command::new("/sbin/route").args(["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"]).status();
-        // Restore default IPv6 route (will be re-added by system when needed)
-        let _ = Command::new("/sbin/route").args(["-n", "add", "-inet6", "default", "-interface", "en0"]).status();
-        info!("IPv6 restored");
+        // Remove the blackhole.  If we saved the interface before blocking,
+        // restore the default route through it.  If not — the macOS network
+        // stack will re-discover the gateway via ND/SLAAC automatically.
+        let _ = Command::new("/sbin/route")
+            .args(["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"])
+            .status();
+
+        if let Some(ref iface) = self.saved_ipv6_iface {
+            let status = Command::new("/sbin/route")
+                .args(["-n", "add", "-inet6", "default", "-interface", iface])
+                .status();
+            match status {
+                Ok(s) if s.success() => info!("IPv6 default route restored via {}", iface),
+                _ => info!("IPv6 blackhole removed — macOS will auto-restore via ND (iface {})", iface),
+            }
+        } else {
+            info!("IPv6 blackhole removed — macOS will auto-restore via ND");
+        }
     }
 
     /// Restore IPv6 on Linux
     #[cfg(target_os = "linux")]
     fn restore_ipv6(&self) {
         use std::process::Command;
-        
+
         info!("Restoring IPv6...");
-        let _ = Command::new("ip").args(["-6", "route", "add", "default", "dev", "eth0"]).status();
-        info!("IPv6 restored");
+        // Remove the blackhole (if any).  Let the kernel re-discover the gateway.
+        let _ = Command::new("ip").args(["-6", "route", "del", "blackhole", "default"]).status();
+        let _ = Command::new("ip").args(["-6", "route", "del", "::/0"]).status();
+        info!("IPv6 blackhole removed — kernel will auto-restore via ND/RA");
     }
     
     /// Take the TUN reader (moves ownership to caller, e.g. spawned task)

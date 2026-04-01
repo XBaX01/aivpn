@@ -106,17 +106,25 @@ func killExistingClient() {
     restoreIPv6()
 }
 
-/// Restore IPv6 routing after VPN disconnect
+/// Restore IPv6 routing after VPN disconnect.
+/// The Rust client's Drop impl already removes the blackhole and restores the
+/// saved interface on clean exit.  This function is a safety net for cases where
+/// the client process is killed externally (e.g. `killall`).
+/// We only remove the blackhole here — we do NOT try to add the default route
+/// back because we don't know which interface was active (that knowledge lives
+/// in the Rust process).  macOS re-discovers the IPv6 gateway automatically
+/// via ND/SLAAC once the blackhole is gone.
 func restoreIPv6() {
-    log("Restoring IPv6 routing...")
-    
-    // Remove blackhole route if it exists
-    let _ = runCommand("/sbin/route", args: ["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"])
-    
-    // Restore default IPv6 route via en0
-    let _ = runCommand("/sbin/route", args: ["-n", "add", "-inet6", "default", "-interface", "en0"])
-    
-    log("IPv6 routing restored")
+    log("Clearing IPv6 blackhole (safety net)...")
+
+    // Remove the blackhole if it still exists.
+    let removed = runCommand("/sbin/route",
+                             args: ["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"])
+    if removed {
+        log("IPv6 blackhole removed — macOS will auto-restore via ND/SLAAC")
+    } else {
+        log("No IPv6 blackhole found (already removed by Rust client on clean exit)")
+    }
 }
 
 /// Run a command and return success
