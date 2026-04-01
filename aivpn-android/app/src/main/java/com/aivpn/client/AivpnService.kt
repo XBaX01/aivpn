@@ -61,6 +61,10 @@ class AivpnService : VpnService() {
     // Whether the current session reached the running state
     @Volatile private var sessionEstablished = false
 
+    // Monotonically-increasing session counter.  Incremented on every new tunnel session.
+    // Captured in upgradePendingJob at trigger time so a stale job can't kill a newer session.
+    @Volatile private var sessionId: Long = 0L
+
     // Network change detection
     @Volatile private var sessionNetwork: Network? = null
     @Volatile private var targetNetwork: Network?  = null
@@ -192,6 +196,7 @@ class AivpnService : VpnService() {
 
         sessionEstablished = true
         isRunning          = true
+        sessionId++     // new session — invalidates any queued upgradePendingJob
         lastStatusText = getString(R.string.status_connected, host)
         statusCallback?.invoke(true, lastStatusText)
         updateNotification(getString(R.string.notification_connected, host))
@@ -229,24 +234,31 @@ class AivpnService : VpnService() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val session = sessionNetwork ?: return
                 if (network == session) return
+                // We only care about WiFi networks we could upgrade to.
                 if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
+
+                // Only upgrade cellular→WiFi.  WiFi→WiFi would cause needless churn.
+                val sessionCaps = cm.getNetworkCapabilities(session) ?: return
+                if (sessionCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
+
+                // Capture state NOW so the deferred job can detect session staleness.
+                val capturedSessionId = sessionId
+                val capturedSession   = session
 
                 upgradePendingJob?.cancel()
                 upgradePendingJob = serviceScope.launch {
                     delay(2_000L)
+                    // Abort if a new tunnel session was started since this job was queued.
+                    if (sessionId != capturedSessionId) return@launch
                     val stillValid = cm.getNetworkCapabilities(network)
                         ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-                    val stillOnOldSession = sessionNetwork != null && sessionNetwork != network
-                    if (stillValid && stillOnOldSession) {
-                        // Don't interrupt if download bytes are being received (liveness proxy).
-                        val rxActive = AivpnJni.getDownloadBytes() > 0 &&
-                            System.currentTimeMillis() - lastDownloadSnapshot < 10_000L
-                        if (rxActive) {
-                            Log.d(TAG, "Tunnel active — skipping WiFi upgrade")
-                            return@launch
-                        }
-                        Log.d(TAG, "WiFi stable — upgrading: $session -> $network")
+                    val stillOnSameSession = sessionNetwork == capturedSession
+                    if (stillValid && stillOnSameSession) {
+                        // Always upgrade cellular→WiFi when WiFi is stable.
+                        // DO NOT guard on active traffic — that would permanently block the
+                        // upgrade because lastRxMs is refreshed every second by keepalives.
+                        Log.d(TAG, "WiFi stable — upgrading from cellular: $capturedSession -> $network")
                         targetNetwork = network
                         setUnderlyingNetworks(arrayOf(network))
                         AivpnJni.stopTunnel()
@@ -281,8 +293,6 @@ class AivpnService : VpnService() {
         }
     }
 
-    @Volatile private var lastDownloadSnapshot: Long = 0L
-
     // ──────────── Stop ────────────
 
     private fun stopVpn() {
@@ -303,6 +313,18 @@ class AivpnService : VpnService() {
         sessionNetwork = null
         try { vpnInterface?.close() } catch (_: Exception) {}
         vpnInterface = null
+    }
+
+    /**
+     * Called when Android revokes the VPN permission (e.g. another VPN app takes over).
+     * Default VpnService.onRevoke() calls stopSelf() which kills the service with no reconnect.
+     * We signal Rust to exit cleanly; the reconnect loop in serviceJob will then restart the
+     * tunnel automatically (unless manualDisconnect is true).
+     */
+    override fun onRevoke() {
+        Log.w(TAG, "onRevoke() — signalling Rust to exit, reconnect loop will restart")
+        AivpnJni.stopTunnel()
+        // Do NOT call super.onRevoke() — it calls stopSelf() which bypasses reconnect.
     }
 
     override fun onDestroy() {
@@ -335,12 +357,24 @@ class AivpnService : VpnService() {
                 }
             }
             // Scan allNetworks: activeNetwork may still point to the VPN interface briefly.
-            val best = cm.allNetworks.firstOrNull { net ->
-                val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            }
+            // Sort by preference: WiFi > Ethernet > Cellular.
+            // allNetworks order is NOT guaranteed — without sorting the first entry could be
+            // cellular even when WiFi is fully available, causing the app to use mobile data.
+            val best = cm.allNetworks
+                .filter { net ->
+                    val caps = cm.getNetworkCapabilities(net) ?: return@filter false
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                }
+                .maxByOrNull { net ->
+                    val caps = cm.getNetworkCapabilities(net) ?: return@maxByOrNull 0
+                    when {
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)     -> 2
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
+                        else -> 0 // CELLULAR — last resort
+                    }
+                }
             if (best != null) return best
             delay(300L)
         }

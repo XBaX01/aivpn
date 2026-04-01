@@ -97,7 +97,7 @@ pub async fn run_tunnel_android(
         send_seq = send_seq.wrapping_add(1);
         let mut obf_pub = keypair.public_key_bytes();
         obfuscate_eph_pub(&mut obf_pub, &server_key);
-        let pkt = build_packet(&keys, &mut send_counter, &inner, Some(&obf_pub));
+        let pkt = build_packet(&keys, &mut send_counter, &inner, Some(&obf_pub))?;
         udp.send(&pkt).await?;
     }
 
@@ -136,7 +136,7 @@ pub async fn run_tunnel_android(
                 if n == 0 { continue; }
                 let inner = build_inner(INNER_TYPE_DATA, send_seq, &tun_buf[..n]);
                 send_seq = send_seq.wrapping_add(1);
-                let pkt = build_packet(&keys, &mut send_counter, &inner, None);
+                let pkt = build_packet(&keys, &mut send_counter, &inner, None)?;
                 udp.send(&pkt).await?;
                 UPLOAD_BYTES.fetch_add(n as u64, Ordering::Relaxed);
             }
@@ -161,7 +161,7 @@ pub async fn run_tunnel_android(
                 }
                 let inner = build_inner(INNER_TYPE_CONTROL, send_seq, &[CTRL_KEEPALIVE]);
                 send_seq = send_seq.wrapping_add(1);
-                let pkt = build_packet(&keys, &mut send_counter, &inner, None);
+                let pkt = build_packet(&keys, &mut send_counter, &inner, None)?;
                 udp.send(&pkt).await?;
             }
         }
@@ -281,7 +281,7 @@ fn build_packet(
     counter: &mut u64,
     inner: &[u8],
     obf_eph_pub: Option<&[u8; 32]>,
-) -> Vec<u8> {
+) -> aivpn_common::error::Result<Vec<u8>> {
     use rand::RngCore;
     let pad_len: u16 = 8 + rand::thread_rng().next_u32() as u16 % 16;
     let mut plaintext = Vec::with_capacity(2 + inner.len() + pad_len as usize);
@@ -294,8 +294,7 @@ fn build_packet(
     *counter += 1;
     let nonce = counter_to_nonce(c);
     // encrypt_payload never fails with a valid 32-byte key.
-    let ciphertext = encrypt_payload(&keys.session_key, &nonce, &plaintext)
-        .expect("encrypt_payload");
+    let ciphertext = encrypt_payload(&keys.session_key, &nonce, &plaintext)?;
 
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let tag = generate_resonance_tag(&keys.tag_secret, c, tw);
@@ -308,7 +307,7 @@ fn build_packet(
         pkt.extend_from_slice(e);
     }
     pkt.extend_from_slice(&ciphertext);
-    pkt
+    Ok(pkt)
 }
 
 /// inner_header = type(u16 LE) | seq(u16 LE) — compatible with Kotlin's [type(u8), 0, seq_lo, seq_hi]

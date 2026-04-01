@@ -64,15 +64,15 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         None
     } else {
         let arr: JByteArray<'local> = unsafe { JByteArray::from_raw(psk_obj.as_raw()) };
-        env.convert_byte_array(&arr).ok().and_then(|b| {
-            if b.len() == 32 {
+        match env.convert_byte_array(&arr) {
+            Ok(b) if b.len() == 32 => {
                 let mut out = [0u8; 32];
                 out.copy_from_slice(&b);
                 Some(out)
-            } else {
-                None
             }
-        })
+            Ok(b) => return make_str(&mut env, &format!("psk must be 32 bytes, got {}", b.len())),
+            Err(e) => return make_str(&mut env, &format!("bad psk: {e}")),
+        }
     };
 
     // ── Get JavaVM for use inside the tokio runtime ──
