@@ -175,8 +175,9 @@ impl AivpnClient {
         info!("Routing traffic through AIVPN tunnel...");
 
         // Create channels for TUN <-> UDP forwarding (using Bytes for zero-copy)
-        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(100);
-        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(100);
+        // 1024-capacity prevents head-of-line drops at 100Mbit line rate
+        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(1024);
+        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(1024);
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
@@ -255,24 +256,22 @@ impl AivpnClient {
         let stats_bytes_sent = self.bytes_sent.clone();
         let stats_bytes_received = self.bytes_received.clone();
         let stats_task = tokio::spawn(async move {
-            // Write initial stats to both locations
-            let stats = "sent:0,received:0";
-            let _ = std::fs::write("/var/run/aivpn/traffic.stats", stats);
-            let _ = std::fs::write("/tmp/aivpn-traffic.stats", stats);
+            // Write initial stats to both locations (async to avoid blocking tokio thread)
+            let _ = tokio::fs::write("/var/run/aivpn/traffic.stats", "sent:0,received:0").await;
+            let _ = tokio::fs::write("/tmp/aivpn-traffic.stats", "sent:0,received:0").await;
             info!("Initial stats written");
             
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let sent = stats_bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
-                let received = stats_bytes_received.load(std::sync::atomic::Ordering::Relaxed);
-                let stats = format!("sent:{},received:{}", sent, received);
-                let _ = std::fs::write("/var/run/aivpn/traffic.stats", &stats);
-                let _ = std::fs::write("/tmp/aivpn-traffic.stats", &stats);
-                
                 if stats_shutdown.load(Ordering::SeqCst) {
                     break;
                 }
+                let sent = stats_bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+                let received = stats_bytes_received.load(std::sync::atomic::Ordering::Relaxed);
+                let stats = format!("sent:{},received:{}", sent, received);
+                let _ = tokio::fs::write("/var/run/aivpn/traffic.stats", &stats).await;
+                let _ = tokio::fs::write("/tmp/aivpn-traffic.stats", &stats).await;
             }
         });
 
@@ -421,19 +420,28 @@ impl AivpnClient {
             crypto::current_timestamp_ms(),
             aivpn_common::crypto::DEFAULT_WINDOW_MS,
         );
-        // Check current and adjacent time windows for clock skew tolerance
+        // Fast path: check exact counter with current time window (O(1) common case)
         let mut valid_counter = None;
-        for window_offset in [0i64, -1, 1] {
-            let tw = (time_window as i64 + window_offset) as u64;
-            // Try a range of counters the server might be using
-            for c in self.recv_counter..self.recv_counter + 256 {
-                let expected = crypto::generate_resonance_tag(&keys.tag_secret, c, tw);
-                if bool::from(expected.ct_eq(&tag)) {
-                    valid_counter = Some(c);
-                    break;
+        {
+            let expected = crypto::generate_resonance_tag(&keys.tag_secret, self.recv_counter, time_window);
+            if bool::from(expected.ct_eq(&tag)) {
+                valid_counter = Some(self.recv_counter);
+            }
+        }
+        // Fallback: search small window with ±1 time windows for clock skew / packet loss
+        // Max 64 packets loss tolerance; 3 windows × 64 = 192 ops worst-case vs old 768
+        if valid_counter.is_none() {
+            let search_end = self.recv_counter.saturating_add(64);
+            'outer: for window_offset in [0i64, -1, 1] {
+                let tw = (time_window as i64 + window_offset) as u64;
+                for c in self.recv_counter..search_end {
+                    let expected = crypto::generate_resonance_tag(&keys.tag_secret, c, tw);
+                    if bool::from(expected.ct_eq(&tag)) {
+                        valid_counter = Some(c);
+                        break 'outer;
+                    }
                 }
             }
-            if valid_counter.is_some() { break; }
         }
         let counter = valid_counter.ok_or(Error::InvalidPacket("Invalid resonance tag"))?;
 
