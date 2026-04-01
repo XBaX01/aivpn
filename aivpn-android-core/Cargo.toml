@@ -1,0 +1,25 @@
+[package]
+name = "aivpn-android-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Produces a C-compatible shared library (.so) loaded by System.loadLibrary("aivpn_core").
+[lib]
+name = "aivpn_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+aivpn-common = { path = "../aivpn-common" }
+
+jni       = "0.21"
+libc      = "0.2"
+tokio     = { version = "1.35", features = ["rt", "net", "time", "io-util", "macros"] }
+rand      = "0.8"
+log       = "0.4"
+android_logger = "0.14"
+
+[profile.release]
+opt-level = "s"    # binary size matters on mobile
+lto       = "thin"
+strip     = true

@@ -41,6 +41,13 @@ android {
         viewBinding = true
     }
 
+    // Rust .so files produced by build-rust-android.sh
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
     // ABI splits — smaller APKs per architecture
     splits {
         abi {

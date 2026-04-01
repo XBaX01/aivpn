@@ -3,6 +3,7 @@ members = [
     "aivpn-common",
     "aivpn-client",
     "aivpn-server",
+    "aivpn-android-core",
 ]
 resolver = "2"
 
