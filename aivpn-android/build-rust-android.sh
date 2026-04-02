@@ -17,6 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CRATE_DIR="${REPO_ROOT}/aivpn-android-core"
 JNI_LIBS_DIR="${SCRIPT_DIR}/app/src/main/jniLibs"
+RELEASES_DIR="${REPO_ROOT}/releases"
+APK_DST="${RELEASES_DIR}/aivpn-client.apk"
 
 BUILD_TYPE="${1:-debug}"
 
@@ -71,8 +73,8 @@ for entry in "${TARGETS[@]}"; do
         cargo ndk \
             -t "${ABI}" \
             -o "${JNI_LIBS_DIR}" \
-            ${RELEASE_FLAG} \
-            -- build -p aivpn-android-core
+            -- build -p aivpn-android-core \
+            ${RELEASE_FLAG}
     )
 
     echo "    Written to ${JNI_LIBS_DIR}/${ABI}/libaivpn_core.so"
@@ -81,3 +83,60 @@ done
 echo ""
 echo "==> Done.  .so files in ${JNI_LIBS_DIR}:"
 find "${JNI_LIBS_DIR}" -name "libaivpn_core.so" -exec ls -lh {} \;
+
+echo ""
+echo "==> Building Android APK and publishing to releases/..."
+mkdir -p "${RELEASES_DIR}"
+
+if [[ ! -x "${SCRIPT_DIR}/gradlew" ]]; then
+    chmod +x "${SCRIPT_DIR}/gradlew" || true
+fi
+
+if [[ "${BUILD_TYPE}" == "release" ]]; then
+    (
+        cd "${SCRIPT_DIR}"
+        ./gradlew app:assembleRelease
+    )
+
+    RELEASE_APK_SIGNED="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release.apk"
+    RELEASE_APK_UNSIGNED="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release-unsigned.apk"
+
+    if [[ -f "${RELEASE_APK_SIGNED}" ]]; then
+        cp -f "${RELEASE_APK_SIGNED}" "${APK_DST}"
+        echo "  Copied signed release APK -> ${APK_DST}"
+    elif [[ -f "${RELEASE_APK_UNSIGNED}" ]]; then
+        echo "  WARNING: release APK is unsigned and may be rejected as corrupted by Android installer."
+        echo "  Building signed debug APK as installable fallback..."
+        (
+            cd "${SCRIPT_DIR}"
+            ./gradlew app:assembleDebug
+        )
+        DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
+        if [[ -f "${DEBUG_APK}" ]]; then
+            cp -f "${DEBUG_APK}" "${APK_DST}"
+            echo "  Copied debug APK fallback -> ${APK_DST}"
+        else
+            echo "ERROR: debug fallback APK not found: ${DEBUG_APK}"
+            exit 1
+        fi
+    else
+        echo "ERROR: release APK not found in expected output paths."
+        exit 1
+    fi
+else
+    (
+        cd "${SCRIPT_DIR}"
+        ./gradlew app:assembleDebug
+    )
+    DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
+    if [[ -f "${DEBUG_APK}" ]]; then
+        cp -f "${DEBUG_APK}" "${APK_DST}"
+        echo "  Copied debug APK -> ${APK_DST}"
+    else
+        echo "ERROR: debug APK not found: ${DEBUG_APK}"
+        exit 1
+    fi
+fi
+
+echo "==> Final artifact: ${APK_DST}"
+ls -lh "${APK_DST}"

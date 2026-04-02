@@ -8,7 +8,6 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jni::objects::GlobalRef;
@@ -17,20 +16,18 @@ use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
 use tokio::time;
 
+use aivpn_common::client_wire::{
+    build_inner_packet, build_zero_mdh_packet, decode_packet_with_mdh_len,
+    obfuscate_client_eph_pub, process_server_hello_with_mdh_len, RecvWindow, DEFAULT_ZERO_MDH,
+};
 use aivpn_common::crypto::{
-    current_timestamp_ms, compute_time_window, decrypt_payload, derive_session_keys,
-    encrypt_payload, generate_resonance_tag, obfuscate_eph_pub, KeyPair, SessionKeys,
-    DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
+    derive_session_keys, KeyPair,
 };
 use aivpn_common::error::{Error, Result};
+use aivpn_common::protocol::{ControlPayload, InnerType};
 
 // ──────────── Constants ────────────
 
-const MDH_SIZE: usize = 4; // Mask-Dependent Header — always 4 zero bytes in our protocol
-const INNER_TYPE_DATA: u16 = 0x0001;
-const INNER_TYPE_CONTROL: u16 = 0x0002;
-const CTRL_KEEPALIVE: u8 = 0x03;
-const CTRL_SERVER_HELLO: u8 = 0x09;
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
@@ -93,11 +90,11 @@ pub async fn run_tunnel_android(
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
     {
-        let inner = build_inner(INNER_TYPE_CONTROL, send_seq, &[CTRL_KEEPALIVE]);
+        let keepalive = ControlPayload::Keepalive.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
         send_seq = send_seq.wrapping_add(1);
-        let mut obf_pub = keypair.public_key_bytes();
-        obfuscate_eph_pub(&mut obf_pub, &server_key);
-        let pkt = build_packet(&keys, &mut send_counter, &inner, Some(&obf_pub))?;
+        let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+        let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub))?;
         udp.send(&pkt).await?;
     }
 
@@ -108,7 +105,14 @@ pub async fn run_tunnel_android(
         .map_err(|_| Error::Session("Handshake timeout (10 s)".into()))??;
 
     let mut recv_win = RecvWindow::new();
-    process_server_hello(&recv_buf[..n], &mut keys, &keypair, &mut recv_win, &mut send_counter)?;
+    process_server_hello_with_mdh_len(
+        &recv_buf[..n],
+        &mut keys,
+        &keypair,
+        &mut recv_win,
+        &mut send_counter,
+        DEFAULT_ZERO_MDH.len(),
+    )?;
     log::info!("aivpn: handshake + PFS ratchet complete");
 
     // ── 6. Main forwarding loop ──
@@ -138,9 +142,9 @@ pub async fn run_tunnel_android(
                 // Android routes ::/0 into TUN to prevent IPv6 leaks; we must discard
                 // those packets here because the server only speaks IPv4.
                 if tun_buf[0] >> 4 != 4 { continue; }
-                let inner = build_inner(INNER_TYPE_DATA, send_seq, &tun_buf[..n]);
+                let inner = build_inner_packet(InnerType::Data, send_seq, &tun_buf[..n]);
                 send_seq = send_seq.wrapping_add(1);
-                let pkt = build_packet(&keys, &mut send_counter, &inner, None)?;
+                let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, None)?;
                 udp.send(&pkt).await?;
                 UPLOAD_BYTES.fetch_add(n as u64, Ordering::Relaxed);
             }
@@ -149,9 +153,16 @@ pub async fn run_tunnel_android(
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
                 last_rx_ms = monotonic_ms();
-                if let Some(ip) = decrypt_packet(&udp_buf[..n], &keys, &mut recv_win) {
-                    tun_write(&tun, &ip)?;
-                    DOWNLOAD_BYTES.fetch_add(ip.len() as u64, Ordering::Relaxed);
+                if let Ok(decoded) = decode_packet_with_mdh_len(
+                    &udp_buf[..n],
+                    &keys,
+                    &mut recv_win,
+                    DEFAULT_ZERO_MDH.len(),
+                ) {
+                    if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
+                        tun_write(&tun, &decoded.payload)?;
+                        DOWNLOAD_BYTES.fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -163,9 +174,10 @@ pub async fn run_tunnel_android(
                         format!("No RX for {}ms — reconnecting", silence)
                     ));
                 }
-                let inner = build_inner(INNER_TYPE_CONTROL, send_seq, &[CTRL_KEEPALIVE]);
+                let keepalive = ControlPayload::Keepalive.encode()?;
+                let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
                 send_seq = send_seq.wrapping_add(1);
-                let pkt = build_packet(&keys, &mut send_counter, &inner, None)?;
+                let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, None)?;
                 udp.send(&pkt).await?;
             }
         }
@@ -227,6 +239,15 @@ fn create_protected_udp_socket(
 
 fn to_sockaddr_in(addr: &SocketAddrV4) -> libc::sockaddr_in {
     libc::sockaddr_in {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: addr.port().to_be(),
         sin_addr: libc::in_addr {
@@ -275,228 +296,6 @@ fn tun_write(tun: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
     } else {
         Ok(())
     }
-}
-
-// ──────────── Packet construction ────────────
-
-/// TAG(8) | MDH(4 zeros) | [obf_eph_pub(32)] | encrypt(pad_len(2) | inner | padding)
-fn build_packet(
-    keys: &SessionKeys,
-    counter: &mut u64,
-    inner: &[u8],
-    obf_eph_pub: Option<&[u8; 32]>,
-) -> aivpn_common::error::Result<Vec<u8>> {
-    use rand::RngCore;
-    let pad_len: u16 = 8 + rand::thread_rng().next_u32() as u16 % 16;
-    let mut plaintext = Vec::with_capacity(2 + inner.len() + pad_len as usize);
-    plaintext.extend_from_slice(&pad_len.to_le_bytes());
-    plaintext.extend_from_slice(inner);
-    plaintext.resize(2 + inner.len() + pad_len as usize, 0);
-    rand::thread_rng().fill_bytes(&mut plaintext[2 + inner.len()..]);
-
-    let c = *counter;
-    *counter += 1;
-    let nonce = counter_to_nonce(c);
-    // encrypt_payload never fails with a valid 32-byte key.
-    let ciphertext = encrypt_payload(&keys.session_key, &nonce, &plaintext)?;
-
-    let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
-    let tag = generate_resonance_tag(&keys.tag_secret, c, tw);
-
-    let eph_len = if obf_eph_pub.is_some() { 32 } else { 0 };
-    let mut pkt = Vec::with_capacity(TAG_SIZE + MDH_SIZE + eph_len + ciphertext.len());
-    pkt.extend_from_slice(&tag);
-    pkt.extend_from_slice(&[0u8; MDH_SIZE]);
-    if let Some(e) = obf_eph_pub {
-        pkt.extend_from_slice(e);
-    }
-    pkt.extend_from_slice(&ciphertext);
-    Ok(pkt)
-}
-
-/// inner_header = type(u16 LE) | seq(u16 LE) — compatible with Kotlin's [type(u8), 0, seq_lo, seq_hi]
-fn build_inner(inner_type: u16, seq: u16, payload: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(4 + payload.len());
-    v.extend_from_slice(&inner_type.to_le_bytes());
-    v.extend_from_slice(&seq.to_le_bytes());
-    v.extend_from_slice(payload);
-    v
-}
-
-// ──────────── Packet decryption ────────────
-
-fn decrypt_packet(
-    packet: &[u8],
-    keys: &SessionKeys,
-    win: &mut RecvWindow,
-) -> Option<Vec<u8>> {
-    if packet.len() < TAG_SIZE + MDH_SIZE + 16 {
-        return None;
-    }
-    let tag: [u8; TAG_SIZE] = packet[..TAG_SIZE].try_into().ok()?;
-    let counter = win.find_counter(&tag, keys)?;
-
-    let nonce = counter_to_nonce(counter);
-    let ciphertext = &packet[TAG_SIZE + MDH_SIZE..];
-    let pt = decrypt_payload(&keys.session_key, &nonce, ciphertext).ok()?;
-
-    win.mark(counter);
-
-    if pt.len() < 2 {
-        return None;
-    }
-    let pad_len = u16::from_le_bytes([pt[0], pt[1]]) as usize;
-    let end = pt.len().checked_sub(pad_len)?;
-    let inner = &pt[2..end];
-
-    if inner.len() < 4 {
-        return None;
-    }
-    let inner_type = u16::from_le_bytes([inner[0], inner[1]]);
-    let body = &inner[4..];
-
-    // Return IP payload only for Data packets; Control/Keepalive ACKs return None
-    // but their counter still advanced last_rx_ms in the caller.
-    if inner_type == INNER_TYPE_DATA && !body.is_empty() {
-        Some(body.to_vec())
-    } else {
-        None
-    }
-}
-
-// ──────────── ServerHello / PFS ratchet ────────────
-
-fn process_server_hello(
-    packet: &[u8],
-    keys: &mut SessionKeys,
-    keypair: &KeyPair,
-    win: &mut RecvWindow,
-    send_counter: &mut u64,
-) -> Result<()> {
-    if packet.len() < TAG_SIZE + MDH_SIZE + 16 {
-        return Err(Error::InvalidPacket("ServerHello too short"));
-    }
-    let tag: [u8; TAG_SIZE] = packet[..TAG_SIZE].try_into().unwrap();
-    let counter = win
-        .find_counter(&tag, keys)
-        .ok_or(Error::InvalidPacket("ServerHello tag not found"))?;
-
-    let nonce = counter_to_nonce(counter);
-    let ciphertext = &packet[TAG_SIZE + MDH_SIZE..];
-    let pt = decrypt_payload(&keys.session_key, &nonce, ciphertext)
-        .map_err(|_| Error::InvalidPacket("ServerHello decryption failed"))?;
-    win.mark(counter);
-
-    if pt.len() < 2 {
-        return Err(Error::InvalidPacket("ServerHello plaintext too short"));
-    }
-    let pad_len = u16::from_le_bytes([pt[0], pt[1]]) as usize;
-    let inner = &pt[2..pt.len().saturating_sub(pad_len)];
-
-    if inner.len() < 4 {
-        return Err(Error::InvalidPacket("ServerHello inner too short"));
-    }
-    let body = &inner[4..]; // skip 4-byte inner header
-    if body.is_empty() || body[0] != CTRL_SERVER_HELLO {
-        return Err(Error::InvalidPacket("Expected ServerHello subtype 0x09"));
-    }
-    if body.len() < 33 {
-        return Err(Error::InvalidPacket("ServerHello missing eph_pub"));
-    }
-    let mut server_eph: [u8; 32] = [0; 32];
-    server_eph.copy_from_slice(&body[1..33]);
-
-    // PFS ratchet: DH2 = client_eph * server_eph, then re-derive keys with current session_key as PSK
-    let dh2 = keypair.compute_shared(&server_eph)?;
-    let old_session_key = keys.session_key;
-    *keys = derive_session_keys(&dh2, Some(&old_session_key), &keypair.public_key_bytes());
-
-    // Both sides reset counters after ratchet (matches Kotlin processServerHello).
-    *send_counter = 0;
-    win.reset();
-
-    Ok(())
-}
-
-// ──────────── Sliding-window anti-replay ────────────
-
-struct RecvWindow {
-    highest: i64, // -1 = nothing received
-    bitmap: u64,
-}
-
-impl RecvWindow {
-    fn new() -> Self {
-        Self { highest: -1, bitmap: 0 }
-    }
-
-    fn reset(&mut self) {
-        self.highest = -1;
-        self.bitmap = 0;
-    }
-
-    fn is_new(&self, c: u64) -> bool {
-        if self.highest < 0 {
-            return true;
-        }
-        let h = self.highest as u64;
-        if c > h {
-            return true;
-        }
-        let diff = h - c;
-        if diff >= 64 {
-            return false;
-        }
-        (self.bitmap >> diff) & 1 == 0
-    }
-
-    fn mark(&mut self, c: u64) {
-        if self.highest < 0 || c > self.highest as u64 {
-            let shift = if self.highest < 0 { 64u64 } else { c - self.highest as u64 };
-            self.bitmap = if shift >= 64 { 1 } else { (self.bitmap << shift) | 1 };
-            self.highest = c as i64;
-        } else {
-            let diff = (self.highest as u64 - c) as usize;
-            if diff < 64 {
-                self.bitmap |= 1u64 << diff;
-            }
-        }
-    }
-
-    /// Search window for a counter whose resonance tag matches.
-    /// Matches Kotlin's counter search range: [max(0, highest-63), max(256, highest+257))
-    fn find_counter(&self, tag: &[u8; TAG_SIZE], keys: &SessionKeys) -> Option<u64> {
-        let now = current_timestamp_ms();
-        let base_tw = compute_time_window(now, DEFAULT_WINDOW_MS);
-        let start = if self.highest < 0 { 0 } else { (self.highest as u64).saturating_sub(63) };
-        let end = if self.highest < 0 {
-            256
-        } else {
-            std::cmp::max(256, self.highest as u64 + 257)
-        };
-
-        for tw_off in [0i64, -1, 1] {
-            let tw = (base_tw as i64 + tw_off) as u64;
-            for c in start..end {
-                if !self.is_new(c) {
-                    continue;
-                }
-                let expected = generate_resonance_tag(&keys.tag_secret, c, tw);
-                if tag == &expected {
-                    return Some(c);
-                }
-            }
-        }
-        None
-    }
-}
-
-// ──────────── Helpers ────────────
-
-fn counter_to_nonce(counter: u64) -> [u8; NONCE_SIZE] {
-    let mut nonce = [0u8; NONCE_SIZE];
-    nonce[..8].copy_from_slice(&counter.to_le_bytes());
-    nonce
 }
 
 fn monotonic_ms() -> u64 {

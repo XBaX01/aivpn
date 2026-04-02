@@ -4,11 +4,13 @@
 //! for AIVPN client and server implementations.
 
 pub mod crypto;
+pub mod client_wire;
 pub mod protocol;
 pub mod mask;
 pub mod error;
 
 pub use crypto::*;
+pub use client_wire::*;
 pub use protocol::*;
 pub use mask::*;
 pub use error::*;

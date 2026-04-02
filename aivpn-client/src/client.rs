@@ -17,14 +17,16 @@ use tracing::{info, debug, error, warn};
 use bytes::Bytes;
 
 use aivpn_common::crypto::{
-    self, SessionKeys, KeyPair, TAG_SIZE, NONCE_SIZE, X25519_PUBLIC_KEY_SIZE,
+    self, SessionKeys, KeyPair, X25519_PUBLIC_KEY_SIZE,
+};
+use aivpn_common::client_wire::{
+    build_inner_packet, decode_packet_with_mdh_len, obfuscate_client_eph_pub, RecvWindow,
 };
 use aivpn_common::protocol::{
-    InnerType, InnerHeader, ControlPayload, ControlSubtype, MAX_PACKET_SIZE, AckPacket,
+    InnerType, ControlPayload, MAX_PACKET_SIZE,
 };
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
-use subtle::ConstantTimeEq;
 
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
@@ -64,7 +66,7 @@ pub struct AivpnClient {
     counter: u64,
     send_seq: u32,
     recv_seq: u32,
-    recv_counter: u64,
+    recv_window: RecvWindow,
     // Traffic counters
     bytes_sent: Arc<std::sync::atomic::AtomicU64>,
     bytes_received: Arc<std::sync::atomic::AtomicU64>,
@@ -92,7 +94,7 @@ impl AivpnClient {
             counter: 0,
             send_seq: 0,
             recv_seq: 0,
-            recv_counter: 0,
+            recv_window: RecvWindow::new(),
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
@@ -169,7 +171,7 @@ impl AivpnClient {
         
         // Send shutdown message if connected
         if self.state == ClientState::Connected {
-            if let Some(keys) = &self.session_keys {
+            if self.session_keys.is_some() {
                 let shutdown = ControlPayload::Shutdown { reason: 0 };
                 let _ = self.send_control(&shutdown).await;
             }
@@ -373,25 +375,16 @@ impl AivpnClient {
             .ok_or(Error::Session("No mimicry engine".into()))?;
         
         // Build inner header
-        let inner_header = InnerHeader {
-            inner_type: InnerType::Data,
-            seq_num: self.send_seq as u16,
-        };
+        let seq_num = self.send_seq as u16;
         self.send_seq = self.send_seq.wrapping_add(1);
-        
-        // Encode inner payload
-        let mut inner_payload = inner_header.encode().to_vec();
-        inner_payload.extend_from_slice(packet);
+        let inner_payload = build_inner_packet(InnerType::Data, seq_num, packet);
 
         // Skip timing for MVP — timing causes blocking that prevents recv
         // mimicry.apply_timing().await;
 
         // Build and send packet
         let eph_pub = if self.send_seq == 1 {
-            // Obfuscate eph_pub with server's static public key (HIGH-9)
-            let mut obf = self.keypair.public_key_bytes();
-            crypto::obfuscate_eph_pub(&mut obf, &self.config.server_public_key);
-            Some(obf)
+            Some(obfuscate_client_eph_pub(&self.keypair, &self.config.server_public_key))
         } else {
             None
         };
@@ -424,91 +417,25 @@ impl AivpnClient {
         let mimicry = self.mimicry_engine.as_ref()
             .ok_or(Error::Session("No mimicry engine".into()))?;
 
-        // 1. Minimum size check
-        if packet.len() < TAG_SIZE + 2 {
-            return Err(Error::InvalidPacket("Packet too short"));
-        }
-
-        // 2. Extract resonance tag (first 8 bytes)
-        let mut tag = [0u8; TAG_SIZE];
-        tag.copy_from_slice(&packet[0..TAG_SIZE]);
-
-        // 3. Validate tag against expected window (server uses our tag_secret)
-        let time_window = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            aivpn_common::crypto::DEFAULT_WINDOW_MS,
-        );
-        // Fast path: check exact counter with current time window (O(1) common case)
-        let mut valid_counter = None;
-        {
-            let expected = crypto::generate_resonance_tag(&keys.tag_secret, self.recv_counter, time_window);
-            if bool::from(expected.ct_eq(&tag)) {
-                valid_counter = Some(self.recv_counter);
-            }
-        }
-        // Fallback: search small window with ±1 time windows for clock skew / packet loss
-        // Max 64 packets loss tolerance; 3 windows × 64 = 192 ops worst-case vs old 768
-        if valid_counter.is_none() {
-            let search_end = self.recv_counter.saturating_add(64);
-            'outer: for window_offset in [0i64, -1, 1] {
-                let tw = (time_window as i64 + window_offset) as u64;
-                for c in self.recv_counter..search_end {
-                    let expected = crypto::generate_resonance_tag(&keys.tag_secret, c, tw);
-                    if bool::from(expected.ct_eq(&tag)) {
-                        valid_counter = Some(c);
-                        break 'outer;
-                    }
-                }
-            }
-        }
-        let counter = valid_counter.ok_or(Error::InvalidPacket("Invalid resonance tag"))?;
-
-        // 4. Parse MDH (skip it — we know MDH length from mask)
         let mdh_len = mimicry.mask().header_template.len();
-        if packet.len() <= TAG_SIZE + mdh_len {
-            return Err(Error::InvalidPacket("Packet too short for MDH"));
-        }
+        let decoded = decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len)?;
+        let inner_header = decoded.header;
+        let ip_payload = decoded.payload;
 
-        // 5. Decrypt full ciphertext (pad_len is inside encrypted area)
-        let encrypted_payload = &packet[TAG_SIZE + mdh_len..];
-        let mut nonce = [0u8; aivpn_common::crypto::NONCE_SIZE];
-        nonce[0..8].copy_from_slice(&counter.to_le_bytes());
-        let padded_plaintext = crypto::decrypt_payload(&keys.session_key, &nonce, encrypted_payload)?;
-
-        // 6. Extract pad_len from inside decrypted data and strip padding
-        if padded_plaintext.len() < 6 {
-            return Err(Error::InvalidPacket("Decrypted payload too short"));
-        }
-        let pad_len = u16::from_le_bytes([padded_plaintext[0], padded_plaintext[1]]) as usize;
-        if 2 + pad_len > padded_plaintext.len() {
-            return Err(Error::InvalidPacket("Invalid padding length"));
-        }
-        let plaintext = &padded_plaintext[2..padded_plaintext.len() - pad_len];
-
-        // 7. Parse inner header
-        if plaintext.len() < 4 {
-            return Err(Error::InvalidPacket("Inner payload too short"));
-        }
-        let inner_header = InnerHeader::decode(plaintext)?;
-        let ip_payload = &plaintext[4..];
-
-        // 8. Update recv counter
-        self.recv_counter = counter + 1;
-
-        // 9. Route based on inner type
+        // Route based on inner type
         match inner_header.inner_type {
             InnerType::Data => {
                 // Validate IP packet before writing to TUN (HIGH-10)
                 if ip_payload.is_empty() || (ip_payload[0] >> 4 != 4 && ip_payload[0] >> 4 != 6) {
                     return Err(Error::InvalidPacket("Invalid IP version in payload"));
                 }
-                self.tunnel.write_packet_async(ip_payload).await?;
+                self.tunnel.write_packet_async(&ip_payload).await?;
                 // Update traffic counter
                 self.bytes_received.fetch_add(ip_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 debug!("Received {} bytes from server, wrote to TUN", ip_payload.len());
             }
             InnerType::Control => {
-                let control = ControlPayload::decode(ip_payload)?;
+                let control = ControlPayload::decode(&ip_payload)?;
                 self.handle_server_control(control).await?;
             }
             _ => {
@@ -562,7 +489,7 @@ impl AivpnClient {
                 // Switch to ratcheted keys — old keys dropped, PFS established
                 self.session_keys = Some(ratcheted);
                 self.counter = 0;
-                self.recv_counter = 0;
+                self.recv_window.reset();
                 info!("PFS ratchet complete — forward secrecy established");
             }
             ControlPayload::Keepalive => {
@@ -591,18 +518,12 @@ impl AivpnClient {
         // Build keepalive control as init payload
         let keepalive = ControlPayload::Keepalive;
         let encoded = keepalive.encode()?;
-        let inner_header = InnerHeader {
-            inner_type: InnerType::Control,
-            seq_num: self.send_seq as u16,
-        };
+        let seq_num = self.send_seq as u16;
         self.send_seq = self.send_seq.wrapping_add(1);
-        
-        let mut inner_payload = inner_header.encode().to_vec();
-        inner_payload.extend_from_slice(&encoded);
+        let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
         
         // Include eph_pub (obfuscated) in the init packet
-        let mut obf = self.keypair.public_key_bytes();
-        crypto::obfuscate_eph_pub(&mut obf, &self.config.server_public_key);
+        let obf = obfuscate_client_eph_pub(&self.keypair, &self.config.server_public_key);
         
         let aivpn_packet = mimicry.build_packet(
             &inner_payload,
@@ -629,15 +550,9 @@ impl AivpnClient {
         // Encode control message
         let encoded = payload.encode()?;
         
-        // Build inner header
-        let inner_header = InnerHeader {
-            inner_type: InnerType::Control,
-            seq_num: self.send_seq as u16,
-        };
+        let seq_num = self.send_seq as u16;
         self.send_seq = self.send_seq.wrapping_add(1);
-        
-        let mut inner_payload = inner_header.encode().to_vec();
-        inner_payload.extend_from_slice(&encoded);
+        let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
         
         // Build packet (no timing for control messages)
         let aivpn_packet = mimicry.build_packet(
