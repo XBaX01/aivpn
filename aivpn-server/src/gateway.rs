@@ -867,19 +867,39 @@ impl Gateway {
         }
         let plaintext = &padded_plaintext[2..padded_plaintext.len() - pad_len];
         
-        // Update session state
-        let session_id = {
+        // Update session state. Avoid expensive O(window) tag-map rebuild on every packet.
+        let mut client_db_flush: Option<(String, u64)> = None;
+        let (session_id, refresh_tags) = {
             let mut sess = session.lock();
             sess.counter = counter;
             sess.mark_tag_received(counter);
             sess.last_seen = std::time::Instant::now();
-            sess.update_tag_window();
+
+            // Refresh precomputed tag window only when we've moved far enough.
+            // Window size is 256; refreshing every 64 packets keeps enough headroom
+            // while reducing CPU spent in HashMap/tag_map maintenance.
+            let refresh_tags = counter.saturating_sub(sess.tag_window_base) >= 64;
+            if refresh_tags {
+                sess.update_tag_window();
+            }
+
+            // Batch client stats updates to avoid taking a global write lock per packet.
+            sess.pending_bytes_in = sess.pending_bytes_in.saturating_add(packet_data.len() as u64);
+            if sess.pending_bytes_in >= 16 * 1024 {
+                if let Some(cid) = sess.client_id.clone() {
+                    client_db_flush = Some((cid, sess.pending_bytes_in));
+                }
+                sess.pending_bytes_in = 0;
+            }
+
             sess.update_fsm();
-            sess.session_id
+            (sess.session_id, refresh_tags)
         };
         
-        // Refresh tag_map after window update (prevents stale tags after 256 packets)
-        self.session_manager.refresh_session_tags(&session_id);
+        // Refresh tag_map only when the precomputed window moves.
+        if refresh_tags {
+            self.session_manager.refresh_session_tags(&session_id);
+        }
         
         // Record traffic stats for neural resonance (Patent 1)
         if self.config.enable_neural {
@@ -888,18 +908,19 @@ impl Gateway {
             let entropy = Self::compute_entropy(encrypted_payload);
             // IAT is approximated by the last_seen timing
             let iat_ms = 0.0; // Will be calculated from session timestamps in check loop
-            self.neural_module.lock().record_traffic(
-                session_id, packet_size, iat_ms, entropy,
-            );
+            // Neural model update is expensive under lock. Sampling every 16th packet
+            // preserves trends while reducing lock contention in the receive hot path.
+            if counter & 0x0f == 0 {
+                self.neural_module.lock().record_traffic(
+                    session_id, packet_size, iat_ms, entropy,
+                );
+            }
             self.metrics.record_packet_received(packet_data.len());
         }
         
-        // Record traffic in client DB for statistics
-        if let Some(ref db) = self.client_db {
-            let client_id = session.lock().client_id.clone();
-            if let Some(cid) = client_id {
-                db.record_traffic(&cid, packet_data.len() as u64, 0);
-            }
+        // Record traffic in client DB in batches (see pending_bytes_in above).
+        if let (Some(ref db), Some((cid, bytes_in))) = (&self.client_db, client_db_flush) {
+            db.record_traffic(&cid, bytes_in, 0);
         }
         
         // Process inner payload (skip for new sessions — ServerHello is already the response,

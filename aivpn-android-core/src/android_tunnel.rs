@@ -7,6 +7,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +15,7 @@ use jni::objects::GlobalRef;
 use jni::JavaVM;
 use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio::time;
 
 use aivpn_common::client_wire::{
@@ -25,6 +27,7 @@ use aivpn_common::crypto::{
 };
 use aivpn_common::error::{Error, Result};
 use aivpn_common::protocol::{ControlPayload, InnerType};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
 
 // ──────────── Constants ────────────
 
@@ -84,7 +87,7 @@ pub async fn run_tunnel_android(
     // Convert the raw UDP fd to a tokio UdpSocket (already connected to server).
     let std_udp = unsafe { std::net::UdpSocket::from_raw_fd(raw_udp_fd) };
     std_udp.set_nonblocking(true)?;
-    let udp = UdpSocket::from_std(std_udp)?;
+    let udp = Arc::new(UdpSocket::from_std(std_udp)?);
 
     // ── 4. Send init handshake (Control/Keepalive + obfuscated eph_pub) ──
     let mut send_counter: u64 = 0;
@@ -116,14 +119,75 @@ pub async fn run_tunnel_android(
     log::info!("aivpn: handshake + PFS ratchet complete");
 
     // ── 6. Main forwarding loop ──
-    let mut tun_buf = vec![0u8; BUF_SIZE];
     let mut udp_buf = vec![0u8; BUF_SIZE];
     let mut last_rx_ms = monotonic_ms();
+
+    // Split upload into a dedicated pipeline:
+    // TUN reader task -> channel -> UDP sender/encrypt task.
+    let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (err_tx, mut err_rx) = mpsc::channel::<String>(16);
+    let tun_err_tx = err_tx.clone();
+    let sender_err_tx = err_tx.clone();
+
+    let read_fd = unsafe { libc::dup(tun.as_raw_fd()) };
+    if read_fd < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let owned_tun_read = unsafe { OwnedFd::from_raw_fd(read_fd) };
+    let tun_read = AsyncFd::new(owned_tun_read)?;
+
+    let tun_reader_task = tokio::spawn(async move {
+        let mut tun_buf = vec![0u8; BUF_SIZE];
+        loop {
+            match tun_async_read(&tun_read, &mut tun_buf).await {
+                Ok(n) => {
+                    if n == 0 {
+                        continue;
+                    }
+                    if tun_buf[0] >> 4 != 4 {
+                        continue;
+                    }
+                    if tun_tx.send(tun_buf[..n].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tun_err_tx.send(format!("TUN read failed: {e}")).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let udp_tx = udp.clone();
+    let keys_tx = keys.clone();
+    let upload_sender_task = tokio::spawn(async move {
+        // Wrap ZeroMdhEncryptor with UPLOAD_BYTES tracking.
+        struct AndroidEncryptor(ZeroMdhEncryptor);
+        impl PacketEncryptor for AndroidEncryptor {
+            fn encrypt_data(&mut self, payload: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
+                self.0.encrypt_data(payload)
+            }
+            fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
+                self.0.encrypt_keepalive()
+            }
+            fn on_data_sent(&mut self, payload_len: usize) {
+                UPLOAD_BYTES.fetch_add(payload_len as u64, Ordering::Relaxed);
+            }
+        }
+
+        let mut enc = AndroidEncryptor(ZeroMdhEncryptor::new(keys_tx, send_counter, send_seq));
+        let config = UploadConfig {
+            keepalive_interval: KEEPALIVE_INTERVAL,
+            ..Default::default()
+        };
+
+        if let Err(e) = upload_pipeline::run_upload_loop(&mut tun_rx, &udp_tx, &mut enc, &config).await {
+            let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
+        }
+    });
     let rekey_sleep = time::sleep(REKEY_INTERVAL);
     tokio::pin!(rekey_sleep);
-    let mut ka_interval = time::interval(KEEPALIVE_INTERVAL);
-    ka_interval.tick().await; // discard immediate first tick
-
     loop {
         tokio::select! {
             biased;
@@ -131,22 +195,9 @@ pub async fn run_tunnel_android(
             // ── Rekey (triggers fresh reconnect in Kotlin) ──
             _ = &mut rekey_sleep => {
                 log::info!("aivpn: rekey interval — signalling reconnect");
+                tun_reader_task.abort();
+                upload_sender_task.abort();
                 return Ok(());
-            }
-
-            // ── TUN → UDP (outbound IP packets) ──
-            r = tun_async_read(&tun, &mut tun_buf) => {
-                let n = r?;
-                if n == 0 { continue; }
-                // Drop non-IPv4 packets (IPv6 version nibble = 6, first byte 0x60-0x6F).
-                // Android routes ::/0 into TUN to prevent IPv6 leaks; we must discard
-                // those packets here because the server only speaks IPv4.
-                if tun_buf[0] >> 4 != 4 { continue; }
-                let inner = build_inner_packet(InnerType::Data, send_seq, &tun_buf[..n]);
-                send_seq = send_seq.wrapping_add(1);
-                let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, None)?;
-                udp.send(&pkt).await?;
-                UPLOAD_BYTES.fetch_add(n as u64, Ordering::Relaxed);
             }
 
             // ── UDP → TUN (inbound from server) ──
@@ -166,19 +217,23 @@ pub async fn run_tunnel_android(
                 }
             }
 
-            // ── Keepalive + RX-silence check ──
-            _ = ka_interval.tick() => {
+            maybe_err = err_rx.recv() => {
+                if let Some(msg) = maybe_err {
+                    tun_reader_task.abort();
+                    upload_sender_task.abort();
+                    return Err(Error::Session(msg));
+                }
+            }
+
+            _ = time::sleep(Duration::from_secs(1)) => {
                 let silence = monotonic_ms().saturating_sub(last_rx_ms);
                 if silence > RX_SILENCE_MS {
+                    tun_reader_task.abort();
+                    upload_sender_task.abort();
                     return Err(Error::Session(
                         format!("No RX for {}ms — reconnecting", silence)
                     ));
                 }
-                let keepalive = ControlPayload::Keepalive.encode()?;
-                let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
-                send_seq = send_seq.wrapping_add(1);
-                let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, None)?;
-                udp.send(&pkt).await?;
             }
         }
     }
@@ -214,6 +269,26 @@ fn create_protected_udp_socket(
     if !protected {
         unsafe { libc::close(fd) };
         return Err(Error::Session("VpnService.protect() returned false".into()));
+    }
+
+    // Increase OS socket buffers to reduce drops/backpressure on high-throughput links.
+    // Ignore errors: kernels may cap/override values.
+    let sock_buf: libc::c_int = 4 * 1024 * 1024;
+    unsafe {
+        let _ = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &sock_buf as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&sock_buf) as libc::socklen_t,
+        );
+        let _ = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &sock_buf as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&sock_buf) as libc::socklen_t,
+        );
     }
 
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).

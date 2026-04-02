@@ -80,8 +80,12 @@ pub struct Session {
     
     /// Expected tags (counter -> tag)
     pub expected_tags: HashMap<u64, [u8; TAG_SIZE]>,
+    /// Counter value used as the base for the currently precomputed tag window.
+    pub tag_window_base: u64,
     /// Received tag bitmap (for anti-replay)
     pub received_bitmap: u256,
+    /// Accumulated inbound bytes to flush into client_db in batches.
+    pub pending_bytes_in: u64,
 
     // --- PFS Ratchet fields (CRIT-3) ---
     /// Server's ephemeral public key for this session
@@ -155,7 +159,9 @@ impl Session {
             recv_seq: 0,
             send_counter: 0,
             expected_tags: HashMap::with_capacity(TAG_WINDOW_SIZE),
+            tag_window_base: 0,
             received_bitmap: u256::default(),
+            pending_bytes_in: 0,
             server_eph_pub: None,
             server_hello_signature: None,
             ratcheted_keys: None,
@@ -187,6 +193,7 @@ impl Session {
         // Include adjacent time windows (tw-1, tw, tw+1) for clock skew
         // tolerance between client and server.
         self.expected_tags.clear();
+        self.tag_window_base = self.counter;
         for i in 0..TAG_WINDOW_SIZE {
             let counter_val = self.counter + i as u64;
             // Current window tag goes into expected_tags (used for counter lookup)
@@ -330,8 +337,10 @@ impl Session {
             self.keys = ratcheted_keys;
             self.counter = 0;
             self.send_counter = 0;
+            self.tag_window_base = self.counter;
             self.expected_tags = std::mem::take(&mut self.ratcheted_expected_tags);
             self.received_bitmap.clear();
+            self.pending_bytes_in = 0;
             self.is_ratcheted = true;
             self.server_eph_pub = None;
             self.server_hello_signature = None;

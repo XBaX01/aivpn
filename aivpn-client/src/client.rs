@@ -27,6 +27,7 @@ use aivpn_common::protocol::{
 };
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
@@ -194,9 +195,8 @@ impl AivpnClient {
         info!("Starting client main loop");
         info!("Routing traffic through AIVPN tunnel...");
 
-        // Create channels for TUN <-> UDP forwarding (using Bytes for zero-copy)
-        // 8192-capacity prevents head-of-line drops even under heavy DPI packet jitter
-        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(8192);
+        // Create channels for TUN -> upload pipeline and UDP -> main loop
+        let (tun_to_udp_tx, tun_to_udp_rx) = mpsc::channel::<Vec<u8>>(8192);
         let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(8192);
 
         // Take the TUN reader for the spawned task (no Mutex needed)
@@ -217,15 +217,14 @@ impl AivpnClient {
                             debug!("TUN read {} bytes", n);
 
                             #[cfg(target_os = "macos")]
-                            let payload = if n > 4 && buf[0] == 0 && buf[1] == 0 {
-                                // Strip 4-byte PI header
-                                Bytes::copy_from_slice(&buf[4..n])
+                            let payload: Vec<u8> = if n > 4 && buf[0] == 0 && buf[1] == 0 {
+                                buf[4..n].to_vec()
                             } else {
-                                Bytes::copy_from_slice(&buf[..n])
+                                buf[..n].to_vec()
                             };
 
                             #[cfg(not(target_os = "macos"))]
-                            let payload = Bytes::copy_from_slice(&buf[..n]);
+                            let payload: Vec<u8> = buf[..n].to_vec();
 
                             let _ = tun_to_udp_tx_clone.send(payload).await;
                         }
@@ -295,14 +294,38 @@ impl AivpnClient {
             }
         });
 
-        // Main forwarding loop
-        let mut keepalive_interval = tokio::time::interval(Duration::from_secs(15));
-        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // ── Spawn upload task using the shared pipeline ──
+        let upload_udp = self.udp_socket.as_ref().unwrap().clone();
+        let upload_keys = self.session_keys.clone()
+            .ok_or(Error::Session("No session keys".into()))?;
+        let upload_engine = self.mimicry_engine.take()
+            .ok_or(Error::Session("No mimicry engine".into()))?;
+        let upload_seq = self.send_seq as u16;
+        let upload_counter = self.counter;
+        let upload_bytes_sent = self.bytes_sent.clone();
+        let upload_bytes_sent = self.bytes_sent.clone();
+
+        // Store mdh_len for the receive path (before moving engine into the task).
+        let mdh_len = upload_engine.mask().header_template.len();
+
+        let mut upload_task = tokio::spawn(Self::spawn_upload(
+            tun_to_udp_rx,
+            upload_udp,
+            upload_engine,
+            upload_keys,
+            upload_counter,
+            upload_seq,
+            upload_bytes_sent,
+        ));
+
+        // Main loop: download + shutdown + upload health
         let mut shutdown_tick = tokio::time::interval(Duration::from_secs(1));
         shutdown_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let run_res: Result<()> = loop {
             tokio::select! {
+                biased;
+
                 // Allow fast shutdown.
                 _ = shutdown_tick.tick() => {
                     if shutdown.load(Ordering::SeqCst) {
@@ -312,26 +335,13 @@ impl AivpnClient {
                     }
                 }
 
-                // Periodic keepalive so idle connections also detect failures.
-                _ = keepalive_interval.tick() => {
-                    if let Err(e) = self.send_control(&ControlPayload::Keepalive).await {
-                        warn!("Keepalive send error: {}", e);
-                        break Err(e);
-                    }
-                }
-
-                // TUN -> UDP (outbound traffic)
-                res = tun_to_udp_rx.recv() => {
-                    let packet = match res {
-                        Some(p) => p,
-                        None => break Err(Error::Channel("TUN->UDP channel closed".into())),
+                // Upload task completed (error or channel closed).
+                join_res = &mut upload_task => {
+                    break match join_res {
+                        Ok(Ok(())) => Err(Error::Channel("Upload loop ended unexpectedly".into())),
+                        Ok(Err(e)) => Err(e),
+                        Err(e) => Err(Error::Session(format!("Upload task panicked: {e}"))),
                     };
-
-                    // If we can't send, reconnect is required (e.g. network changed).
-                    if let Err(e) = self.send_packet(&packet).await {
-                        warn!("Send error: {}", e);
-                        break Err(e);
-                    }
                 }
 
                 // UDP -> TUN (inbound traffic)
@@ -341,8 +351,7 @@ impl AivpnClient {
                         None => break Err(Error::Channel("UDP->TUN channel closed".into())),
                     };
 
-                    if let Err(e) = self.receive_and_write_packet(&packet).await {
-                        // Invalid packets are usually transient; do not reconnect on every decoding error.
+                    if let Err(e) = self.receive_and_write_packet_with_mdh(&packet, mdh_len).await {
                         match &e {
                             Error::InvalidPacket(_) => warn!("Receive invalid packet: {}", e),
                             _ => {
@@ -366,71 +375,69 @@ impl AivpnClient {
         run_res
     }
 
-    /// Send packet to server
-    async fn send_packet(&mut self, packet: &[u8]) -> Result<()> {
-        let keys = self.session_keys.as_ref()
-            .ok_or(Error::Session("No session keys".into()))?;
-        
-        let mimicry = self.mimicry_engine.as_mut()
-            .ok_or(Error::Session("No mimicry engine".into()))?;
-        
-        // Build inner header
-        let seq_num = self.send_seq as u16;
-        self.send_seq = self.send_seq.wrapping_add(1);
-        let inner_payload = build_inner_packet(InnerType::Data, seq_num, packet);
+    /// Spawn the upload task using the shared pipeline.
+    async fn spawn_upload(
+        mut rx: mpsc::Receiver<Vec<u8>>,
+        udp: Arc<UdpSocket>,
+        engine: MimicryEngine,
+        keys: SessionKeys,
+        counter: u64,
+        seq: u16,
+        bytes_sent: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<()> {
+        /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
+        struct MimicryEncryptor {
+            engine: MimicryEngine,
+            keys: SessionKeys,
+            counter: u64,
+            seq: u16,
+            bytes_sent: Arc<std::sync::atomic::AtomicU64>,
+        }
 
-        // Skip timing for MVP — timing causes blocking that prevents recv
-        // mimicry.apply_timing().await;
+        impl PacketEncryptor for MimicryEncryptor {
+            fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+                let inner = build_inner_packet(InnerType::Data, self.seq, payload);
+                self.seq = self.seq.wrapping_add(1);
+                let pkt = self.engine.build_packet(&inner, &self.keys, &mut self.counter, None)?;
+                self.engine.update_fsm();
+                Ok(pkt)
+            }
 
-        // Build and send packet
-        let eph_pub = if self.send_seq == 1 {
-            Some(obfuscate_client_eph_pub(&self.keypair, &self.config.server_public_key))
-        } else {
-            None
+            fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
+                let keepalive = ControlPayload::Keepalive.encode()?;
+                let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
+                self.seq = self.seq.wrapping_add(1);
+                self.engine.build_packet(&inner, &self.keys, &mut self.counter, None)
+            }
+
+            fn on_data_sent(&mut self, payload_len: usize) {
+                self.bytes_sent.fetch_add(payload_len as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let mut enc = MimicryEncryptor { engine, keys, counter, seq, bytes_sent };
+        let config = UploadConfig {
+            keepalive_interval: Duration::from_secs(15),
+            ..Default::default()
         };
-        
-        let aivpn_packet = mimicry.build_packet(
-            &inner_payload,
-            keys,
-            &mut self.counter,
-            eph_pub.as_ref(),
-        )?;
-        
-        let socket = self.udp_socket.as_ref().unwrap();
-        socket.send(&aivpn_packet).await?;
-
-        // Update FSM
-        mimicry.update_fsm();
-
-        // Update traffic counter
-        self.bytes_sent.fetch_add(packet.len() as u64, std::sync::atomic::Ordering::Relaxed);
-
-        debug!("Sent {} bytes ({} payload)", aivpn_packet.len(), packet.len());
-        Ok(())
+        upload_pipeline::run_upload_loop(&mut rx, &udp, &mut enc, &config).await
     }
-    
-    /// Receive packet from server and write to TUN
-    async fn receive_and_write_packet(&mut self, packet: &[u8]) -> Result<()> {
+
+    /// Receive packet from server and write to TUN (using pre-computed mdh_len)
+    async fn receive_and_write_packet_with_mdh(&mut self, packet: &[u8], mdh_len: usize) -> Result<()> {
         let keys = self.session_keys.as_ref()
             .ok_or(Error::Session("No session keys".into()))?;
-        
-        let mimicry = self.mimicry_engine.as_ref()
-            .ok_or(Error::Session("No mimicry engine".into()))?;
 
-        let mdh_len = mimicry.mask().header_template.len();
         let decoded = decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len)?;
         let inner_header = decoded.header;
         let ip_payload = decoded.payload;
 
-        // Route based on inner type
         match inner_header.inner_type {
             InnerType::Data => {
-                // Validate IP packet before writing to TUN (HIGH-10)
                 if ip_payload.is_empty() || (ip_payload[0] >> 4 != 4 && ip_payload[0] >> 4 != 6) {
                     return Err(Error::InvalidPacket("Invalid IP version in payload"));
                 }
                 self.tunnel.write_packet_async(&ip_payload).await?;
-                // Update traffic counter
                 self.bytes_received.fetch_add(ip_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 debug!("Received {} bytes from server, wrote to TUN", ip_payload.len());
             }

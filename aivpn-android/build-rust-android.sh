@@ -100,24 +100,47 @@ if [[ "${BUILD_TYPE}" == "release" ]]; then
 
     RELEASE_APK_SIGNED="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release.apk"
     RELEASE_APK_UNSIGNED="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release-unsigned.apk"
+    RELEASE_APK_SIGNED_LOCAL="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release-signed.apk"
 
     if [[ -f "${RELEASE_APK_SIGNED}" ]]; then
         cp -f "${RELEASE_APK_SIGNED}" "${APK_DST}"
         echo "  Copied signed release APK -> ${APK_DST}"
     elif [[ -f "${RELEASE_APK_UNSIGNED}" ]]; then
-        echo "  WARNING: release APK is unsigned and may be rejected as corrupted by Android installer."
-        echo "  Building signed debug APK as installable fallback..."
-        (
-            cd "${SCRIPT_DIR}"
-            ./gradlew app:assembleDebug
-        )
-        DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
-        if [[ -f "${DEBUG_APK}" ]]; then
-            cp -f "${DEBUG_APK}" "${APK_DST}"
-            echo "  Copied debug APK fallback -> ${APK_DST}"
+        echo "  release APK is unsigned. Attempting to sign with debug keystore..."
+        if command -v jarsigner >/dev/null 2>&1 && [[ -f "${HOME}/.android/debug.keystore" ]]; then
+            rm -f "${RELEASE_APK_SIGNED_LOCAL}"
+            jarsigner \
+                -keystore "${HOME}/.android/debug.keystore" \
+                -storepass android \
+                -keypass android \
+                -signedjar "${RELEASE_APK_SIGNED_LOCAL}" \
+                "${RELEASE_APK_UNSIGNED}" \
+                androiddebugkey >/dev/null
+
+            if jarsigner -verify -certs "${RELEASE_APK_SIGNED_LOCAL}" >/dev/null 2>&1; then
+                cp -f "${RELEASE_APK_SIGNED_LOCAL}" "${APK_DST}"
+                echo "  Signed release APK with debug.keystore -> ${APK_DST}"
+            else
+                echo "  WARNING: release signing verification failed. Falling back to debug APK..."
+            fi
         else
-            echo "ERROR: debug fallback APK not found: ${DEBUG_APK}"
-            exit 1
+            echo "  WARNING: jarsigner/debug.keystore unavailable. Falling back to debug APK..."
+        fi
+
+        if [[ ! -f "${APK_DST}" || "$(shasum -a 256 "${APK_DST}" | awk '{print $1}')" == "$(shasum -a 256 "${RELEASE_APK_UNSIGNED}" | awk '{print $1}')" ]]; then
+            echo "  Building signed debug APK as installable fallback..."
+            (
+                cd "${SCRIPT_DIR}"
+                ./gradlew app:assembleDebug
+            )
+            DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
+            if [[ -f "${DEBUG_APK}" ]]; then
+                cp -f "${DEBUG_APK}" "${APK_DST}"
+                echo "  Copied debug APK fallback -> ${APK_DST}"
+            else
+                echo "ERROR: debug fallback APK not found: ${DEBUG_APK}"
+                exit 1
+            fi
         fi
     else
         echo "ERROR: release APK not found in expected output paths."

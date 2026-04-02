@@ -3,7 +3,8 @@
 //! Shapes traffic to match Mask profile characteristics
 
 use std::time::{Duration, Instant};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngCore, SeedableRng};
+use rand::rngs::StdRng;
 use tracing::debug;
 
 use aivpn_common::crypto::{self, encrypt_payload, SessionKeys, TAG_SIZE, NONCE_SIZE, POLY1305_TAG_SIZE};
@@ -25,7 +26,7 @@ pub struct MimicryState {
 pub struct MimicryEngine {
     mask: MaskProfile,
     state: MimicryState,
-    rng: rand::rngs::ThreadRng,
+    rng: StdRng,
 }
 
 impl MimicryEngine {
@@ -41,7 +42,7 @@ impl MimicryEngine {
                 iat_override: None,
                 padding_override: None,
             },
-            rng: rand::thread_rng(),
+            rng: StdRng::from_entropy(),
         }
     }
     

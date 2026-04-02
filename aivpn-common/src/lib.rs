@@ -9,6 +9,9 @@ pub mod protocol;
 pub mod mask;
 pub mod error;
 
+#[cfg(feature = "client-upload")]
+pub mod upload_pipeline;
+
 pub use crypto::*;
 pub use client_wire::*;
 pub use protocol::*;

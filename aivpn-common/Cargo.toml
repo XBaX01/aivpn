@@ -30,3 +30,10 @@ thiserror.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+
+# Async (optional — needed for upload_pipeline)
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+client-upload = ["tokio"]
