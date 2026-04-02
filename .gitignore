@@ -92,3 +92,7 @@ test-throughput.sh
 test-with-key.sh
 connect-test.sh
 test-remote-speed.sh
+test-bench-macos.sh
+test-bench.sh
+docker-compose.dpi.yml
+test-dpi-emulation.sh

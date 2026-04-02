@@ -225,9 +225,27 @@ impl Gateway {
             );
         }
         
-        // Create UDP socket
-        let socket = UdpSocket::bind(&self.config.listen_addr).await?;
-        info!("UDP listener bound to {}", self.config.listen_addr);
+        // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
+        let bind_addr: SocketAddr = self.config.listen_addr.parse()
+            .map_err(|e: std::net::AddrParseError| Error::Io(
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+            ))?;
+            
+        let socket2_sock = socket2::Socket::new(
+            if bind_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        ).map_err(Error::Io)?;
+        
+        socket2_sock.set_nonblocking(true).map_err(Error::Io)?;
+        let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+        socket2_sock.bind(&bind_addr.into()).map_err(Error::Io)?;
+        
+        let std_sock: std::net::UdpSocket = socket2_sock.into();
+        let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
+        
+        info!("UDP listener bound to {} (4MB buffers via socket2)", self.config.listen_addr);
         
         self.udp_socket = Some(Arc::new(socket));
         

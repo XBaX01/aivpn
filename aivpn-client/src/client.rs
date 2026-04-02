@@ -121,9 +121,27 @@ impl AivpnClient {
             self.tunnel.enable_full_tunnel()?;
         }
         
-        // Create UDP socket
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect(server_addr).await?;
+        // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
+        let domain = if server_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 };
+        let socket2_sock = socket2::Socket::new(
+            domain,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        ).map_err(Error::Io)?;
+        
+        socket2_sock.set_nonblocking(true).map_err(Error::Io)?;
+        let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+        
+        // Bind to any ephemeral port
+        let any_addr: SocketAddr = if server_addr.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
+        socket2_sock.bind(&any_addr.into()).map_err(Error::Io)?;
+        
+        // Connect UDP socket
+        socket2_sock.connect(&server_addr.into()).map_err(Error::Io)?;
+        
+        let std_sock: std::net::UdpSocket = socket2_sock.into();
+        let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
         
         self.udp_socket = Some(Arc::new(socket));
         
@@ -175,9 +193,9 @@ impl AivpnClient {
         info!("Routing traffic through AIVPN tunnel...");
 
         // Create channels for TUN <-> UDP forwarding (using Bytes for zero-copy)
-        // 1024-capacity prevents head-of-line drops at 100Mbit line rate
-        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(1024);
-        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(1024);
+        // 8192-capacity prevents head-of-line drops even under heavy DPI packet jitter
+        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(8192);
+        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(8192);
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
