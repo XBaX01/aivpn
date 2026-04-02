@@ -29,7 +29,8 @@ use aivpn_common::protocol::{
 use aivpn_common::mask::{MaskProfile, SpoofProtocol};
 use aivpn_common::error::{Error, Result};
 
-use crate::session::{SessionManager, Session, SessionState};
+use crate::session::{SessionManager, Session, SessionState, TagWindowSlide};
+use socket2;
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
@@ -145,6 +146,8 @@ pub struct Gateway {
     metrics: Arc<MetricsCollector>,
     /// Client database for PSK-based authentication
     client_db: Option<Arc<ClientDatabase>>,
+    /// Packet counter for batched neural recording (avoids global lock per packet)
+    neural_packet_counter: std::sync::atomic::AtomicU64,
 }
 
 impl Gateway {
@@ -202,6 +205,7 @@ impl Gateway {
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
             client_db: config.client_db,
+            neural_packet_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
     
@@ -225,27 +229,24 @@ impl Gateway {
             );
         }
         
-        // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
-        let bind_addr: SocketAddr = self.config.listen_addr.parse()
+        // Create UDP socket with large OS buffers to handle burst traffic at 100Mbit+
+        let listen_addr: std::net::SocketAddr = self.config.listen_addr.parse()
             .map_err(|e: std::net::AddrParseError| Error::Io(
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
             ))?;
-            
-        let socket2_sock = socket2::Socket::new(
-            if bind_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
+        let raw = socket2::Socket::new(
+            if listen_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
             socket2::Type::DGRAM,
             Some(socket2::Protocol::UDP),
         ).map_err(Error::Io)?;
-        
-        socket2_sock.set_nonblocking(true).map_err(Error::Io)?;
-        let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
-        let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
-        socket2_sock.bind(&bind_addr.into()).map_err(Error::Io)?;
-        
-        let std_sock: std::net::UdpSocket = socket2_sock.into();
-        let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
-        
-        info!("UDP listener bound to {} (4MB buffers via socket2)", self.config.listen_addr);
+        // 8 MB receive + send buffers (OS will cap at rmem_max/wmem_max — Docker sets these)
+        let _ = raw.set_recv_buffer_size(8 * 1024 * 1024);
+        let _ = raw.set_send_buffer_size(8 * 1024 * 1024);
+        raw.set_nonblocking(true).map_err(Error::Io)?;
+        raw.bind(&listen_addr.into()).map_err(Error::Io)?;
+        let socket = UdpSocket::from_std(raw.into())
+            .map_err(Error::Io)?;
+        info!("UDP listener bound to {} (SO_RCVBUF/SO_SNDBUF=8MB)", self.config.listen_addr);
         
         self.udp_socket = Some(Arc::new(socket));
         
@@ -629,7 +630,7 @@ impl Gateway {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, client_addr)) => {
-                    // Per-IP rate limiting (max 1000 pps)
+                    // Per-IP rate limiting (max 50_000 pps — ~900 Mbit at 1420B packets)
                     {
                         let now = Instant::now();
                         let mut entry = self.rate_limits.entry(client_addr.ip()).or_insert((0, now));
@@ -638,7 +639,7 @@ impl Gateway {
                             entry.1 = now;
                         }
                         entry.0 += 1;
-                        if entry.0 > 1000 {
+                        if entry.0 > 50_000 {
                             continue;
                         }
                     }
@@ -670,16 +671,21 @@ impl Gateway {
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&packet_data[0..TAG_SIZE]);
         
-        // O(1) tag validation - find session
+        // O(1) tag+counter lookup in tag_map — skip O(256) validate_tag() for the hot path
         let mdh_len = 4; // Default for MVP
         let mut is_new_session = false;
-        let (session, counter, is_ratcheted_tag) = if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
-            // Existing session — validate tag
-            let (counter, is_ratcheted) = {
+        let (session, counter, is_ratcheted_tag) = if let Some((session, counter, is_ratcheted)) =
+            self.session_manager.get_session_by_tag_full(&tag)
+        {
+            // Anti-replay check: O(1) bitmap check instead of O(256) validate_tag iteration
+            let is_valid = {
                 let sess = session.lock();
-                sess.validate_tag(&tag)
-                    .ok_or(Error::InvalidPacket("Invalid tag"))?
+                let delta = counter.wrapping_sub(sess.counter);
+                delta < 256 && !sess.received_bitmap.get_bit(delta as usize)
             };
+            if !is_valid {
+                return Err(Error::InvalidPacket("Replay or out-of-window counter"));
+            }
             (session, counter, is_ratcheted)
         } else if let Some((session, counter, is_ratcheted)) = self.session_manager.refresh_and_find_by_tag(&tag) {
             // Tag not in map — time window may have advanced. Refresh all sessions and retry.
@@ -867,31 +873,33 @@ impl Gateway {
         }
         let plaintext = &padded_plaintext[2..padded_plaintext.len() - pad_len];
         
-        // Update session state
-        let session_id = {
+        // Update session state — O(1) sliding window advance instead of O(256) full rebuild
+        let (session_id, slide) = {
             let mut sess = session.lock();
             sess.counter = counter;
             sess.mark_tag_received(counter);
             sess.last_seen = std::time::Instant::now();
-            sess.update_tag_window();
+            let slide = sess.slide_tag_window();
             sess.update_fsm();
-            sess.session_id
+            (sess.session_id, slide)
         };
         
-        // Refresh tag_map after window update (prevents stale tags after 256 packets)
-        self.session_manager.refresh_session_tags(&session_id);
+        // Targeted tag_map update: 1 remove + 1 insert vs O(N×window) retain+rebuild
+        self.session_manager.refresh_session_tags_slide(&session_id, slide);
         
-        // Record traffic stats for neural resonance (Patent 1)
+        // Record traffic stats for neural resonance — batched every 100 packets to avoid
+        // taking the global Mutex on every single packet (reduces lock contention ~100×)
         if self.config.enable_neural {
-            let packet_size = packet_data.len() as u16;
-            // Compute byte-level entropy of the encrypted payload
-            let entropy = Self::compute_entropy(encrypted_payload);
-            // IAT is approximated by the last_seen timing
-            let iat_ms = 0.0; // Will be calculated from session timestamps in check loop
-            self.neural_module.lock().record_traffic(
-                session_id, packet_size, iat_ms, entropy,
-            );
             self.metrics.record_packet_received(packet_data.len());
+            let pkt_count = self.neural_packet_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if pkt_count % 100 == 0 {
+                let packet_size = packet_data.len() as u16;
+                let entropy = Self::compute_entropy(encrypted_payload);
+                self.neural_module.lock().record_traffic(
+                    session_id, packet_size, 0.0, entropy,
+                );
+            }
         }
         
         // Record traffic in client DB for statistics
