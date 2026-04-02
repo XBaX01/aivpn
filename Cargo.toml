@@ -5,11 +5,6 @@ members = [
     "aivpn-server",
     "aivpn-android-core",
 ]
-default-members = [
-    "aivpn-common",
-    "aivpn-client",
-    "aivpn-server",
-]
 resolver = "2"
 
 [workspace.package]

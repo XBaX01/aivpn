@@ -71,7 +71,8 @@ for entry in "${TARGETS[@]}"; do
         cargo ndk \
             -t "${ABI}" \
             -o "${JNI_LIBS_DIR}" \
-            -- build ${RELEASE_FLAG} -p aivpn-android-core
+            ${RELEASE_FLAG} \
+            -- build -p aivpn-android-core
     )
 
     echo "    Written to ${JNI_LIBS_DIR}/${ABI}/libaivpn_core.so"
