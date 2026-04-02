@@ -67,9 +67,14 @@ class KeychainStorage: ObservableObject {
         // Загрузить выбранный ключ
         selectedKeyId = userDefaults.string(forKey: selectedKeyKey)
         
-        // Если есть ключи но нет выбранного, выбрать первый
+        // Если выбранный ключ отсутствует или удален, выбрать первый
+        if selectedKeyId != nil && !keys.contains(where: { $0.id == selectedKeyId }) {
+            selectedKeyId = nil
+        }
+
         if selectedKeyId == nil && !keys.isEmpty {
             selectedKeyId = keys.first?.id
+            userDefaults.set(selectedKeyId, forKey: selectedKeyKey)
         }
     }
     
@@ -137,6 +142,7 @@ class KeychainStorage: ObservableObject {
         // Если удалили выбранный, выбрать другой
         if selectedKeyId == id {
             selectedKeyId = keys.first?.id
+            userDefaults.set(selectedKeyId, forKey: selectedKeyKey)
         }
     }
     

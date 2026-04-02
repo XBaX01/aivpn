@@ -91,6 +91,7 @@ class VPNManager: ObservableObject {
     /// Добавить новый ключ
     func addKey(name: String, keyValue: String) -> Bool {
         if let newKey = KeychainStorage.shared.addKey(name: name, keyValue: keyValue) {
+            KeychainStorage.shared.selectKey(id: newKey.id)
             selectedKeyId = newKey.id
             savedKey = newKey.keyValue
             return true
@@ -114,12 +115,20 @@ class VPNManager: ObservableObject {
     
     /// Обновить ключ полностью
     func updateKey(id: String, name: String, keyValue: String) -> Bool {
-        return KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+        let updated = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+        if updated, selectedKeyId == id,
+           let key = KeychainStorage.shared.keys.first(where: { $0.id == id }) {
+            savedKey = key.keyValue
+        }
+        return updated
     }
 
     /// Получить выбранный ключ
     var selectedKey: ConnectionKey? {
-        return KeychainStorage.shared.selectedKey
+        guard let id = selectedKeyId else {
+            return nil
+        }
+        return KeychainStorage.shared.keys.first(where: { $0.id == id })
     }
 
     // MARK: - Helper Communication
