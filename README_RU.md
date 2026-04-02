@@ -83,6 +83,28 @@ cargo build --release
 
 ### 3. Сервер (только Linux)
 
+#### Вариант А: Docker (рекомендуется)
+
+Самый простой способ — всё настроено в `docker-compose.yml`.
+
+```bash
+# Генерируем ключ сервера
+mkdir -p config
+openssl rand 32 > config/server.key
+chmod 600 config/server.key
+
+# Включаем NAT (нужен для доступа в интернет через VPN)
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
+
+# Собираем и запускаем
+docker compose up -d aivpn-server
+```
+
+> Контейнер запускается с `network_mode: "host"` и монтирует `./config` → `/etc/aivpn` внутри контейнера.
+
+#### Вариант Б: На голом железе
+
 Заходите на свой VPS, генерите ключ:
 
 ```bash
@@ -104,25 +126,21 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
 ```
 
-Или через Docker (всё уже настроено в `docker-compose.yml`):
-
-```bash
-docker-compose up -d
-```
-
 ### 3.1 Управление клиентами
 
 AIVPN использует модель регистрации клиентов по аналогии с WireGuard/XRay: у каждого клиента — уникальный PSK, статический VPN IP и статистика трафика.
 
 Вся конфигурация упаковывается в один **ключ подключения** — одну строку, которую пользователь вставляет в приложение или CLI-клиент.
 
+#### Docker
+
 ```bash
 # Добавить клиента (выводит ключ подключения)
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --add-client "Телефон Алисы" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
 
 # Вывод:
 # ✅ Client 'Телефон Алисы' created!
@@ -134,17 +152,46 @@ docker exec aivpn-aivpn-server-1 aivpn-server \
 # aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
 
 # Список всех клиентов со статистикой
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --list-clients --clients-db /etc/aivpn/clients.json
 
 # Показать конкретного клиента (и его ключ подключения)
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --show-client "Телефон Алисы" \
     --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
 
 # Удалить клиента
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
+    --remove-client "Телефон Алисы" \
+    --clients-db /etc/aivpn/clients.json
+```
+
+> **Имя контейнера** зависит от имени директории проекта. Проверьте через `docker ps`. Типичные имена: `aivpn-aivpn-server-1` или `aivpn-server-aivpn-server-1`.
+
+#### На голом железе
+
+```bash
+# Добавить клиента
+aivpn-server \
+    --add-client "Телефон Алисы" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
+
+# Список всех клиентов со статистикой
+aivpn-server --list-clients --clients-db /etc/aivpn/clients.json
+
+# Показать конкретного клиента (и его ключ подключения)
+aivpn-server \
+    --show-client "Телефон Алисы" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
+
+# Удалить клиента
+aivpn-server \
     --remove-client "Телефон Алисы" \
     --clients-db /etc/aivpn/clients.json
 ```

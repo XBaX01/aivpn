@@ -83,6 +83,28 @@ cargo build --release
 
 ### 3. Server (Linux only)
 
+#### Option A: Docker (recommended)
+
+The easiest way — everything is preconfigured in `docker-compose.yml`.
+
+```bash
+# Generate server key
+mkdir -p config
+openssl rand 32 > config/server.key
+chmod 600 config/server.key
+
+# Enable NAT (required for internet access from VPN)
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
+
+# Build and start
+docker compose up -d aivpn-server
+```
+
+> The container runs with `network_mode: "host"` and mounts `./config` → `/etc/aivpn` inside the container.
+
+#### Option B: Bare metal
+
 SSH into your VPS, generate a key:
 
 ```bash
@@ -104,25 +126,21 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
 ```
 
-Or use Docker (everything is already configured in `docker-compose.yml`):
-
-```bash
-docker-compose up -d
-```
-
 ### 3.1 Client Management
 
 AIVPN uses a client registration model similar to WireGuard/XRay: each client gets a unique PSK, a static VPN IP, and traffic statistics.
 
 All config is packed into a single **connection key** — one string that the user pastes into the app or CLI client.
 
+#### Docker
+
 ```bash
 # Add a new client (prints a connection key)
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --add-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_PUBLIC_IP
+    --server-ip YOUR_PUBLIC_IP:443
 
 # Output:
 # ✅ Client 'Alice Phone' created!
@@ -134,17 +152,46 @@ docker exec aivpn-aivpn-server-1 aivpn-server \
 # aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
 
 # List all clients with traffic stats
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --list-clients --clients-db /etc/aivpn/clients.json
 
 # Show a specific client (and its connection key)
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
     --show-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip YOUR_PUBLIC_IP:443
 
 # Remove a client
-docker exec aivpn-aivpn-server-1 aivpn-server \
+docker exec aivpn-server-aivpn-server-1 aivpn-server \
+    --remove-client "Alice Phone" \
+    --clients-db /etc/aivpn/clients.json
+```
+
+> **Container name:** depends on the project directory name. Run `docker ps` to check. Typical names: `aivpn-aivpn-server-1` or `aivpn-server-aivpn-server-1`.
+
+#### Bare metal
+
+```bash
+# Add a new client
+aivpn-server \
+    --add-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip YOUR_PUBLIC_IP:443
+
+# List all clients with traffic stats
+aivpn-server --list-clients --clients-db /etc/aivpn/clients.json
+
+# Show a specific client (and its connection key)
+aivpn-server \
+    --show-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip YOUR_PUBLIC_IP:443
+
+# Remove a client
+aivpn-server \
     --remove-client "Alice Phone" \
     --clients-db /etc/aivpn/clients.json
 ```
