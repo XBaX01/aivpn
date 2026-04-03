@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -41,11 +41,84 @@ const TX_WITHOUT_RX_MIN_BYTES: u64 = 16 * 1024;
 const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 
-// ──────────── Public globals (read by JNI exports in lib.rs) ────────────
+// ──────────── Session runtime (read by JNI exports in lib.rs) ────────────
 
-pub static TUNNEL_UDP_FD: AtomicI32 = AtomicI32::new(-1);
-pub static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
-pub static DOWNLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+pub struct SessionRuntime {
+    udp_fd: AtomicI32,
+    upload_bytes: AtomicU64,
+    download_bytes: AtomicU64,
+}
+
+impl SessionRuntime {
+    fn new() -> Self {
+        Self {
+            udp_fd: AtomicI32::new(-1),
+            upload_bytes: AtomicU64::new(0),
+            download_bytes: AtomicU64::new(0),
+        }
+    }
+}
+
+static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
+
+struct ActiveSessionGuard {
+    session: Arc<SessionRuntime>,
+}
+
+impl Drop for ActiveSessionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = ACTIVE_SESSION.lock() {
+            if let Some(current) = guard.as_ref() {
+                if Arc::ptr_eq(current, &self.session) {
+                    *guard = None;
+                }
+            }
+        }
+    }
+}
+
+fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> {
+    let mut guard = ACTIVE_SESSION
+        .lock()
+        .map_err(|_| Error::Session("Active session lock poisoned".into()))?;
+
+    if guard.is_some() {
+        return Err(Error::Session(
+            "Another Android tunnel session is already active".into(),
+        ));
+    }
+
+    *guard = Some(session.clone());
+    Ok(ActiveSessionGuard { session })
+}
+
+pub fn stop_active_tunnel() {
+    let fd = ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|s| s.udp_fd.swap(-1, Ordering::SeqCst)))
+        .unwrap_or(-1);
+
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
+}
+
+pub fn get_active_upload_bytes() -> u64 {
+    ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|s| s.upload_bytes.load(Ordering::Relaxed)))
+        .unwrap_or(0)
+}
+
+pub fn get_active_download_bytes() -> u64 {
+    ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|s| s.download_bytes.load(Ordering::Relaxed)))
+        .unwrap_or(0)
+}
 
 // ──────────── Entry point ────────────
 
@@ -61,9 +134,8 @@ pub async fn run_tunnel_android(
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
 ) -> Result<()> {
-    // Reset per-session counters.
-    UPLOAD_BYTES.store(0, Ordering::Relaxed);
-    DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+    let session = Arc::new(SessionRuntime::new());
+    let _active_session_guard = activate_session(session.clone())?;
 
     // ── 1. Ephemeral keypair + initial session keys (Zero-RTT like existing Kotlin) ──
     let keypair = KeyPair::generate();
@@ -79,8 +151,7 @@ pub async fn run_tunnel_android(
         .find(|a| a.is_ipv4())
         .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
 
-    let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest)?;
-    TUNNEL_UDP_FD.store(raw_udp_fd, Ordering::SeqCst);
+    let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest, &session)?;
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──
     unsafe { libc::fcntl(tun_fd_int, libc::F_SETFL, libc::O_NONBLOCK) };
@@ -120,12 +191,13 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         DEFAULT_ZERO_MDH.len(),
     )?;
+    notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
 
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];
     let mut last_rx = Instant::now();
-    let mut upload_at_last_rx = UPLOAD_BYTES.load(Ordering::Relaxed);
+    let mut upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
 
     // Split upload into a dedicated pipeline:
     // TUN reader task -> channel -> UDP sender/encrypt task.
@@ -166,22 +238,32 @@ pub async fn run_tunnel_android(
 
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
+    let session_for_upload = session.clone();
     let upload_sender_task = tokio::spawn(async move {
         // Wrap ZeroMdhEncryptor with UPLOAD_BYTES tracking.
-        struct AndroidEncryptor(ZeroMdhEncryptor);
+        struct AndroidEncryptor {
+            inner: ZeroMdhEncryptor,
+            session: Arc<SessionRuntime>,
+        }
+
         impl PacketEncryptor for AndroidEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
-                self.0.encrypt_data(payload)
+                self.inner.encrypt_data(payload)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
-                self.0.encrypt_keepalive()
+                self.inner.encrypt_keepalive()
             }
             fn on_data_sent(&mut self, payload_len: usize) {
-                UPLOAD_BYTES.fetch_add(payload_len as u64, Ordering::Relaxed);
+                self.session
+                    .upload_bytes
+                    .fetch_add(payload_len as u64, Ordering::Relaxed);
             }
         }
 
-        let mut enc = AndroidEncryptor(ZeroMdhEncryptor::new(keys_tx, send_counter, send_seq));
+        let mut enc = AndroidEncryptor {
+            inner: ZeroMdhEncryptor::new(keys_tx, send_counter, send_seq),
+            session: session_for_upload,
+        };
         let config = UploadConfig {
             keepalive_interval: KEEPALIVE_INTERVAL,
             ..Default::default()
@@ -215,7 +297,7 @@ pub async fn run_tunnel_android(
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
                 last_rx = Instant::now();
-                upload_at_last_rx = UPLOAD_BYTES.load(Ordering::Relaxed);
+                upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
                 if let Ok(decoded) = decode_packet_with_mdh_len(
                     &udp_buf[..n],
                     &keys,
@@ -223,8 +305,10 @@ pub async fn run_tunnel_android(
                     DEFAULT_ZERO_MDH.len(),
                 ) {
                     if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
-                        tun_write(&tun, &decoded.payload)?;
-                        DOWNLOAD_BYTES.fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
+                        tun_async_write(&tun, &decoded.payload).await?;
+                        session
+                            .download_bytes
+                            .fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
                     }
                     // Any successfully decoded packet (including keepalive responses)
                     // proves the link is alive.
@@ -242,7 +326,7 @@ pub async fn run_tunnel_android(
             // ── RX silence detector (proper interval, not recreated each iteration) ──
             _ = rx_check.tick() => {
                 let silence = last_rx.elapsed();
-                let uploaded_total = UPLOAD_BYTES.load(Ordering::Relaxed);
+                let uploaded_total = session.upload_bytes.load(Ordering::Relaxed);
                 let uploaded_since_rx = uploaded_total.saturating_sub(upload_at_last_rx);
 
                 // Half-open path detector: TX is actively flowing, but no RX returns.
@@ -271,12 +355,55 @@ pub async fn run_tunnel_android(
     }
 }
 
+fn notify_tunnel_ready(vm: &JavaVM, vpn_service: &GlobalRef, host: &str) {
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => {
+            log::warn!("aivpn: JNI attach failed for onTunnelReady callback: {e}");
+            return;
+        }
+    };
+
+    let host_j = match env.new_string(host) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("aivpn: JNI new_string failed for onTunnelReady callback: {e}");
+            return;
+        }
+    };
+
+    let host_obj = jni::objects::JObject::from(host_j);
+
+    if let Err(e) = env.call_method(
+        vpn_service,
+        "onTunnelReady",
+        "(Ljava/lang/String;)V",
+        &[jni::objects::JValue::Object(&host_obj)],
+    ) {
+        log::warn!("aivpn: onTunnelReady callback failed: {e}");
+        return;
+    }
+
+    match env.exception_check() {
+        Ok(true) => {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+            log::warn!("aivpn: onTunnelReady callback threw Java exception");
+        }
+        Ok(false) => {}
+        Err(e) => {
+            log::warn!("aivpn: exception_check failed after onTunnelReady callback: {e}");
+        }
+    }
+}
+
 // ──────────── Protected UDP socket creation ────────────
 
 fn create_protected_udp_socket(
     vm: &JavaVM,
     vpn_service: &GlobalRef,
     dest: SocketAddr,
+    session: &Arc<SessionRuntime>,
 ) -> Result<RawFd> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
     if fd < 0 {
@@ -341,6 +468,8 @@ fn create_protected_udp_socket(
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
+    session.udp_fd.store(fd, Ordering::SeqCst);
+
     Ok(fd)
 }
 
@@ -389,18 +518,44 @@ async fn tun_async_read(tun: &AsyncFd<OwnedFd>, buf: &mut [u8]) -> std::io::Resu
     }
 }
 
-fn tun_write(tun: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
-    // TUN writes are rare and small; a blocking write is fine here.
-    let n = unsafe {
-        libc::write(
-            tun.as_raw_fd(),
-            data.as_ptr() as *const libc::c_void,
-            data.len(),
-        )
-    };
-    if n < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+async fn tun_async_write(tun: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
+    let mut written = 0usize;
+    while written < data.len() {
+        let mut guard = tun.writable().await?;
+        match guard.try_io(|inner| {
+            let n = unsafe {
+                libc::write(
+                    inner.as_raw_fd(),
+                    data[written..].as_ptr() as *const libc::c_void,
+                    data.len() - written,
+                )
+            };
+
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+                } else {
+                    Err(err)
+                }
+            } else {
+                Ok(n as usize)
+            }
+        }) {
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "TUN write returned 0",
+                ));
+            }
+            Ok(Ok(n)) => {
+                written += n;
+            }
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(_would_block) => continue,
+        }
     }
+    Ok(())
 }

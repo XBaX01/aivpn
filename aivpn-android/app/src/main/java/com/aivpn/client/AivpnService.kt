@@ -195,20 +195,13 @@ class AivpnService : VpnService() {
 
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
-        //
-        // IPv6 strategy: we do NOT support IPv6 forwarding, but we MUST route ::/0 into the
-        // TUN to prevent IPv6 leaks (traffic bypassing the VPN on the real interface).
-        // A dummy ULA address is required so Android accepts the ::/0 route.
-        // Rust drops all non-IPv4 packets it reads from TUN, so they go nowhere safely.
+        // IPv6 is intentionally disabled in this client.
         val pfd = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, 24)
             .addRoute("0.0.0.0", 0)          // IPv4: route all through VPN
-            .addAddress("fd00::2", 128)       // dummy ULA — required to bind ::/0 route
-            .addRoute("::", 0)               // IPv6: route all through VPN (dropped in Rust)
             .addDnsServer("8.8.8.8")
             .addDnsServer("1.1.1.1")
-            .addDnsServer("2001:4860:4860::8888") // Google DNS over IPv4 (reachable via v4)
             .setMtu(TUN_MTU)
             .setBlocking(false)
             .establish() ?: throw Exception("Failed to establish VPN interface")
@@ -222,12 +215,12 @@ class AivpnService : VpnService() {
         // detachFd(): raw fd ownership transfers to Rust.  pfd.close() becomes a no-op.
         val tunFd = pfd.detachFd()
 
-        sessionEstablished = true
+        sessionEstablished = false
         isRunning          = true
         sessionId++     // new session — invalidates any queued upgradePendingJob
-        lastStatusText = getString(R.string.status_connected, host)
-        statusCallback?.invoke(true, lastStatusText)
-        updateNotification(getString(R.string.notification_connected, host))
+        lastStatusText = getString(R.string.status_connecting)
+        statusCallback?.invoke(false, lastStatusText)
+        updateNotification(getString(R.string.notification_connecting))
 
         // Poll Rust traffic counters once per second and forward to UI.
         val statsJob = serviceScope.launch {
@@ -246,6 +239,20 @@ class AivpnService : VpnService() {
             statsJob.cancel()
             isRunning = false
         }
+    }
+
+    /**
+     * Called from Rust (JNI) when handshake and key ratchet are complete.
+     * This is the first moment when "connected" is actually true.
+     */
+    @Suppress("unused")
+    fun onTunnelReady(host: String) {
+        sessionEstablished = true
+        isRunning = true
+        lastStatusText = getString(R.string.status_connected, host)
+        statusCallback?.invoke(true, lastStatusText)
+        updateNotification(getString(R.string.notification_connected, host))
+        Log.d(TAG, "Tunnel ready: host=$host")
     }
 
     // ──────────── Network callbacks ────────────
@@ -270,20 +277,12 @@ class AivpnService : VpnService() {
 
                 val previous = currentDefaultNetwork
                 currentDefaultNetwork = network
-                val now = System.currentTimeMillis()
 
                 Log.d(TAG, "Default network available: $network (previous=$previous)")
 
-                if (isRunning && previous != null && previous != network) {
-                    if (now - lastNetworkEventAtMs < NETWORK_EVENT_DEBOUNCE_MS) {
-                        Log.d(TAG, "Default-network switch debounced")
-                        return
-                    }
-                    lastNetworkEventAtMs = now
-                    networkTrigger = true
-                    Log.d(TAG, "Default network changed — forcing tunnel restart")
-                    AivpnJni.stopTunnel()
-                }
+                // Do not force restart on every onAvailable: during WiFi/cellular churn
+                // Android may emit short default-network transitions even while traffic
+                // keeps flowing. We only hard-restart on current default loss.
             }
 
             override fun onLost(network: Network) {
@@ -394,6 +393,16 @@ class AivpnService : VpnService() {
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 
             if (hasUsableActiveNetwork) return
+
+            // Fallback: when VPN is active, activeNetwork can point to TRANSPORT_VPN.
+            // In that case, scan all networks for any non-VPN internet-capable network.
+            val hasAnyUsableNetwork = cm.allNetworks.any { net ->
+                val netCaps = cm.getNetworkCapabilities(net) ?: return@any false
+                !netCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    netCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            }
+            if (hasAnyUsableNetwork) return
+
             delay(300L)
         }
         throw CancellationException("Cancelled while waiting for network")

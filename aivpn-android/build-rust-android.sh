@@ -60,8 +60,10 @@ fi
 TARGETS=(
     "arm64-v8a:aarch64-linux-android"
     "armeabi-v7a:armv7-linux-androideabi"
-    "x86_64:x86_64-linux-android"
 )
+
+# Ensure stale x86_64 output from previous builds is not packaged into APK.
+rm -rf "${JNI_LIBS_DIR}/x86_64"
 
 for entry in "${TARGETS[@]}"; do
     ABI="${entry%%:*}"

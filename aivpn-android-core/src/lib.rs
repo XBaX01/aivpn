@@ -9,12 +9,13 @@
 
 mod android_tunnel;
 
-use android_tunnel::{run_tunnel_android, DOWNLOAD_BYTES, TUNNEL_UDP_FD, UPLOAD_BYTES};
+use android_tunnel::{
+    get_active_download_bytes, get_active_upload_bytes, run_tunnel_android, stop_active_tunnel,
+};
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
-use std::sync::atomic::Ordering;
 
 // ──────────────────────────────────────────────────────────
 // runTunnel — blocking call; returns when tunnel stops/errors
@@ -104,9 +105,6 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         psk,
     ));
 
-    // Clean up global fd reference so stopTunnel() doesn't close a stale fd.
-    TUNNEL_UDP_FD.store(-1, Ordering::SeqCst);
-
     match result {
         Ok(()) => make_str(&mut env, ""),
         Err(e) => make_str(&mut env, &e.to_string()),
@@ -123,10 +121,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopTunnel(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    let fd = TUNNEL_UDP_FD.swap(-1, Ordering::SeqCst);
-    if fd >= 0 {
-        unsafe { libc::close(fd) };
-    }
+    stop_active_tunnel();
 }
 
 // ──────────────────────────────────────────────────────────
@@ -138,7 +133,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_getUploadBytes(
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    UPLOAD_BYTES.load(Ordering::Relaxed) as jlong
+    get_active_upload_bytes() as jlong
 }
 
 #[no_mangle]
@@ -146,7 +141,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_getDownloadBytes(
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    DOWNLOAD_BYTES.load(Ordering::Relaxed) as jlong
+    get_active_download_bytes() as jlong
 }
 
 // ──────────────────────────────────────────────────────────
