@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use jni::objects::GlobalRef;
 use jni::JavaVM;
@@ -33,9 +33,11 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
-const RX_SILENCE_MS: u64 = 120_000; // 2 min: detect dead NAT before keepalive masks it
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);  // 20s keeps NAT mappings alive
+const RX_SILENCE: Duration = Duration::from_secs(240);         // 4 min before giving up
+const RX_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
+const CHANNEL_SIZE: usize = 8192;
 
 // ──────────── Public globals (read by JNI exports in lib.rs) ────────────
 
@@ -120,11 +122,11 @@ pub async fn run_tunnel_android(
 
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];
-    let mut last_rx_ms = monotonic_ms();
+    let mut last_rx = Instant::now();
 
     // Split upload into a dedicated pipeline:
     // TUN reader task -> channel -> UDP sender/encrypt task.
-    let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_SIZE);
     let (err_tx, mut err_rx) = mpsc::channel::<String>(16);
     let tun_err_tx = err_tx.clone();
     let sender_err_tx = err_tx.clone();
@@ -188,6 +190,12 @@ pub async fn run_tunnel_android(
     });
     let rekey_sleep = time::sleep(REKEY_INTERVAL);
     tokio::pin!(rekey_sleep);
+
+    // Periodic check for RX silence — uses a proper Interval so it's not
+    // recreated every select! iteration (which would reset the timer).
+    let mut rx_check = time::interval(RX_CHECK_INTERVAL);
+    rx_check.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             biased;
@@ -203,7 +211,7 @@ pub async fn run_tunnel_android(
             // ── UDP → TUN (inbound from server) ──
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
-                last_rx_ms = monotonic_ms();
+                last_rx = Instant::now();
                 if let Ok(decoded) = decode_packet_with_mdh_len(
                     &udp_buf[..n],
                     &keys,
@@ -214,6 +222,8 @@ pub async fn run_tunnel_android(
                         tun_write(&tun, &decoded.payload)?;
                         DOWNLOAD_BYTES.fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
                     }
+                    // Any successfully decoded packet (including keepalive responses)
+                    // proves the link is alive.
                 }
             }
 
@@ -225,13 +235,14 @@ pub async fn run_tunnel_android(
                 }
             }
 
-            _ = time::sleep(Duration::from_secs(1)) => {
-                let silence = monotonic_ms().saturating_sub(last_rx_ms);
-                if silence > RX_SILENCE_MS {
+            // ── RX silence detector (proper interval, not recreated each iteration) ──
+            _ = rx_check.tick() => {
+                let silence = last_rx.elapsed();
+                if silence > RX_SILENCE {
                     tun_reader_task.abort();
                     upload_sender_task.abort();
                     return Err(Error::Session(
-                        format!("No RX for {}ms — reconnecting", silence)
+                        format!("No RX for {:?} — reconnecting", silence)
                     ));
                 }
             }
@@ -371,11 +382,4 @@ fn tun_write(tun: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
     } else {
         Ok(())
     }
-}
-
-fn monotonic_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }

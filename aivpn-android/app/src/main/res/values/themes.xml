@@ -17,4 +17,15 @@
         <item name="boxStrokeColor">@color/accent</item>
         <item name="hintTextColor">@color/text_secondary</item>
     </style>
+
+    <style name="Theme.AIVPN.Dialog" parent="ThemeOverlay.MaterialComponents.Dialog.Alert">
+        <item name="android:background">@color/surface</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textColorHint">@color/text_secondary</item>
+        <item name="android:editTextColor">@color/text_primary</item>
+        <item name="colorControlNormal">@color/text_secondary</item>
+        <item name="colorControlActivated">@color/accent</item>
+        <item name="colorAccent">@color/accent</item>
+        <item name="editTextStyle">@style/Widget.AppCompat.EditText</item>
+    </style>
 </resources>

@@ -66,9 +66,7 @@ class AivpnService : VpnService() {
     @Volatile private var sessionId: Long = 0L
 
     // Network change detection
-    @Volatile private var sessionNetwork: Network? = null
-    @Volatile private var targetNetwork: Network?  = null
-    @Volatile private var upgradePendingJob: Job?  = null
+    @Volatile private var networkTrigger: Boolean   = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     // ──────────── Service lifecycle ────────────
@@ -116,6 +114,7 @@ class AivpnService : VpnService() {
                 while (isActive && !manualDisconnect) {
                     try {
                         sessionEstablished = false
+                        networkTrigger = false
                         runTunnel()
                         // runTunnel() returns normally only on Rust rekey trigger — reconnect fast.
                         retryDelayMs = INITIAL_RETRY_DELAY_MS
@@ -124,17 +123,33 @@ class AivpnService : VpnService() {
                     } catch (e: Exception) {
                         Log.e(TAG, "Tunnel error: ${e.message}", e)
                         isRunning = false
-                        upgradePendingJob?.cancel()
-                        upgradePendingJob = null
                         closeTunnel()
                         if (manualDisconnect) break
-                        if (sessionEstablished) retryDelayMs = INITIAL_RETRY_DELAY_MS
+
+                        // Network-triggered reconnects and reconnects after an established
+                        // session use zero delay so the switch feels instant.
+                        val delayMs = when {
+                            networkTrigger     -> 0L
+                            sessionEstablished -> 0L
+                            else               -> retryDelayMs
+                        }
+
                         lastStatusText = getString(R.string.status_reconnecting)
                         statusCallback?.invoke(false, lastStatusText)
                         updateNotification(getString(R.string.notification_connecting))
-                        Log.d(TAG, "Reconnecting in ${retryDelayMs}ms")
-                        delay(retryDelayMs)
-                        retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
+
+                        if (delayMs > 0) {
+                            Log.d(TAG, "Reconnecting in ${delayMs}ms")
+                            delay(delayMs)
+                        } else {
+                            Log.d(TAG, "Reconnecting immediately (network=${networkTrigger}, established=${sessionEstablished})")
+                        }
+
+                        if (!networkTrigger && !sessionEstablished) {
+                            retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
+                        } else {
+                            retryDelayMs = INITIAL_RETRY_DELAY_MS
+                        }
                     }
                 }
             } catch (e: CancellationException) {
@@ -158,8 +173,8 @@ class AivpnService : VpnService() {
      * Any exception propagates to the reconnect loop.
      */
     private suspend fun runTunnel() {
-        val network = waitForNetwork()
-        sessionNetwork = network
+        // Wait for any usable network before starting (avoids immediate DNS/handshake failure).
+        waitForConnectivity()
 
         val (host, port) = parseServerAddr(
             savedServerAddr ?: throw Exception("No server address"))
@@ -197,7 +212,10 @@ class AivpnService : VpnService() {
             .establish() ?: throw Exception("Failed to establish VPN interface")
 
         vpnInterface = pfd
-        setUnderlyingNetworks(arrayOf(network))
+        // WireGuard approach: let Android OS choose the best underlying network.
+        // Setting null allows automatic network selection and seamless WiFi↔cellular switching.
+        // The socket is protected via VpnService.protect() in Rust so it bypasses VPN routing.
+        setUnderlyingNetworks(null)
 
         // detachFd(): raw fd ownership transfers to Rust.  pfd.close() becomes a no-op.
         val tunFd = pfd.detachFd()
@@ -230,6 +248,15 @@ class AivpnService : VpnService() {
 
     // ──────────── Network callbacks ────────────
 
+    /**
+     * WireGuard-style approach: we do NOT manually select networks or bind sockets
+     * to specific interfaces.  Instead:
+     *   - setUnderlyingNetworks(null) lets Android route through the best available network
+     *   - VpnService.protect(fd) ensures the UDP socket bypasses VPN routing
+     *   - We only detect connectivity LOSS to trigger a fast tunnel restart (which will
+     *     get a fresh DNS resolution and handshake on whatever network is available)
+     *   - The Rust side has a 2-minute RX silence detector as backup
+     */
     private fun registerNetworkCallback() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder()
@@ -239,48 +266,32 @@ class AivpnService : VpnService() {
 
         val callback = object : ConnectivityManager.NetworkCallback() {
 
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                val session = sessionNetwork ?: return
-                if (network == session) return
-                // We only care about WiFi networks we could upgrade to.
-                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
-                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
-
-                // Only upgrade cellular→WiFi.  WiFi→WiFi would cause needless churn.
-                val sessionCaps = cm.getNetworkCapabilities(session) ?: return
-                if (sessionCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
-
-                // Capture state NOW so the deferred job can detect session staleness.
-                val capturedSessionId = sessionId
-                val capturedSession   = session
-
-                upgradePendingJob?.cancel()
-                upgradePendingJob = serviceScope.launch {
-                    delay(2_000L)
-                    // Abort if a new tunnel session was started since this job was queued.
-                    if (sessionId != capturedSessionId) return@launch
-                    val stillValid = cm.getNetworkCapabilities(network)
-                        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-                    val stillOnSameSession = sessionNetwork == capturedSession
-                    if (stillValid && stillOnSameSession) {
-                        // Always upgrade cellular→WiFi when WiFi is stable.
-                        // DO NOT guard on active traffic — that would permanently block the
-                        // upgrade because lastRxMs is refreshed every second by keepalives.
-                        Log.d(TAG, "WiFi stable — upgrading from cellular: $capturedSession -> $network")
-                        targetNetwork = network
-                        setUnderlyingNetworks(arrayOf(network))
-                        AivpnJni.stopTunnel()
-                    }
-                }
+            override fun onAvailable(network: Network) {
+                // A new network appeared. If we're in a "no connectivity" state
+                // and the tunnel died, the reconnect loop will pick it up automatically.
+                // If the tunnel is still alive, the UDP socket will transparently route
+                // through the new network (since we used setUnderlyingNetworks(null)).
+                Log.d(TAG, "Network available: $network")
             }
 
             override fun onLost(network: Network) {
-                if (network != sessionNetwork) return
-                Log.d(TAG, "Session network lost: $network")
-                upgradePendingJob?.cancel()
-                AivpnJni.stopTunnel()
+                Log.d(TAG, "Network lost: $network")
+                // Check if ANY usable network still exists.
+                val anyNetworkLeft = cm.allNetworks.any { net ->
+                    val caps = cm.getNetworkCapabilities(net) ?: return@any false
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                }
+                if (!anyNetworkLeft && isRunning) {
+                    // All connectivity is gone — force the tunnel to restart so it
+                    // reconnects immediately when a network comes back.
+                    Log.d(TAG, "All networks lost — stopping tunnel for fast reconnect")
+                    networkTrigger = true
+                    AivpnJni.stopTunnel()
+                }
             }
         }
+
         try {
             cm.registerNetworkCallback(request, callback)
             networkCallback = callback
@@ -290,8 +301,6 @@ class AivpnService : VpnService() {
     }
 
     private fun unregisterNetworkCallback() {
-        upgradePendingJob?.cancel()
-        upgradePendingJob = null
         networkCallback?.let {
             try {
                 (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
@@ -318,7 +327,6 @@ class AivpnService : VpnService() {
     }
 
     private fun closeTunnel() {
-        sessionNetwork = null
         try { vpnInterface?.close() } catch (_: Exception) {}
         vpnInterface = null
     }
@@ -349,41 +357,19 @@ class AivpnService : VpnService() {
 
     // ──────────── Network waiting ────────────
 
-    private suspend fun waitForNetwork(): Network {
+    /**
+     * Block until at least one non-VPN network with internet capability exists.
+     * This prevents wasting time on DNS lookups / handshakes when there's no connectivity.
+     */
+    private suspend fun waitForConnectivity() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         while (currentCoroutineContext().isActive) {
-            val target = targetNetwork
-            if (target != null) {
-                val caps = cm.getNetworkCapabilities(target)
-                if (caps != null &&
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                    targetNetwork = null
-                    return target
-                } else {
-                    targetNetwork = null
-                }
+            val hasNetwork = cm.allNetworks.any { net ->
+                val caps = cm.getNetworkCapabilities(net) ?: return@any false
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             }
-            // Scan allNetworks: activeNetwork may still point to the VPN interface briefly.
-            // Sort by preference: WiFi > Ethernet > Cellular.
-            // allNetworks order is NOT guaranteed — without sorting the first entry could be
-            // cellular even when WiFi is fully available, causing the app to use mobile data.
-            val best = cm.allNetworks
-                .filter { net ->
-                    val caps = cm.getNetworkCapabilities(net) ?: return@filter false
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                }
-                .maxByOrNull { net ->
-                    val caps = cm.getNetworkCapabilities(net) ?: return@maxByOrNull 0
-                    when {
-                        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)     -> 2
-                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
-                        else -> 0 // CELLULAR — last resort
-                    }
-                }
-            if (best != null) return best
+            if (hasNetwork) return
             delay(300L)
         }
         throw CancellationException("Cancelled while waiting for network")

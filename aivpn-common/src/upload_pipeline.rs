@@ -87,6 +87,30 @@ impl PacketEncryptor for ZeroMdhEncryptor {
 
 // ──────────── The upload loop ────────────
 
+/// Returns true for transient OS-level errors where retrying immediately
+/// or just dropping the packet is safer than triggering a full reconnect.
+fn is_transient_send_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        NetworkUnreachable | HostUnreachable | NetworkDown | AddrNotAvailable | Interrupted
+    )
+}
+
+/// Send helper that tolerates transient network errors (e.g. mid-switch on mobile).
+/// Returns Ok(()) on success or transient error (logged, packet dropped).
+/// Returns Err only on fatal errors (e.g. EBADF = socket closed).
+async fn send_tolerant(udp: &UdpSocket, data: &[u8]) -> Result<()> {
+    match udp.send(data).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_transient_send_error(&e) => {
+            tracing::debug!("upload: transient send error (dropped packet): {e}");
+            Ok(())
+        }
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 /// Run the upload loop: pull TUN packets from `rx`, encrypt via `enc`, send
 /// over `udp`. Uses biased `select!` to prioritise data over keepalives and a
 /// burst-drain after the first recv to amortise per-packet scheduler overhead.
@@ -114,7 +138,7 @@ pub async fn run_upload_loop(
                 };
 
                 let encrypted = enc.encrypt_data(&pkt_data)?;
-                udp.send(&encrypted).await.map_err(Error::Io)?;
+                send_tolerant(udp, &encrypted).await?;
                 enc.on_data_sent(pkt_data.len());
 
                 // Burst drain: process up to burst_size without yielding
@@ -122,7 +146,7 @@ pub async fn run_upload_loop(
                     match rx.try_recv() {
                         Ok(pkt) => {
                             let encrypted = enc.encrypt_data(&pkt)?;
-                            udp.send(&encrypted).await.map_err(Error::Io)?;
+                            send_tolerant(udp, &encrypted).await?;
                             enc.on_data_sent(pkt.len());
                         }
                         Err(mpsc::error::TryRecvError::Empty) => break,
@@ -136,7 +160,7 @@ pub async fn run_upload_loop(
             // ── Keepalive (fires only when data path is idle) ──
             _ = ka_interval.tick() => {
                 let encrypted = enc.encrypt_keepalive()?;
-                udp.send(&encrypted).await.map_err(Error::Io)?;
+                send_tolerant(udp, &encrypted).await?;
             }
         }
     }

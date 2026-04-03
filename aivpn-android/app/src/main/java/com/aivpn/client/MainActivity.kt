@@ -1,12 +1,17 @@
 package com.aivpn.client
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -14,6 +19,7 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 import com.aivpn.client.databinding.ActivityMainBinding
 import org.json.JSONObject
+import java.util.UUID
 
 /**
  * Main screen — server address, public key, connect/disconnect button,
@@ -25,6 +31,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var isConnected = false
+
+    private var profiles = mutableListOf<SecureStorage.ConnectionProfile>()
+    private var activeProfileId: String? = null
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -58,22 +67,41 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Restore saved connection key from encrypted storage
-        binding.editConnectionKey.setText(SecureStorage.loadConnectionKey(this))
+        // Migrate legacy single connection key to profiles
+        migrateLegacyKey()
+
+        // Load profiles
+        profiles = SecureStorage.loadProfiles(this)
+        activeProfileId = SecureStorage.loadActiveProfileId(this)
+
+        // If we have an active profile, load its key into the field
+        val active = profiles.find { it.id == activeProfileId }
+        if (active != null) {
+            binding.editConnectionKey.setText(active.key)
+        } else if (profiles.isNotEmpty()) {
+            activeProfileId = profiles[0].id
+            binding.editConnectionKey.setText(profiles[0].key)
+            SecureStorage.saveActiveProfileId(this, profiles[0].id)
+        } else {
+            // Fallback: try legacy key
+            binding.editConnectionKey.setText(SecureStorage.loadConnectionKey(this))
+        }
+
+        renderProfiles()
 
         // Update language button label
         updateLanguageButton()
 
         binding.btnConnect.setOnClickListener {
-            if (isConnected) {
-                disconnect()
-            } else {
-                connect()
-            }
+            if (isConnected) disconnect() else connect()
         }
 
         binding.btnLanguage.setOnClickListener {
             toggleLanguage()
+        }
+
+        binding.btnAddProfile.setOnClickListener {
+            showProfileDialog(null)
         }
 
         // Restore connection state if service is already running
@@ -82,6 +110,202 @@ class MainActivity : AppCompatActivity() {
             updateUI(true, AivpnService.lastStatusText)
         }
     }
+
+    // ──────────── Profile management ────────────
+
+    private fun migrateLegacyKey() {
+        val legacyKey = SecureStorage.loadConnectionKey(this)
+        if (legacyKey.isNotEmpty()) {
+            val existing = SecureStorage.loadProfiles(this)
+            if (existing.none { it.key == legacyKey }) {
+                val profile = SecureStorage.ConnectionProfile(
+                    id = UUID.randomUUID().toString(),
+                    name = extractServerName(legacyKey),
+                    key = legacyKey
+                )
+                val updated = existing.toMutableList()
+                updated.add(profile)
+                SecureStorage.saveProfiles(this, updated)
+                SecureStorage.saveActiveProfileId(this, profile.id)
+            }
+            SecureStorage.remove(this, "connection_key")
+        }
+    }
+
+    private fun extractServerName(connectionKey: String): String {
+        val parsed = parseConnectionKey(connectionKey) ?: return "Server"
+        val server = parsed[0]
+        val host = server.substringBefore(":")
+        return host
+    }
+
+    private fun renderProfiles() {
+        val container = binding.profileList
+        container.removeAllViews()
+
+        if (profiles.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = getString(R.string.no_profiles)
+                setTextColor(getColor(R.color.text_secondary))
+                textSize = 13f
+                setPadding(0, 8.dp, 0, 8.dp)
+            }
+            container.addView(empty)
+            return
+        }
+
+        for (profile in profiles) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 6.dp, 0, 6.dp)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+
+            val isActive = profile.id == activeProfileId
+
+            // Profile name + server info
+            val nameView = TextView(this).apply {
+                text = profile.name
+                textSize = 14f
+                setTextColor(getColor(if (isActive) R.color.accent else R.color.text_primary))
+                if (isActive) setTypeface(null, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val editBtn = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_edit)
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setPadding(8.dp, 4.dp, 8.dp, 4.dp)
+                contentDescription = getString(R.string.btn_edit)
+                setOnClickListener { showProfileDialog(profile) }
+            }
+
+            val deleteBtn = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_delete)
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setPadding(8.dp, 4.dp, 8.dp, 4.dp)
+                contentDescription = getString(R.string.btn_delete)
+                setOnClickListener { confirmDeleteProfile(profile) }
+            }
+
+            // Tap the row to select
+            row.setOnClickListener {
+                if (isConnected) return@setOnClickListener
+                activeProfileId = profile.id
+                SecureStorage.saveActiveProfileId(this, profile.id)
+                binding.editConnectionKey.setText(profile.key)
+                renderProfiles()
+            }
+
+            row.addView(nameView)
+            if (!isConnected) {
+                row.addView(editBtn)
+                row.addView(deleteBtn)
+            }
+            container.addView(row)
+        }
+    }
+
+    private fun showProfileDialog(existing: SecureStorage.ConnectionProfile?) {
+        if (isConnected) return
+
+        // Use the dialog's theme context so EditText fields inherit proper colours
+        // (white text, grey hints) instead of defaulting to the dark-on-dark activity theme.
+        val dialogCtx = android.view.ContextThemeWrapper(this, R.style.Theme_AIVPN_Dialog)
+
+        val layout = LinearLayout(dialogCtx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dp, 16.dp, 24.dp, 0)
+        }
+
+        val nameInput = EditText(dialogCtx).apply {
+            hint = getString(R.string.hint_profile_name)
+            setText(existing?.name ?: "")
+            setSingleLine(true)
+        }
+        val keyInput = EditText(dialogCtx).apply {
+            hint = getString(R.string.hint_profile_key)
+            setText(existing?.key ?: binding.editConnectionKey.text.toString())
+            setSingleLine(true)
+            textSize = 13f
+        }
+
+        layout.addView(nameInput)
+        layout.addView(keyInput)
+
+        val title = if (existing != null)
+            getString(R.string.dialog_edit_profile)
+        else
+            getString(R.string.dialog_add_profile)
+
+        AlertDialog.Builder(this, R.style.Theme_AIVPN_Dialog)
+            .setTitle(title)
+            .setView(layout)
+            .setPositiveButton(getString(R.string.btn_save)) { _, _ ->
+                val name = nameInput.text.toString().trim()
+                val key = keyInput.text.toString().trim()
+
+                if (name.isEmpty()) {
+                    Toast.makeText(this, getString(R.string.error_profile_name_empty), Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                if (key.isEmpty()) {
+                    Toast.makeText(this, getString(R.string.error_profile_key_empty), Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                if (parseConnectionKey(key) == null) {
+                    Toast.makeText(this, getString(R.string.error_profile_key_invalid), Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                if (existing != null) {
+                    val idx = profiles.indexOfFirst { it.id == existing.id }
+                    if (idx >= 0) {
+                        profiles[idx] = existing.copy(name = name, key = key)
+                    }
+                } else {
+                    val newProfile = SecureStorage.ConnectionProfile(
+                        id = UUID.randomUUID().toString(),
+                        name = name,
+                        key = key
+                    )
+                    profiles.add(newProfile)
+                    activeProfileId = newProfile.id
+                    SecureStorage.saveActiveProfileId(this, newProfile.id)
+                    binding.editConnectionKey.setText(key)
+                }
+                SecureStorage.saveProfiles(this, profiles)
+                renderProfiles()
+            }
+            .setNegativeButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
+    private fun confirmDeleteProfile(profile: SecureStorage.ConnectionProfile) {
+        if (isConnected) return
+        AlertDialog.Builder(this, R.style.Theme_AIVPN_Dialog)
+            .setMessage(getString(R.string.confirm_delete_profile, profile.name))
+            .setPositiveButton(getString(R.string.btn_delete)) { _, _ ->
+                profiles.removeAll { it.id == profile.id }
+                if (activeProfileId == profile.id) {
+                    activeProfileId = profiles.firstOrNull()?.id
+                    activeProfileId?.let { SecureStorage.saveActiveProfileId(this, it) }
+                    binding.editConnectionKey.setText(
+                        profiles.firstOrNull()?.key ?: ""
+                    )
+                }
+                SecureStorage.saveProfiles(this, profiles)
+                renderProfiles()
+            }
+            .setNegativeButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
+    private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
         super.onResume()
@@ -156,8 +380,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Save connection key to encrypted storage
-        SecureStorage.saveConnectionKey(this, connectionKey)
+        // Auto-save if the key isn't already in profiles
+        if (profiles.none { it.key == connectionKey }) {
+            val profile = SecureStorage.ConnectionProfile(
+                id = UUID.randomUUID().toString(),
+                name = extractServerName(connectionKey),
+                key = connectionKey
+            )
+            profiles.add(profile)
+            activeProfileId = profile.id
+            SecureStorage.saveProfiles(this, profiles)
+            SecureStorage.saveActiveProfileId(this, profile.id)
+            renderProfiles()
+        }
 
         // Request VPN permission from the system
         val intent = VpnService.prepare(this)
@@ -211,6 +446,8 @@ class MainActivity : AppCompatActivity() {
 
         // Lock/unlock input fields while connected
         binding.editConnectionKey.isEnabled = !connected
+        binding.btnAddProfile.isEnabled = !connected
+        renderProfiles()
 
         // Timer management
         if (connected && connectionStartTime == 0L) {

@@ -875,6 +875,15 @@ impl Gateway {
             sess.mark_tag_received(counter);
             sess.last_seen = std::time::Instant::now();
 
+            // IP migration: update stored client address when a validated packet
+            // arrives from a different endpoint (e.g. WiFi → cellular switchover).
+            // Safe because the packet passed full cryptographic validation.
+            if !is_new_session && sess.client_addr != client_addr {
+                info!("Client endpoint migrated: {} → {} (session keepalive active)",
+                    hash_addr(&sess.client_addr), hash_addr(&client_addr));
+                sess.client_addr = client_addr;
+            }
+
             // Refresh precomputed tag window only when we've moved far enough.
             // Window size is 256; refreshing every 64 packets keeps enough headroom
             // while reducing CPU spent in HashMap/tag_map maintenance.

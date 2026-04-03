@@ -24,10 +24,25 @@
     <string name="label_upload">Отправлено</string>
     <string name="label_download">Получено</string>
     <string name="label_duration">Время</string>
-    <string name="version_footer">v0.3.0 · ИИ-обход DPI</string>
+    <string name="version_footer">v0.5.0 · ИИ-обход DPI</string>
     <string name="notification_channel">Туннель AIVPN</string>
     <string name="notification_channel_desc">Статус активного VPN-туннеля</string>
     <string name="notification_connecting">Подключение…</string>
     <string name="notification_connected">Подключено к %s</string>
     <string name="label_language">Язык</string>
+    <string name="label_profiles">Сохранённые ключи</string>
+    <string name="btn_add_key">+ Добавить</string>
+    <string name="dialog_add_profile">Добавить ключ подключения</string>
+    <string name="dialog_edit_profile">Редактировать ключ</string>
+    <string name="hint_profile_name">Название (напр. Сервер 1)</string>
+    <string name="hint_profile_key">Ключ подключения (aivpn://…)</string>
+    <string name="btn_save">Сохранить</string>
+    <string name="btn_cancel">Отмена</string>
+    <string name="btn_delete">Удалить</string>
+    <string name="btn_edit">Изменить</string>
+    <string name="error_profile_name_empty">Введите название</string>
+    <string name="error_profile_key_empty">Введите ключ подключения</string>
+    <string name="error_profile_key_invalid">Неверный формат ключа</string>
+    <string name="confirm_delete_profile">Удалить "%s"?</string>
+    <string name="no_profiles">Нет сохранённых ключей. Нажмите + Добавить.</string>
 </resources>

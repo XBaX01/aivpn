@@ -228,11 +228,58 @@
                 android:orientation="vertical"
                 android:padding="20dp">
 
-                <!-- Connection key (single field) -->
+                <!-- Saved profiles header + Add button -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="8dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/label_profiles"
+                        android:textSize="14sp"
+                        android:textColor="@color/text_secondary"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnAddProfile"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:text="@string/btn_add_key"
+                        android:textSize="12sp"
+                        android:textColor="@color/accent"
+                        android:minWidth="0dp"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp" />
+                </LinearLayout>
+
+                <!-- Scrollable profile list (populated programmatically) -->
+                <ScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:maxHeight="200dp">
+
+                    <LinearLayout
+                        android:id="@+id/profileList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+                </ScrollView>
+
+                <!-- Connection key (manual entry) -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
                     android:hint="@string/hint_connection_key"
+                    app:hintTextColor="@color/text_secondary"
+                    app:boxStrokeColor="@color/accent"
+                    app:placeholderTextColor="@color/text_secondary"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
