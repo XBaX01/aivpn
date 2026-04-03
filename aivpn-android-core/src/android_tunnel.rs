@@ -33,9 +33,11 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);  // 20s keeps NAT mappings alive
-const RX_SILENCE: Duration = Duration::from_secs(240);         // 4 min before giving up
-const RX_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);  // closer to WireGuard roaming behavior
+const RX_SILENCE: Duration = Duration::from_secs(45);          // fail fast on stale/mobile path
+const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(12);
+const TX_WITHOUT_RX_MIN_BYTES: u64 = 16 * 1024;
 const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 
@@ -123,6 +125,7 @@ pub async fn run_tunnel_android(
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];
     let mut last_rx = Instant::now();
+    let mut upload_at_last_rx = UPLOAD_BYTES.load(Ordering::Relaxed);
 
     // Split upload into a dedicated pipeline:
     // TUN reader task -> channel -> UDP sender/encrypt task.
@@ -212,6 +215,7 @@ pub async fn run_tunnel_android(
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
                 last_rx = Instant::now();
+                upload_at_last_rx = UPLOAD_BYTES.load(Ordering::Relaxed);
                 if let Ok(decoded) = decode_packet_with_mdh_len(
                     &udp_buf[..n],
                     &keys,
@@ -238,6 +242,23 @@ pub async fn run_tunnel_android(
             // ── RX silence detector (proper interval, not recreated each iteration) ──
             _ = rx_check.tick() => {
                 let silence = last_rx.elapsed();
+                let uploaded_total = UPLOAD_BYTES.load(Ordering::Relaxed);
+                let uploaded_since_rx = uploaded_total.saturating_sub(upload_at_last_rx);
+
+                // Half-open path detector: TX is actively flowing, but no RX returns.
+                // This catches "connected but dead" states faster after network switches.
+                if silence > TX_WITHOUT_RX_TIMEOUT && uploaded_since_rx >= TX_WITHOUT_RX_MIN_BYTES {
+                    tun_reader_task.abort();
+                    upload_sender_task.abort();
+                    return Err(Error::Session(
+                        format!(
+                            "TX without RX: {} bytes sent in {:?} since last RX — reconnecting",
+                            uploaded_since_rx,
+                            silence
+                        )
+                    ));
+                }
+
                 if silence > RX_SILENCE {
                     tun_reader_task.abort();
                     upload_sender_task.abort();

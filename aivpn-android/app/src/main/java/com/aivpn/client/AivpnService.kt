@@ -9,7 +9,6 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -68,6 +67,9 @@ class AivpnService : VpnService() {
     // Network change detection
     @Volatile private var networkTrigger: Boolean   = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var currentDefaultNetwork: Network? = null
+    @Volatile private var lastNetworkEventAtMs: Long = 0L
+    private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
 
     // ──────────── Service lifecycle ────────────
 
@@ -253,39 +255,54 @@ class AivpnService : VpnService() {
      * to specific interfaces.  Instead:
      *   - setUnderlyingNetworks(null) lets Android route through the best available network
      *   - VpnService.protect(fd) ensures the UDP socket bypasses VPN routing
-     *   - We only detect connectivity LOSS to trigger a fast tunnel restart (which will
+    *   - We detect default-network switches/loss and trigger a fast tunnel restart (which will
      *     get a fresh DNS resolution and handshake on whatever network is available)
-     *   - The Rust side has a 2-minute RX silence detector as backup
+    *   - The Rust side has an aggressive RX silence detector as backup
      */
     private fun registerNetworkCallback() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            .build()
+        currentDefaultNetwork = cm.activeNetwork
 
         val callback = object : ConnectivityManager.NetworkCallback() {
 
             override fun onAvailable(network: Network) {
-                // A new network appeared. If we're in a "no connectivity" state
-                // and the tunnel died, the reconnect loop will pick it up automatically.
-                // If the tunnel is still alive, the UDP socket will transparently route
-                // through the new network (since we used setUnderlyingNetworks(null)).
-                Log.d(TAG, "Network available: $network")
+                if (isVpnNetwork(cm, network)) return
+
+                val previous = currentDefaultNetwork
+                currentDefaultNetwork = network
+                val now = System.currentTimeMillis()
+
+                Log.d(TAG, "Default network available: $network (previous=$previous)")
+
+                if (isRunning && previous != null && previous != network) {
+                    if (now - lastNetworkEventAtMs < NETWORK_EVENT_DEBOUNCE_MS) {
+                        Log.d(TAG, "Default-network switch debounced")
+                        return
+                    }
+                    lastNetworkEventAtMs = now
+                    networkTrigger = true
+                    Log.d(TAG, "Default network changed — forcing tunnel restart")
+                    AivpnJni.stopTunnel()
+                }
             }
 
             override fun onLost(network: Network) {
-                Log.d(TAG, "Network lost: $network")
-                // Check if ANY usable network still exists.
-                val anyNetworkLeft = cm.allNetworks.any { net ->
-                    val caps = cm.getNetworkCapabilities(net) ?: return@any false
+                if (isVpnNetwork(cm, network)) return
+                Log.d(TAG, "Default network lost: $network")
+
+                if (network == currentDefaultNetwork) {
+                    currentDefaultNetwork = cm.activeNetwork
+                }
+
+                val hasUsableDefault = currentDefaultNetwork?.let { net ->
+                    val caps = cm.getNetworkCapabilities(net)
+                    caps != null &&
                     !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
                     caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                }
-                if (!anyNetworkLeft && isRunning) {
-                    // All connectivity is gone — force the tunnel to restart so it
-                    // reconnects immediately when a network comes back.
-                    Log.d(TAG, "All networks lost — stopping tunnel for fast reconnect")
+                } == true
+
+                if (!hasUsableDefault && isRunning) {
+                    Log.d(TAG, "No usable default network — stopping tunnel for fast reconnect")
                     networkTrigger = true
                     AivpnJni.stopTunnel()
                 }
@@ -293,11 +310,16 @@ class AivpnService : VpnService() {
         }
 
         try {
-            cm.registerNetworkCallback(request, callback)
+            cm.registerDefaultNetworkCallback(callback)
             networkCallback = callback
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register NetworkCallback: ${e.message}", e)
         }
+    }
+
+    private fun isVpnNetwork(cm: ConnectivityManager, network: Network): Boolean {
+        val caps = cm.getNetworkCapabilities(network)
+        return caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
     }
 
     private fun unregisterNetworkCallback() {
@@ -308,6 +330,7 @@ class AivpnService : VpnService() {
             } catch (_: Exception) {}
             networkCallback = null
         }
+        currentDefaultNetwork = null
     }
 
     // ──────────── Stop ────────────
@@ -364,12 +387,13 @@ class AivpnService : VpnService() {
     private suspend fun waitForConnectivity() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         while (currentCoroutineContext().isActive) {
-            val hasNetwork = cm.allNetworks.any { net ->
-                val caps = cm.getNetworkCapabilities(net) ?: return@any false
+            val active = cm.activeNetwork
+            val caps = active?.let { cm.getNetworkCapabilities(it) }
+            val hasUsableActiveNetwork = active != null && caps != null &&
                 !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            }
-            if (hasNetwork) return
+
+            if (hasUsableActiveNetwork) return
             delay(300L)
         }
         throw CancellationException("Cancelled while waiting for network")
