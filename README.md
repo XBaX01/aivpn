@@ -4,6 +4,8 @@ Traditional VPNs are dead. ISPs and state-level firewalls (like GFW) detect Wire
 
 **AIVPN** is my answer to modern deep packet inspection. We don't just encrypt packets — we disguise them as real application traffic. Your ISP sees a Zoom call or TikTok scrolling, when in reality it's a fully encrypted tunnel.
 
+To validate this in practice, I built my own DPI emulator, reproduced real filtering scenarios, and intentionally blocked traffic across different modes. I then stress-tested the system under heavy load to measure resilience, mask-switching speed, and routing stability. For fast routing, I implemented my patented approach: USPTO (USA) application No. 19/452,440 dated Jan 19, 2026 — *SYSTEM AND METHOD FOR UNSUPERVISED MULTI-TASK ROUTING VIA SIGNAL RECONSTRUCTION RESONANCE*.
+
 ## Supported Platforms
 
 | Platform | Server | Client | Full Tunnel | Notes |
@@ -12,6 +14,13 @@ Traditional VPNs are dead. ISPs and state-level firewalls (like GFW) detect Wire
 | **macOS** | — | ✅ | ✅ | Via `utun` kernel interface, auto route config |
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
+
+### Current Client Status
+
+- ✅ macOS app: working
+- ✅ CLI client: working
+- ✅ Android app: working
+- 🧪 Windows client: currently in testing
 
 ## 📥 Downloads (Pre-built Binaries)
 
@@ -44,6 +53,14 @@ No need to compile — download and run:
 1. Download and install `aivpn-client.apk`
 2. Paste your connection key (`aivpn://...`) into the app
 3. Tap **Connect**
+
+## ❤️ Support the Project
+
+If you find this project helpful, you can support its development with a donation via Tribute:
+
+👉 https://t.me/tribute/app?startapp=dzX1
+
+Every donation helps keep AIVPN evolving. Thank you! 🙌
 
 ## The Main Feature: Neural Resonance (AI)
 
