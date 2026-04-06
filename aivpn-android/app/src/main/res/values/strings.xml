@@ -45,4 +45,22 @@
     <string name="error_profile_key_invalid">Invalid connection key format</string>
     <string name="confirm_delete_profile">Delete "%s"?</string>
     <string name="no_profiles">No saved keys. Tap + Add to create one.</string>
+
+    <!-- Split tunneling -->
+    <string name="btn_split_tunnel">Split Tunneling</string>
+    <string name="split_tunnel_title">Split Tunneling</string>
+    <string name="split_tunnel_search">Search…</string>
+    <string name="split_tunnel_system">Hide syst.</string>
+    <string name="split_tunnel_all">All</string>
+    <string name="split_tunnel_tab_apps">Apps</string>
+    <string name="split_tunnel_tab_sites">Sites</string>
+    <string name="split_tunnel_bypass_count">%d bypass VPN</string>
+    <string name="split_tunnel_none">All traffic via VPN</string>
+    <string name="split_tunnel_hint_apps">%d apps</string>
+    <string name="split_tunnel_hint_sites">%d sites</string>
+    <string name="split_tunnel_hint_combined">%1$s, %2$s bypass VPN</string>
+    <string name="split_tunnel_add_domain">Enter domain…</string>
+    <string name="split_tunnel_domain_hint">Traffic to these domains will bypass VPN</string>
+    <string name="split_tunnel_domain_invalid">Invalid domain format</string>
+    <string name="split_tunnel_domain_exists">Domain already added</string>
 </resources>

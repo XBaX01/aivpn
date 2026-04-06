@@ -104,6 +104,12 @@ class MainActivity : AppCompatActivity() {
             showProfileDialog(null)
         }
 
+        binding.btnSplitTunnel.setOnClickListener {
+            startActivity(Intent(this, SplitTunnelActivity::class.java))
+        }
+
+        updateSplitTunnelHint()
+
         // Restore connection state if service is already running
         if (AivpnService.isRunning) {
             isConnected = true
@@ -307,6 +313,19 @@ class MainActivity : AppCompatActivity() {
 
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
+    private fun updateSplitTunnelHint() {
+        val appCount = SecureStorage.loadExcludedApps(this).size
+        val siteCount = SecureStorage.loadExcludedDomains(this).size
+        binding.textSplitTunnelHint.text = when {
+            appCount > 0 && siteCount > 0 -> getString(R.string.split_tunnel_hint_combined,
+                getString(R.string.split_tunnel_hint_apps, appCount),
+                getString(R.string.split_tunnel_hint_sites, siteCount))
+            appCount > 0 -> getString(R.string.split_tunnel_hint_apps, appCount) + " " + getString(R.string.split_tunnel_bypass_count, appCount).substringAfter(" ")
+            siteCount > 0 -> getString(R.string.split_tunnel_hint_sites, siteCount) + " " + getString(R.string.split_tunnel_bypass_count, siteCount).substringAfter(" ")
+            else -> getString(R.string.split_tunnel_none)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         // Register callbacks when activity becomes visible.
@@ -332,6 +351,8 @@ class MainActivity : AppCompatActivity() {
             isConnected = true
             updateUI(true, AivpnService.lastStatusText)
         }
+
+        updateSplitTunnelHint()
     }
 
     override fun onPause() {

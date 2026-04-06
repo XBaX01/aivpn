@@ -14,11 +14,21 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
         self.keyValue = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
         
-        // Извлекаем данные из ключа
+        // Извлекаем данные из ключа (URL-safe base64 без padding)
         var server: String? = nil
         var ip: String? = nil
         
-        if let data = Data(base64Encoded: self.keyValue),
+        // Convert URL-safe base64 to standard base64 for Foundation decoding
+        var b64 = self.keyValue
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        // Add padding if needed
+        let remainder = b64.count % 4
+        if remainder > 0 {
+            b64 += String(repeating: "=", count: 4 - remainder)
+        }
+        
+        if let data = Data(base64Encoded: b64),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             server = json["s"] as? String
             ip = json["i"] as? String

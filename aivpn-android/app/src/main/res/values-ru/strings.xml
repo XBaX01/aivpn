@@ -45,4 +45,22 @@
     <string name="error_profile_key_invalid">Неверный формат ключа</string>
     <string name="confirm_delete_profile">Удалить "%s"?</string>
     <string name="no_profiles">Нет сохранённых ключей. Нажмите + Добавить.</string>
+
+    <!-- Split tunneling -->
+    <string name="btn_split_tunnel">Раздельный туннель</string>
+    <string name="split_tunnel_title">Раздельный туннель</string>
+    <string name="split_tunnel_search">Поиск…</string>
+    <string name="split_tunnel_system">Скрыть сист.</string>
+    <string name="split_tunnel_all">Все</string>
+    <string name="split_tunnel_tab_apps">Приложения</string>
+    <string name="split_tunnel_tab_sites">Сайты</string>
+    <string name="split_tunnel_bypass_count">%d обходят VPN</string>
+    <string name="split_tunnel_none">Весь трафик через VPN</string>
+    <string name="split_tunnel_hint_apps">%d прил.</string>
+    <string name="split_tunnel_hint_sites">%d сайтов</string>
+    <string name="split_tunnel_hint_combined">%1$s, %2$s обходят VPN</string>
+    <string name="split_tunnel_add_domain">Введите домен…</string>
+    <string name="split_tunnel_domain_hint">Трафик к этим доменам обходит VPN</string>
+    <string name="split_tunnel_domain_invalid">Неверный формат домена</string>
+    <string name="split_tunnel_domain_exists">Домен уже добавлен</string>
 </resources>

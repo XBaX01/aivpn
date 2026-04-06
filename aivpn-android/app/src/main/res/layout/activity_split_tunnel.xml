@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/background">
+
+    <!-- Compact toolbar: back + title + counter -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="8dp">
+
+        <ImageButton
+            android:id="@+id/btnBack"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@android:drawable/ic_menu_revert"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Back"
+            android:scaleType="centerInside"
+            app:tint="@color/text_primary" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/split_tunnel_title"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="@color/text_primary"
+            android:paddingStart="4dp" />
+
+        <TextView
+            android:id="@+id/textCounter"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="@color/text_secondary"
+            android:paddingEnd="8dp" />
+    </LinearLayout>
+
+    <!-- Tab bar: Apps | Sites -->
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:background="@color/surface"
+        app:tabMode="fixed"
+        app:tabGravity="fill"
+        app:tabTextColor="@color/text_secondary"
+        app:tabSelectedTextColor="@color/accent"
+        app:tabIndicatorColor="@color/accent"
+        app:tabIndicatorHeight="2dp"
+        app:tabTextAppearance="@android:style/TextAppearance.Widget.TabWidget" />
+
+    <!-- Apps page -->
+    <FrameLayout
+        android:id="@+id/pageApps"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <!-- Search row + system checkbox -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="12dp">
+
+                <EditText
+                    android:id="@+id/editSearch"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:hint="@string/split_tunnel_search"
+                    android:textSize="13sp"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_secondary"
+                    android:background="@android:color/transparent"
+                    android:inputType="text"
+                    android:singleLine="true"
+                    android:drawableStart="@android:drawable/ic_menu_search"
+                    android:drawablePadding="6dp"
+                    android:paddingStart="4dp"
+                    android:importantForAutofill="no" />
+
+                <CheckBox
+                    android:id="@+id/checkSystem"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/split_tunnel_system"
+                    android:textSize="11sp"
+                    android:textColor="@color/text_secondary"
+                    android:buttonTint="@color/text_secondary"
+                    android:minWidth="0dp"
+                    android:paddingStart="2dp" />
+            </LinearLayout>
+
+            <!-- Header row: "All" + select-all checkbox -->
+            <LinearLayout
+                android:id="@+id/headerRow"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="12dp"
+                android:background="@color/surface">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/split_tunnel_all"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_secondary" />
+
+                <CheckBox
+                    android:id="@+id/checkAll"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="@color/accent" />
+            </LinearLayout>
+
+            <!-- App list -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recyclerApps"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Sites page -->
+    <FrameLayout
+        android:id="@+id/pageSites"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <!-- Add domain row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="4dp">
+
+                <EditText
+                    android:id="@+id/editDomain"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:hint="@string/split_tunnel_add_domain"
+                    android:textSize="13sp"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_secondary"
+                    android:background="@android:color/transparent"
+                    android:inputType="textUri"
+                    android:singleLine="true"
+                    android:imeOptions="actionDone"
+                    android:paddingStart="4dp"
+                    android:importantForAutofill="no" />
+
+                <ImageButton
+                    android:id="@+id/btnAddDomain"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:src="@android:drawable/ic_input_add"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Add"
+                    android:scaleType="centerInside"
+                    app:tint="@color/accent" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/grey" />
+
+            <!-- Domain list -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recyclerDomains"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipToPadding="false" />
+
+            <!-- Hint -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/split_tunnel_domain_hint"
+                android:textSize="11sp"
+                android:textColor="@color/text_secondary"
+                android:gravity="center"
+                android:padding="8dp" />
+        </LinearLayout>
+    </FrameLayout>
+
+</LinearLayout>

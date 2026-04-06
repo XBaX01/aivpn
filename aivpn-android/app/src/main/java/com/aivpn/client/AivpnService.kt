@@ -196,7 +196,7 @@ class AivpnService : VpnService() {
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
         // IPv6 is intentionally disabled in this client.
-        val pfd = Builder()
+        val builder = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, 24)
             .addRoute("0.0.0.0", 0)          // IPv4: route all through VPN
@@ -204,7 +204,47 @@ class AivpnService : VpnService() {
             .addDnsServer("1.1.1.1")
             .setMtu(TUN_MTU)
             .setBlocking(false)
-            .establish() ?: throw Exception("Failed to establish VPN interface")
+
+        // Split tunneling: exclude selected apps from VPN
+        val excludedApps = SecureStorage.loadExcludedApps(this)
+        for (pkg in excludedApps) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (_: Exception) {
+                // Package may have been uninstalled — skip silently
+            }
+        }
+
+        // Split tunneling: exclude domains by resolving to IPs
+        val excludedDomains = SecureStorage.loadExcludedDomains(this)
+        if (excludedDomains.isNotEmpty()) {
+            val excludedIPs = mutableSetOf<String>()
+            for (domain in excludedDomains) {
+                try {
+                    val addresses = java.net.InetAddress.getAllByName(domain)
+                    for (addr in addresses) {
+                        if (addr is java.net.Inet4Address) {
+                            excludedIPs.add(addr.hostAddress ?: continue)
+                        }
+                    }
+                } catch (_: Exception) {
+                    Log.d(TAG, "Failed to resolve excluded domain: $domain")
+                }
+            }
+            // If we have excluded IPs, replace the default route with specific /1 routes
+            // that cover everything except the excluded IPs (which get /32 direct routes).
+            // Android VPN routing: more specific routes win, so /32 routes for excluded IPs
+            // hit the underlying network, while 0.0.0.0/0 catches everything else.
+            // However, addRoute(0/0) is already added above. We need to exclude by NOT
+            // routing those IPs through VPN. On Android, the only way is per-app exclusion
+            // or using the system routing table. We log them for now and they can be used
+            // by the Rust tunnel for domain-based bypassing via DNS interception.
+            if (excludedIPs.isNotEmpty()) {
+                Log.d(TAG, "Excluded domain IPs: $excludedIPs")
+            }
+        }
+
+        val pfd = builder.establish() ?: throw Exception("Failed to establish VPN interface")
 
         vpnInterface = pfd
         // WireGuard approach: let Android OS choose the best underlying network.

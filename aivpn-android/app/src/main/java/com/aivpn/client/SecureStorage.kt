@@ -110,4 +110,50 @@ object SecureStorage {
     fun loadActiveProfileId(context: Context): String {
         return loadString(context, "active_profile_id")
     }
+
+    // ──────────── Split tunneling ────────────
+
+    private const val KEY_EXCLUDED_APPS = "split_tunnel_excluded_apps"
+
+    fun saveExcludedApps(context: Context, packages: Set<String>) {
+        val arr = JSONArray()
+        for (pkg in packages) arr.put(pkg)
+        saveString(context, KEY_EXCLUDED_APPS, arr.toString())
+    }
+
+    fun loadExcludedApps(context: Context): MutableSet<String> {
+        val raw = loadString(context, KEY_EXCLUDED_APPS)
+        if (raw.isEmpty()) return mutableSetOf()
+        return try {
+            val arr = JSONArray(raw)
+            val result = mutableSetOf<String>()
+            for (i in 0 until arr.length()) result.add(arr.getString(i))
+            result
+        } catch (_: Exception) {
+            mutableSetOf()
+        }
+    }
+
+    // ──────────── Excluded domains ────────────
+
+    private const val KEY_EXCLUDED_DOMAINS = "split_tunnel_excluded_domains"
+
+    fun saveExcludedDomains(context: Context, domains: List<String>) {
+        val arr = JSONArray()
+        for (d in domains) arr.put(d)
+        saveString(context, KEY_EXCLUDED_DOMAINS, arr.toString())
+    }
+
+    fun loadExcludedDomains(context: Context): MutableList<String> {
+        val raw = loadString(context, KEY_EXCLUDED_DOMAINS)
+        if (raw.isEmpty()) return mutableListOf()
+        return try {
+            val arr = JSONArray(raw)
+            val result = mutableListOf<String>()
+            for (i in 0 until arr.length()) result.add(arr.getString(i))
+            result
+        } catch (_: Exception) {
+            mutableListOf()
+        }
+    }
 }
