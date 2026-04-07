@@ -34,7 +34,48 @@ APK_DST="${RELEASES_DIR}/aivpn-client.apk"
 
 BUILD_TYPE="${1:-debug}"
 
+pick_android_java_home() {
+    if [[ -n "${AIVPN_ANDROID_JAVA_HOME:-}" ]]; then
+        echo "${AIVPN_ANDROID_JAVA_HOME}"
+        return 0
+    fi
+
+    if [[ -n "${JAVA_HOME:-}" ]]; then
+        echo "${JAVA_HOME}"
+        return 0
+    fi
+
+    if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+        for version in 21 17; do
+            local candidate
+            candidate="$(/usr/libexec/java_home -v "${version}" 2>/dev/null || true)"
+            if [[ -n "${candidate}" && -x "${candidate}/bin/java" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done
+    fi
+
+    if command -v java >/dev/null 2>&1; then
+        local java_bin
+        java_bin="$(command -v java)"
+        echo "$(cd "$(dirname "${java_bin}")/.." && pwd)"
+        return 0
+    fi
+
+    return 1
+}
+
+if JAVA_HOME_SELECTED="$(pick_android_java_home)"; then
+    export JAVA_HOME="${JAVA_HOME_SELECTED}"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+else
+    echo "ERROR: Java runtime not found. Install JDK 17 or JDK 21 and retry."
+    exit 1
+fi
+
 echo "==> Building aivpn-android-core [${BUILD_TYPE}]"
+echo "     Java: ${JAVA_HOME}"
 
 # Require Android NDK
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
@@ -116,10 +157,17 @@ if [[ ! -x "${SCRIPT_DIR}/gradlew" ]]; then
     chmod +x "${SCRIPT_DIR}/gradlew" || true
 fi
 
+GRADLE_ARGS=(--no-daemon -Dkotlin.compiler.execution.strategy=in-process)
+
+(
+    cd "${SCRIPT_DIR}"
+    ./gradlew --stop >/dev/null 2>&1 || true
+)
+
 if [[ "${BUILD_TYPE}" == "release" ]]; then
     (
         cd "${SCRIPT_DIR}"
-        ./gradlew app:assembleRelease
+        ./gradlew "${GRADLE_ARGS[@]}" app:assembleRelease
     )
 
     RELEASE_APK_SIGNED="${SCRIPT_DIR}/app/build/outputs/apk/release/app-universal-release.apk"
@@ -155,7 +203,7 @@ if [[ "${BUILD_TYPE}" == "release" ]]; then
             echo "  Building signed debug APK as installable fallback..."
             (
                 cd "${SCRIPT_DIR}"
-                ./gradlew app:assembleDebug
+                ./gradlew "${GRADLE_ARGS[@]}" app:assembleDebug
             )
             DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
             if [[ -f "${DEBUG_APK}" ]]; then
@@ -173,7 +221,7 @@ if [[ "${BUILD_TYPE}" == "release" ]]; then
 else
     (
         cd "${SCRIPT_DIR}"
-        ./gradlew app:assembleDebug
+        ./gradlew "${GRADLE_ARGS[@]}" app:assembleDebug
     )
     DEBUG_APK="${SCRIPT_DIR}/app/build/outputs/apk/debug/app-universal-debug.apk"
     if [[ -f "${DEBUG_APK}" ]]; then
