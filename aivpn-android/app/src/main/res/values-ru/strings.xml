@@ -54,11 +54,12 @@
     <string name="split_tunnel_all">Все</string>
     <string name="split_tunnel_tab_apps">Приложения</string>
     <string name="split_tunnel_tab_sites">Сайты</string>
+    <string name="split_tunnel_vpn_count">%d через VPN</string>
     <string name="split_tunnel_bypass_count">%d обходят VPN</string>
     <string name="split_tunnel_none">Весь трафик через VPN</string>
     <string name="split_tunnel_hint_apps">%d прил.</string>
     <string name="split_tunnel_hint_sites">%d сайтов</string>
-    <string name="split_tunnel_hint_combined">%1$s, %2$s обходят VPN</string>
+    <string name="split_tunnel_hint_combined">%1$s через VPN, %2$s обходят VPN</string>
     <string name="split_tunnel_add_domain">Введите домен…</string>
     <string name="split_tunnel_domain_hint">Трафик к этим доменам обходит VPN</string>
     <string name="split_tunnel_domain_invalid">Неверный формат домена</string>

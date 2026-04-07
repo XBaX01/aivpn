@@ -113,16 +113,16 @@ object SecureStorage {
 
     // ──────────── Split tunneling ────────────
 
-    private const val KEY_EXCLUDED_APPS = "split_tunnel_excluded_apps"
+    private const val KEY_ALLOWED_APPS = "split_tunnel_allowed_apps"
 
-    fun saveExcludedApps(context: Context, packages: Set<String>) {
+    fun saveAllowedApps(context: Context, packages: Set<String>) {
         val arr = JSONArray()
         for (pkg in packages) arr.put(pkg)
-        saveString(context, KEY_EXCLUDED_APPS, arr.toString())
+        saveString(context, KEY_ALLOWED_APPS, arr.toString())
     }
 
-    fun loadExcludedApps(context: Context): MutableSet<String> {
-        val raw = loadString(context, KEY_EXCLUDED_APPS)
+    fun loadAllowedApps(context: Context): MutableSet<String> {
+        val raw = loadString(context, KEY_ALLOWED_APPS)
         if (raw.isEmpty()) return mutableSetOf()
         return try {
             val arr = JSONArray(raw)

@@ -54,11 +54,12 @@
     <string name="split_tunnel_all">All</string>
     <string name="split_tunnel_tab_apps">Apps</string>
     <string name="split_tunnel_tab_sites">Sites</string>
+    <string name="split_tunnel_vpn_count">%d via VPN</string>
     <string name="split_tunnel_bypass_count">%d bypass VPN</string>
     <string name="split_tunnel_none">All traffic via VPN</string>
     <string name="split_tunnel_hint_apps">%d apps</string>
     <string name="split_tunnel_hint_sites">%d sites</string>
-    <string name="split_tunnel_hint_combined">%1$s, %2$s bypass VPN</string>
+    <string name="split_tunnel_hint_combined">%1$s via VPN, %2$s bypass VPN</string>
     <string name="split_tunnel_add_domain">Enter domain…</string>
     <string name="split_tunnel_domain_hint">Traffic to these domains will bypass VPN</string>
     <string name="split_tunnel_domain_invalid">Invalid domain format</string>

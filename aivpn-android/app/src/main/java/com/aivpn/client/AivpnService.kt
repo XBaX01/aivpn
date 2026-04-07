@@ -205,11 +205,11 @@ class AivpnService : VpnService() {
             .setMtu(TUN_MTU)
             .setBlocking(false)
 
-        // Split tunneling: exclude selected apps from VPN
-        val excludedApps = SecureStorage.loadExcludedApps(this)
-        for (pkg in excludedApps) {
+        // Split tunneling: route only selected apps through VPN
+        val allowedApps = SecureStorage.loadAllowedApps(this)
+        for (pkg in allowedApps) {
             try {
-                builder.addDisallowedApplication(pkg)
+                builder.addAllowedApplication(pkg)
             } catch (_: Exception) {
                 // Package may have been uninstalled — skip silently
             }

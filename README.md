@@ -54,6 +54,28 @@ No need to compile — download and run:
 2. Paste your connection key (`aivpn://...`) into the app
 3. Tap **Connect**
 
+### Android Release Signing
+
+For a production-signed Android APK, create `aivpn-android/keystore.properties`:
+
+```properties
+storeFile=/absolute/path/to/aivpn-release.jks
+storePassword=your-store-password
+keyAlias=aivpn
+keyPassword=your-key-password
+```
+
+Then build with Java 21:
+
+```bash
+cd aivpn-android
+export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
+export PATH="$JAVA_HOME/bin:$PATH"
+./build-rust-android.sh release
+```
+
+If `keystore.properties` is absent, the script falls back to an unsigned release APK and then signs it with the debug keystore only as a local installable fallback.
+
 ## ❤️ Support the Project
 
 If you find this project helpful, you can support its development with a donation via Tribute:

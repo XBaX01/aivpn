@@ -314,13 +314,13 @@ class MainActivity : AppCompatActivity() {
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
     private fun updateSplitTunnelHint() {
-        val appCount = SecureStorage.loadExcludedApps(this).size
+        val appCount = SecureStorage.loadAllowedApps(this).size
         val siteCount = SecureStorage.loadExcludedDomains(this).size
         binding.textSplitTunnelHint.text = when {
             appCount > 0 && siteCount > 0 -> getString(R.string.split_tunnel_hint_combined,
                 getString(R.string.split_tunnel_hint_apps, appCount),
                 getString(R.string.split_tunnel_hint_sites, siteCount))
-            appCount > 0 -> getString(R.string.split_tunnel_hint_apps, appCount) + " " + getString(R.string.split_tunnel_bypass_count, appCount).substringAfter(" ")
+            appCount > 0 -> getString(R.string.split_tunnel_vpn_count, appCount)
             siteCount > 0 -> getString(R.string.split_tunnel_hint_sites, siteCount) + " " + getString(R.string.split_tunnel_bypass_count, siteCount).substringAfter(" ")
             else -> getString(R.string.split_tunnel_none)
         }

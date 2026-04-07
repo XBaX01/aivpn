@@ -6,6 +6,18 @@
 #   cargo install cargo-ndk
 #   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 #
+# Optional release signing via keystore.properties in aivpn-android/:
+#   storeFile=/absolute/path/to/release.jks
+#   storePassword=...
+#   keyAlias=...
+#   keyPassword=...
+#
+# Or via environment variables:
+#   export AIVPN_UPLOAD_STORE_FILE=/absolute/path/to/release.jks
+#   export AIVPN_UPLOAD_STORE_PASSWORD=...
+#   export AIVPN_UPLOAD_KEY_ALIAS=...
+#   export AIVPN_UPLOAD_KEY_PASSWORD=...
+#
 # Usage:
 #   cd aivpn-android
 #   ./build-rust-android.sh            # debug build (default)
@@ -89,6 +101,16 @@ find "${JNI_LIBS_DIR}" -name "libaivpn_core.so" -exec ls -lh {} \;
 echo ""
 echo "==> Building Android APK and publishing to releases/..."
 mkdir -p "${RELEASES_DIR}"
+
+if [[ "${BUILD_TYPE}" == "release" ]]; then
+    if [[ -f "${SCRIPT_DIR}/keystore.properties" ]]; then
+        echo "     Release signing: using ${SCRIPT_DIR}/keystore.properties"
+    elif [[ -n "${AIVPN_UPLOAD_STORE_FILE:-}" && -n "${AIVPN_UPLOAD_STORE_PASSWORD:-}" && -n "${AIVPN_UPLOAD_KEY_ALIAS:-}" && -n "${AIVPN_UPLOAD_KEY_PASSWORD:-}" ]]; then
+        echo "     Release signing: custom keystore (${AIVPN_UPLOAD_KEY_ALIAS})"
+    else
+        echo "     Release signing: no custom keystore configured, Gradle will emit unsigned APK"
+    fi
+fi
 
 if [[ ! -x "${SCRIPT_DIR}/gradlew" ]]; then
     chmod +x "${SCRIPT_DIR}/gradlew" || true

@@ -29,7 +29,7 @@ class SplitTunnelActivity : AppCompatActivity() {
     private lateinit var appAdapter: AppListAdapter
     private var allApps = listOf<AppEntry>()
     private var filteredApps = listOf<AppEntry>()
-    private val excludedPackages = mutableSetOf<String>()
+    private val allowedPackages = mutableSetOf<String>()
     private var hideSystemApps = true
     private var searchQuery = ""
 
@@ -49,7 +49,7 @@ class SplitTunnelActivity : AppCompatActivity() {
         binding = ActivitySplitTunnelBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        excludedPackages.addAll(SecureStorage.loadExcludedApps(this))
+        allowedPackages.addAll(SecureStorage.loadAllowedApps(this))
         excludedDomains.addAll(SecureStorage.loadExcludedDomains(this))
 
         setupTabs()
@@ -91,7 +91,7 @@ class SplitTunnelActivity : AppCompatActivity() {
     }
 
     private fun updateTabBadges() {
-        val appCount = excludedPackages.size
+        val appCount = allowedPackages.size
         val domainCount = excludedDomains.size
         binding.tabLayout.getTabAt(0)?.text = if (appCount > 0)
             "${getString(R.string.split_tunnel_tab_apps)} ($appCount)"
@@ -132,9 +132,9 @@ class SplitTunnelActivity : AppCompatActivity() {
         binding.checkAll.setOnClickListener {
             val shouldSelect = binding.checkAll.isChecked
             if (shouldSelect) {
-                for (app in filteredApps) excludedPackages.add(app.packageName)
+                for (app in filteredApps) allowedPackages.add(app.packageName)
             } else {
-                for (app in filteredApps) excludedPackages.remove(app.packageName)
+                for (app in filteredApps) allowedPackages.remove(app.packageName)
             }
             saveApps()
             appAdapter.notifyDataSetChanged()
@@ -169,7 +169,7 @@ class SplitTunnelActivity : AppCompatActivity() {
             }
             .distinctBy { it.packageName }
             .sortedWith(
-                compareBy<AppEntry> { !excludedPackages.contains(it.packageName) }
+                compareBy<AppEntry> { !allowedPackages.contains(it.packageName) }
                     .thenBy { it.name.lowercase() }
             )
         applyFilter()
@@ -192,16 +192,16 @@ class SplitTunnelActivity : AppCompatActivity() {
             binding.checkAll.isChecked = false
             return
         }
-        val selectedCount = filteredApps.count { excludedPackages.contains(it.packageName) }
+        val selectedCount = filteredApps.count { allowedPackages.contains(it.packageName) }
         binding.checkAll.setOnCheckedChangeListener(null)
         binding.checkAll.isChecked = selectedCount == filteredApps.size
         // Re-attach click listener (not checkedChange to avoid recursion)
         binding.checkAll.setOnClickListener {
             val shouldSelect = binding.checkAll.isChecked
             if (shouldSelect) {
-                for (app in filteredApps) excludedPackages.add(app.packageName)
+                for (app in filteredApps) allowedPackages.add(app.packageName)
             } else {
-                for (app in filteredApps) excludedPackages.remove(app.packageName)
+                for (app in filteredApps) allowedPackages.remove(app.packageName)
             }
             saveApps()
             appAdapter.notifyDataSetChanged()
@@ -210,7 +210,7 @@ class SplitTunnelActivity : AppCompatActivity() {
     }
 
     private fun saveApps() {
-        SecureStorage.saveExcludedApps(this, excludedPackages)
+        SecureStorage.saveAllowedApps(this, allowedPackages)
         updateCounter()
         updateTabBadges()
     }
@@ -269,11 +269,18 @@ class SplitTunnelActivity : AppCompatActivity() {
     // ──────────── Counter ────────────
 
     private fun updateCounter() {
-        val total = excludedPackages.size + excludedDomains.size
-        binding.textCounter.text = if (total > 0)
-            getString(R.string.split_tunnel_bypass_count, total)
-        else
-            ""
+        val appCount = allowedPackages.size
+        val domainCount = excludedDomains.size
+        binding.textCounter.text = when {
+            appCount > 0 && domainCount > 0 -> getString(
+                R.string.split_tunnel_hint_combined,
+                getString(R.string.split_tunnel_hint_apps, appCount),
+                getString(R.string.split_tunnel_hint_sites, domainCount)
+            )
+            appCount > 0 -> getString(R.string.split_tunnel_vpn_count, appCount)
+            domainCount > 0 -> getString(R.string.split_tunnel_bypass_count, domainCount)
+            else -> ""
+        }
     }
 
     // ──────────── App adapter ────────────
@@ -296,10 +303,10 @@ class SplitTunnelActivity : AppCompatActivity() {
             holder.icon.setImageDrawable(app.icon)
             holder.name.text = app.name
             holder.check.setOnCheckedChangeListener(null)
-            holder.check.isChecked = excludedPackages.contains(app.packageName)
+            holder.check.isChecked = allowedPackages.contains(app.packageName)
             holder.check.setOnCheckedChangeListener { _, checked ->
-                if (checked) excludedPackages.add(app.packageName)
-                else excludedPackages.remove(app.packageName)
+                if (checked) allowedPackages.add(app.packageName)
+                else allowedPackages.remove(app.packageName)
                 saveApps()
                 updateSelectAllCheckbox()
             }
