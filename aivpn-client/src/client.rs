@@ -63,11 +63,13 @@ pub struct AivpnClient {
     udp_socket: Option<Arc<UdpSocket>>,
     mimicry_engine: Option<MimicryEngine>,
     session_keys: Option<SessionKeys>,
+    transition_recv_keys: Option<SessionKeys>,
     keypair: KeyPair,
     counter: u64,
     send_seq: u32,
     recv_seq: u32,
     recv_window: RecvWindow,
+    transition_recv_window: RecvWindow,
     // Traffic counters
     bytes_sent: Arc<std::sync::atomic::AtomicU64>,
     bytes_received: Arc<std::sync::atomic::AtomicU64>,
@@ -91,11 +93,13 @@ impl AivpnClient {
             udp_socket: None,
             mimicry_engine: None,
             session_keys: None,
+            transition_recv_keys: None,
             keypair,
             counter: 0,
             send_seq: 0,
             recv_seq: 0,
             recv_window: RecvWindow::new(),
+            transition_recv_window: RecvWindow::new(),
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
@@ -183,6 +187,7 @@ impl AivpnClient {
         
         // Zeroize keys
         self.session_keys = None;
+        self.transition_recv_keys = None;
     }
     
     /// Run the client main loop
@@ -428,7 +433,27 @@ impl AivpnClient {
         let keys = self.session_keys.as_ref()
             .ok_or(Error::Session("No session keys".into()))?;
 
-        let decoded = decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len)?;
+        let decoded = match decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len) {
+            Ok(decoded) => {
+                if self.transition_recv_keys.take().is_some() {
+                    self.transition_recv_window.reset();
+                    info!("Receive ratchet complete — old inbound keys dropped");
+                }
+                decoded
+            }
+            Err(primary_err) => {
+                let Some(fallback_keys) = self.transition_recv_keys.as_ref() else {
+                    return Err(primary_err);
+                };
+
+                decode_packet_with_mdh_len(
+                    packet,
+                    fallback_keys,
+                    &mut self.transition_recv_window,
+                    mdh_len,
+                )?
+            }
+        };
         let inner_header = decoded.header;
         let ip_payload = decoded.payload;
 
@@ -492,8 +517,13 @@ impl AivpnClient {
                 let ratcheted = crypto::derive_session_keys(
                     &dh2, Some(&current_key), &self.keypair.public_key_bytes(),
                 );
-                
-                // Switch to ratcheted keys — old keys dropped, PFS established
+
+                // Keep accepting old inbound keys until the server proves it has
+                // switched too. Outbound traffic moves to ratcheted keys now.
+                self.transition_recv_keys = self.session_keys.clone();
+                self.transition_recv_window = std::mem::take(&mut self.recv_window);
+
+                // Switch to ratcheted keys — outbound uses the new keys immediately.
                 self.session_keys = Some(ratcheted);
                 self.counter = 0;
                 self.recv_window.reset();

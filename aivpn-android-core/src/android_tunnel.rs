@@ -23,7 +23,7 @@ use aivpn_common::client_wire::{
     obfuscate_client_eph_pub, process_server_hello_with_mdh_len, RecvWindow, DEFAULT_ZERO_MDH,
 };
 use aivpn_common::crypto::{
-    derive_session_keys, KeyPair,
+    derive_session_keys, KeyPair, SessionKeys,
 };
 use aivpn_common::error::{Error, Result};
 use aivpn_common::protocol::{ControlPayload, InnerType};
@@ -191,6 +191,12 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         DEFAULT_ZERO_MDH.len(),
     )?;
+    let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
+        &dh,
+        psk.as_ref(),
+        &keypair.public_key_bytes(),
+    ));
+    let mut transition_recv_win = std::mem::take(&mut recv_win);
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
 
@@ -298,12 +304,34 @@ pub async fn run_tunnel_android(
                 let n = r?;
                 last_rx = Instant::now();
                 upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
-                if let Ok(decoded) = decode_packet_with_mdh_len(
+                let decoded = match decode_packet_with_mdh_len(
                     &udp_buf[..n],
                     &keys,
                     &mut recv_win,
                     DEFAULT_ZERO_MDH.len(),
                 ) {
+                    Ok(decoded) => {
+                        if transition_recv_keys.take().is_some() {
+                            transition_recv_win.reset();
+                            log::info!("aivpn: receive ratchet complete");
+                        }
+                        Some(decoded)
+                    }
+                    Err(_) => {
+                        if let Some(fallback_keys) = transition_recv_keys.as_ref() {
+                            decode_packet_with_mdh_len(
+                                &udp_buf[..n],
+                                fallback_keys,
+                                &mut transition_recv_win,
+                                DEFAULT_ZERO_MDH.len(),
+                            ).ok()
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(decoded) = decoded {
                     if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
                         tun_async_write(&tun, &decoded.payload).await?;
                         session
