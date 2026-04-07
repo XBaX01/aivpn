@@ -39,6 +39,7 @@ use crate::client_db::ClientDatabase;
 #[derive(Clone)]
 pub struct GatewayConfig {
     pub listen_addr: String,
+    pub per_ip_pps_limit: u64,
     pub tun_name: String,
     pub tun_addr: String,
     pub tun_netmask: String,
@@ -57,6 +58,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:443".to_string(),
+            per_ip_pps_limit: 1000,
             tun_name: "aivpn0".to_string(),
             tun_addr: "10.0.0.1".to_string(),
             tun_netmask: "255.255.255.0".to_string(),
@@ -208,6 +210,7 @@ impl Gateway {
     /// Start the gateway
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting AIVPN Gateway on {}", self.config.listen_addr);
+        info!("Per-IP UDP rate limit: {} pps", self.config.per_ip_pps_limit);
         
         // Create NAT forwarder (requires root — deferred from constructor for testability)
         if self.config.enable_nat {
@@ -629,7 +632,7 @@ impl Gateway {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, client_addr)) => {
-                    // Per-IP rate limiting (max 1000 pps)
+                    // Per-IP rate limiting.
                     {
                         let now = Instant::now();
                         let mut entry = self.rate_limits.entry(client_addr.ip()).or_insert((0, now));
@@ -638,7 +641,7 @@ impl Gateway {
                             entry.1 = now;
                         }
                         entry.0 += 1;
-                        if entry.0 > 1000 {
+                        if entry.0 > self.config.per_ip_pps_limit {
                             continue;
                         }
                     }

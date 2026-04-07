@@ -87,6 +87,7 @@ async fn main() {
     // Create config
     let config = GatewayConfig {
         listen_addr: args.listen,
+        per_ip_pps_limit: args.per_ip_pps_limit,
         tun_name,
         tun_addr: "10.0.0.1".to_string(),
         tun_netmask: "255.255.255.0".to_string(),
@@ -313,6 +314,7 @@ mod tests {
             list_clients: false,
             show_client: None,
             server_ip: None,
+            per_ip_pps_limit: 1000,
         }
     }
 

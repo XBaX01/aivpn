@@ -54,6 +54,10 @@ pub struct ServerArgs {
     /// Required when using --add-client or --show-client to generate connection keys.
     #[arg(long, env = "AIVPN_SERVER_IP")]
     pub server_ip: Option<String>,
+
+    /// Per-IP packet rate limit for incoming UDP traffic.
+    #[arg(long, env = "AIVPN_PER_IP_PPS_LIMIT", default_value_t = 50000)]
+    pub per_ip_pps_limit: u64,
 }
 
 /// AIVPN Server instance
