@@ -6,6 +6,7 @@ use aivpn_server::neural::NeuralConfig;
 use aivpn_common::crypto;
 use tracing::{info, error};
 use clap::Parser;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -127,8 +128,7 @@ fn load_server_public_key(args: &ServerArgs) -> Option<[u8; 32]> {
 /// Build a connection key: aivpn://BASE64({"s":"host:port","k":"...","p":"...","i":"..."})
 fn build_connection_key(args: &ServerArgs, server_ip: &str, server_pub_b64: &str, psk_b64: &str, vpn_ip: &str) -> String {
     use base64::Engine;
-    let port = args.listen.split(':').last().unwrap_or("443");
-    let server_addr = format!("{}:{}", server_ip, port);
+    let server_addr = build_connection_server_addr(args, server_ip);
     let json = serde_json::json!({
         "s": server_addr,
         "k": server_pub_b64,
@@ -138,6 +138,20 @@ fn build_connection_key(args: &ServerArgs, server_ip: &str, server_pub_b64: &str
     let json_bytes = serde_json::to_string(&json).unwrap();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json_bytes.as_bytes());
     format!("aivpn://{}", encoded)
+}
+
+fn build_connection_server_addr(args: &ServerArgs, server_ip: &str) -> String {
+    if server_ip.parse::<SocketAddr>().is_ok() {
+        return server_ip.to_string();
+    }
+
+    let port = args
+        .listen
+        .parse::<SocketAddr>()
+        .map(|addr| addr.port())
+        .unwrap_or(443);
+
+    format!("{}:{}", server_ip, port)
 }
 
 fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
@@ -279,5 +293,51 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn test_args(listen: &str) -> ServerArgs {
+        ServerArgs {
+            listen: listen.to_string(),
+            tun_name: None,
+            key_file: None,
+            config: None,
+            clients_db: "/tmp/clients.json".to_string(),
+            add_client: None,
+            remove_client: None,
+            list_clients: false,
+            show_client: None,
+            server_ip: None,
+        }
+    }
+
+    #[test]
+    fn build_connection_server_addr_keeps_explicit_port() {
+        let args = test_args("0.0.0.0:443");
+        assert_eq!(build_connection_server_addr(&args, "203.0.113.10:8443"), "203.0.113.10:8443");
+    }
+
+    #[test]
+    fn build_connection_server_addr_adds_listen_port_once() {
+        let args = test_args("0.0.0.0:443");
+        assert_eq!(build_connection_server_addr(&args, "203.0.113.10"), "203.0.113.10:443");
+    }
+
+    #[test]
+    fn build_connection_key_embeds_normalized_server_addr() {
+        let args = test_args("0.0.0.0:443");
+        let key = build_connection_key(&args, "203.0.113.10:8443", "server-key", "psk", "10.0.0.2");
+        let payload = key.strip_prefix("aivpn://").unwrap();
+        let json_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert_eq!(json["s"], "203.0.113.10:8443");
     }
 }
