@@ -175,7 +175,7 @@ All config is packed into a single **connection key** — one string that the us
 
 ```bash
 # Add a new client (prints a connection key)
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --add-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
@@ -191,23 +191,23 @@ docker exec aivpn-server-aivpn-server-1 aivpn-server \
 # aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
 
 # List all clients with traffic stats
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --list-clients --clients-db /etc/aivpn/clients.json
 
 # Show a specific client (and its connection key)
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --show-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
     --server-ip YOUR_PUBLIC_IP:443
 
 # Remove a client
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --remove-client "Alice Phone" \
     --clients-db /etc/aivpn/clients.json
 ```
 
-> **Container name:** depends on the project directory name. Run `docker ps` to check. Typical names: `aivpn-aivpn-server-1` or `aivpn-server-aivpn-server-1`.
+> Uses the Compose service name, so it works regardless of the generated container name.
 
 #### Bare metal
 

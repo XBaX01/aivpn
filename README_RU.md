@@ -154,7 +154,7 @@ AIVPN использует модель регистрации клиентов 
 
 ```bash
 # Добавить клиента (выводит ключ подключения)
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --add-client "Телефон Алисы" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
@@ -170,23 +170,23 @@ docker exec aivpn-server-aivpn-server-1 aivpn-server \
 # aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
 
 # Список всех клиентов со статистикой
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --list-clients --clients-db /etc/aivpn/clients.json
 
 # Показать конкретного клиента (и его ключ подключения)
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --show-client "Телефон Алисы" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
     --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
 
 # Удалить клиента
-docker exec aivpn-server-aivpn-server-1 aivpn-server \
+docker compose exec aivpn-server aivpn-server \
     --remove-client "Телефон Алисы" \
     --clients-db /etc/aivpn/clients.json
 ```
 
-> **Имя контейнера** зависит от имени директории проекта. Проверьте через `docker ps`. Типичные имена: `aivpn-aivpn-server-1` или `aivpn-server-aivpn-server-1`.
+> Используется имя сервиса Compose, поэтому команда не зависит от сгенерированного имени контейнера.
 
 #### На голом железе
 
