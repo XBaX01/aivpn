@@ -37,11 +37,11 @@ const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);  // closer to WireGuard roaming behavior
 const RX_SILENCE: Duration = Duration::from_secs(120);         // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-// Browsing failures often only send a few kilobytes before stalling. If we
-// wait for hundreds of kilobytes, Android can sit in a "connected but dead"
-// state for far too long even though page loads are already failing.
-const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(8);
-const TX_WITHOUT_RX_MIN_BYTES: u64 = 8 * 1024;
+// Mobile networks can briefly stall or batch downstream delivery. Keep this
+// detector responsive, but avoid tearing down an otherwise healthy session
+// after only a few kilobytes of outbound browser traffic.
+const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(20);
+const TX_WITHOUT_RX_MIN_BYTES: u64 = 64 * 1024;
 const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 

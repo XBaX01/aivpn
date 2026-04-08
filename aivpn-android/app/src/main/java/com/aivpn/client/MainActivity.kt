@@ -235,7 +235,7 @@ class MainActivity : AppCompatActivity() {
         }
         val keyInput = EditText(dialogCtx).apply {
             hint = getString(R.string.hint_profile_key)
-            setText(existing?.key ?: binding.editConnectionKey.text.toString())
+            setText(existing?.key ?: "")
             setSingleLine(true)
             textSize = 13f
         }
