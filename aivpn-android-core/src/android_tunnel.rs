@@ -33,11 +33,15 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);  // closer to WireGuard roaming behavior
-const RX_SILENCE: Duration = Duration::from_secs(45);          // fail fast on stale/mobile path
+const RX_SILENCE: Duration = Duration::from_secs(120);         // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(12);
-const TX_WITHOUT_RX_MIN_BYTES: u64 = 16 * 1024;
+// Browsing failures often only send a few kilobytes before stalling. If we
+// wait for hundreds of kilobytes, Android can sit in a "connected but dead"
+// state for far too long even though page loads are already failing.
+const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(8);
+const TX_WITHOUT_RX_MIN_BYTES: u64 = 8 * 1024;
 const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 
@@ -167,20 +171,48 @@ pub async fn run_tunnel_android(
     // ── 4. Send init handshake (Control/Keepalive + obfuscated eph_pub) ──
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    {
-        let keepalive = ControlPayload::Keepalive.encode()?;
-        let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
-        send_seq = send_seq.wrapping_add(1);
-        let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
-        let pkt = build_zero_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub))?;
-        udp.send(&pkt).await?;
-    }
+    let keepalive = ControlPayload::Keepalive.encode()?;
+    let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+
+    let send_handshake = |keys: &SessionKeys,
+                          send_counter: &mut u64,
+                          send_seq: &mut u16|
+     -> Result<Vec<u8>> {
+        let inner = build_inner_packet(InnerType::Control, *send_seq, &keepalive);
+        let pkt = build_zero_mdh_packet(keys, send_counter, &inner, Some(&obf_pub))?;
+        *send_seq = send_seq.wrapping_add(1);
+        Ok(pkt)
+    };
+
+    let init_pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
+    udp.send(&init_pkt).await?;
 
     // ── 5. Wait for ServerHello with timeout ──
     let mut recv_buf = vec![0u8; BUF_SIZE];
-    let n = time::timeout(HANDSHAKE_TIMEOUT, udp.recv(&mut recv_buf))
-        .await
-        .map_err(|_| Error::Session("Handshake timeout (10 s)".into()))??;
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let n = loop {
+        let now = Instant::now();
+        if now >= handshake_deadline {
+            return Err(Error::Session("Handshake timeout (10 s)".into()));
+        }
+
+        let wait = std::cmp::min(HANDSHAKE_RETRY_INTERVAL, handshake_deadline.saturating_duration_since(now));
+        let retry = time::sleep(wait);
+        tokio::pin!(retry);
+
+        tokio::select! {
+            res = udp.recv(&mut recv_buf) => {
+                match res {
+                    Ok(n) => break n,
+                    Err(e) => return Err(Error::Io(e)),
+                }
+            }
+            _ = &mut retry => {
+                let pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
+                udp.send(&pkt).await?;
+            }
+        }
+    };
 
     let mut recv_win = RecvWindow::new();
     process_server_hello_with_mdh_len(

@@ -929,28 +929,7 @@ impl Gateway {
                 info!("Client '{}' authenticated via PSK", cid);
             }
             
-            // Send ServerHello for PFS ratchet + server authentication (CRIT-3 + HIGH-6)
-            {
-                let (server_eph_pub, signature) = {
-                    let sess = session.lock();
-                    match (sess.server_eph_pub, sess.server_hello_signature) {
-                        (Some(pub_key), Some(sig)) => (pub_key, sig),
-                        _ => return Err(Error::Session("Missing ratchet data".into())),
-                    }
-                };
-                let hello = ControlPayload::ServerHello { server_eph_pub, signature };
-                let encoded = hello.encode()?;
-                let inner_header = InnerHeader {
-                    inner_type: InnerType::Control,
-                    seq_num: 0,
-                };
-                let mut inner_payload = inner_header.encode().to_vec();
-                inner_payload.extend_from_slice(&encoded);
-                let packet = self.build_packet(&inner_payload, &session)?;
-                let socket = self.udp_socket.as_ref().unwrap();
-                let sent = socket.send_to(&packet, client_addr).await?;
-                debug!("ServerHello sent: {} bytes to {}", sent, client_addr);
-            }
+            self.send_server_hello(&session, client_addr).await?;
             
             // NOTE: PFS ratchet is deferred until AFTER decrypting the init packet,
             // which was encrypted with pre-ratchet keys.
@@ -960,9 +939,17 @@ impl Gateway {
             (session, counter, is_ratcheted)
         };
         
-        // Parse packet — pad_len is inside encrypted area (CRIT-5 fix)
-        // For init packets, eph_pub (32 bytes) follows MDH before ciphertext
-        let payload_offset = if is_new_session {
+        // Parse packet — pad_len is inside encrypted area (CRIT-5 fix).
+        // Android retransmits the initial handshake packet with the client
+        // eph_pub still embedded before ciphertext. Once a session already
+        // exists, those retries validate against the existing tag window, so
+        // we must continue skipping eph_pub before decryption until ratchet
+        // completes.
+        let is_pre_ratchet_retry = !is_new_session && !is_ratcheted_tag && {
+            let sess = session.lock();
+            !sess.is_ratcheted && packet_data.len() >= TAG_SIZE + mdh_len + 32 + 16
+        };
+        let payload_offset = if is_new_session || is_pre_ratchet_retry {
             TAG_SIZE + mdh_len + 32
         } else {
             TAG_SIZE + mdh_len
@@ -1154,6 +1141,13 @@ impl Gateway {
             }
             ControlPayload::Keepalive => {
                 debug!("Keepalive from {}", hash_addr(&client_addr));
+                if !session.lock().is_ratcheted {
+                    // The client is still retrying the initial handshake. If the
+                    // first ServerHello was lost, replying with a normal pre-ratchet
+                    // ControlAck leaves the client stuck forever.
+                    self.send_server_hello(session, client_addr).await?;
+                    return Ok(());
+                }
                 // Send ACK
                 let ack = ControlPayload::ControlAck {
                     ack_seq: 0,
@@ -1220,6 +1214,34 @@ impl Gateway {
         let client_addr = session.lock().client_addr;
         socket.send_to(&packet, client_addr).await?;
         
+        Ok(())
+    }
+
+    async fn send_server_hello(
+        &self,
+        session: &Arc<parking_lot::Mutex<Session>>,
+        client_addr: SocketAddr,
+    ) -> Result<()> {
+        let (server_eph_pub, signature) = {
+            let sess = session.lock();
+            match (sess.server_eph_pub, sess.server_hello_signature) {
+                (Some(pub_key), Some(sig)) => (pub_key, sig),
+                _ => return Err(Error::Session("Missing ratchet data".into())),
+            }
+        };
+
+        let hello = ControlPayload::ServerHello { server_eph_pub, signature };
+        let encoded = hello.encode()?;
+        let inner_header = InnerHeader {
+            inner_type: InnerType::Control,
+            seq_num: 0,
+        };
+        let mut inner_payload = inner_header.encode().to_vec();
+        inner_payload.extend_from_slice(&encoded);
+        let packet = self.build_packet(&inner_payload, session)?;
+        let socket = self.udp_socket.as_ref().unwrap();
+        let sent = socket.send_to(&packet, client_addr).await?;
+        debug!("ServerHello sent: {} bytes to {}", sent, client_addr);
         Ok(())
     }
     

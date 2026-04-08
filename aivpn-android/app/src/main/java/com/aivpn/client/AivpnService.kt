@@ -8,11 +8,15 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkRequest
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Android VPN service — thin orchestrator over the Rust core (libaivpn_core.so).
@@ -32,7 +36,9 @@ class AivpnService : VpnService() {
         const val ACTION_DISCONNECT = "com.aivpn.DISCONNECT"
         private const val CHANNEL_ID      = "aivpn_vpn"
         private const val NOTIFICATION_ID = 1
-        private const val TUN_MTU         = 1420
+        // Match the desktop client's WAN-safe TUN MTU so encrypted outer UDP
+        // datagrams stay below the path-MTU ceiling on real networks.
+        private const val TUN_MTU         = 1346
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
         private const val TAG = "AivpnService"
@@ -48,7 +54,9 @@ class AivpnService : VpnService() {
 
     // Coroutine lifecycle
     private var serviceJob: Job? = null
+    private var restartJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val serviceLifecycleMutex = Mutex()
     @Volatile private var manualDisconnect = false
 
     // Saved params for reconnect
@@ -67,7 +75,7 @@ class AivpnService : VpnService() {
     // Network change detection
     @Volatile private var networkTrigger: Boolean   = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    @Volatile private var currentDefaultNetwork: Network? = null
+    @Volatile private var currentUnderlyingNetwork: Network? = null
     @Volatile private var lastNetworkEventAtMs: Long = 0L
     private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
 
@@ -94,23 +102,40 @@ class AivpnService : VpnService() {
         vpnIp: String? = null,
     ) {
         Log.d(TAG, "startVpn: server=$serverAddr")
+
+        val sameTarget =
+            savedServerAddr == serverAddr &&
+            savedServerKey == serverKeyBase64 &&
+            savedPsk == pskBase64 &&
+            savedVpnIp == vpnIp
+        val startupInFlight = restartJob?.isActive == true
+        val tunnelLoopActive = serviceJob?.isActive == true
+        if (sameTarget && (startupInFlight || tunnelLoopActive)) {
+            Log.d(TAG, "Ignoring duplicate CONNECT while startup/session is already in progress")
+            return
+        }
+
         savedServerAddr  = serverAddr
         savedServerKey   = serverKeyBase64
         savedPsk         = pskBase64
         savedVpnIp       = vpnIp
         manualDisconnect = false
 
-        serviceJob?.cancel()
-        serviceJob = null
-        closeTunnel()
+        restartJob?.cancel()
+        restartJob = serviceScope.launch {
+            serviceLifecycleMutex.withLock {
+                AivpnJni.stopTunnel()
+                serviceJob?.cancelAndJoin()
+                serviceJob = null
+                closeTunnel()
 
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.notification_connecting)))
+                createNotificationChannel()
+                startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.notification_connecting)))
 
-        unregisterNetworkCallback()
-        registerNetworkCallback()
+                unregisterNetworkCallback()
+                registerNetworkCallback()
 
-        serviceJob = serviceScope.launch {
+                serviceJob = serviceScope.launch {
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
             try {
                 while (isActive && !manualDisconnect) {
@@ -163,6 +188,8 @@ class AivpnService : VpnService() {
                 if (!manualDisconnect) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
+                }
+            }
                 }
             }
         }
@@ -308,48 +335,83 @@ class AivpnService : VpnService() {
      */
     private fun registerNetworkCallback() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        currentDefaultNetwork = cm.activeNetwork
+        currentUnderlyingNetwork = findUsableUnderlyingNetwork(cm)
 
         val callback = object : ConnectivityManager.NetworkCallback() {
 
             override fun onAvailable(network: Network) {
-                if (isVpnNetwork(cm, network)) return
+                val caps = cm.getNetworkCapabilities(network) ?: return
+                if (!isUsableUnderlyingNetwork(caps)) return
 
-                val previous = currentDefaultNetwork
-                currentDefaultNetwork = network
+                val previous = currentUnderlyingNetwork
+                currentUnderlyingNetwork = network
 
-                Log.d(TAG, "Default network available: $network (previous=$previous)")
+                Log.d(TAG, "Underlying network available: $network (previous=$previous)")
 
-                // Do not force restart on every onAvailable: during WiFi/cellular churn
-                // Android may emit short default-network transitions even while traffic
-                // keeps flowing. We only hard-restart on current default loss.
+                // Seamless roaming with a protected UDP socket is not reliable across
+                // all Android vendors/radios. If the default network actually changed
+                // under an established session, restart immediately on the new path.
+                if (previous != null && previous != network && isRunning && sessionEstablished) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                        lastNetworkEventAtMs = now
+                        Log.d(TAG, "Underlying network switched: $previous -> $network; restarting tunnel")
+                        networkTrigger = true
+                        AivpnJni.stopTunnel()
+                    }
+                }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                if (!isUsableUnderlyingNetwork(caps)) return
+                if (currentUnderlyingNetwork == null) {
+                    currentUnderlyingNetwork = network
+                    Log.d(TAG, "Underlying network became usable: $network")
+                }
             }
 
             override fun onLost(network: Network) {
-                if (isVpnNetwork(cm, network)) return
-                Log.d(TAG, "Default network lost: $network")
+                Log.d(TAG, "Underlying network lost: $network")
 
-                if (network == currentDefaultNetwork) {
-                    currentDefaultNetwork = cm.activeNetwork
+                if (network == currentUnderlyingNetwork) {
+                    currentUnderlyingNetwork = findUsableUnderlyingNetwork(cm)
                 }
 
-                val hasUsableDefault = currentDefaultNetwork?.let { net ->
+                val replacement = currentUnderlyingNetwork
+                val hasUsableDefault = replacement?.let { net ->
                     val caps = cm.getNetworkCapabilities(net)
-                    caps != null &&
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    caps != null && isUsableUnderlyingNetwork(caps)
                 } == true
 
+                if (hasUsableDefault && replacement != null && isRunning && sessionEstablished) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                        lastNetworkEventAtMs = now
+                        Log.d(TAG, "Underlying network moved to $replacement after loss of $network; restarting tunnel")
+                        networkTrigger = true
+                        AivpnJni.stopTunnel()
+                    }
+                    return
+                }
+
                 if (!hasUsableDefault && isRunning) {
-                    Log.d(TAG, "No usable default network — stopping tunnel for fast reconnect")
-                    networkTrigger = true
-                    AivpnJni.stopTunnel()
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                        lastNetworkEventAtMs = now
+                        Log.d(TAG, "No usable underlying network — stopping tunnel for fast reconnect")
+                        networkTrigger = true
+                        AivpnJni.stopTunnel()
+                    }
                 }
             }
         }
 
         try {
-            cm.registerDefaultNetworkCallback(callback)
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            cm.registerNetworkCallback(request, callback)
             networkCallback = callback
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register NetworkCallback: ${e.message}", e)
@@ -369,13 +431,15 @@ class AivpnService : VpnService() {
             } catch (_: Exception) {}
             networkCallback = null
         }
-        currentDefaultNetwork = null
+        currentUnderlyingNetwork = null
     }
 
     // ──────────── Stop ────────────
 
     private fun stopVpn() {
         manualDisconnect = true
+        restartJob?.cancel()
+        restartJob = null
         unregisterNetworkCallback()
         AivpnJni.stopTunnel()
         serviceJob?.cancel()
@@ -407,6 +471,8 @@ class AivpnService : VpnService() {
 
     override fun onDestroy() {
         manualDisconnect = true
+        restartJob?.cancel()
+        restartJob = null
         unregisterNetworkCallback()
         AivpnJni.stopTunnel()
         serviceJob?.cancel()
@@ -426,11 +492,8 @@ class AivpnService : VpnService() {
     private suspend fun waitForConnectivity() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         while (currentCoroutineContext().isActive) {
-            val active = cm.activeNetwork
-            val caps = active?.let { cm.getNetworkCapabilities(it) }
-            val hasUsableActiveNetwork = active != null && caps != null &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            val active = findUsableUnderlyingNetwork(cm)
+            val hasUsableActiveNetwork = active != null
 
             if (hasUsableActiveNetwork) return
 
@@ -446,6 +509,18 @@ class AivpnService : VpnService() {
             delay(300L)
         }
         throw CancellationException("Cancelled while waiting for network")
+    }
+
+    private fun findUsableUnderlyingNetwork(cm: ConnectivityManager): Network? {
+        return cm.allNetworks.firstOrNull { net ->
+            val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
+            isUsableUnderlyingNetwork(caps)
+        }
+    }
+
+    private fun isUsableUnderlyingNetwork(caps: NetworkCapabilities): Boolean {
+        return !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     // ──────────── Address parsing ────────────
