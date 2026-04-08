@@ -98,3 +98,5 @@ docker-compose.dpi.yml
 test-dpi-emulation.sh
 deploy.py
 build-windows-package.sh
+.tmp_docker_speed_test.sh
+.tmp_multi_client_test.sh

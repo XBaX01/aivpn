@@ -35,6 +35,11 @@ use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
 use crate::client_db::ClientDatabase;
 
+struct QueuedPacket {
+    packet_data: Vec<u8>,
+    client_addr: SocketAddr,
+}
+
 /// Gateway configuration
 #[derive(Clone)]
 pub struct GatewayConfig {
@@ -137,8 +142,10 @@ pub struct Gateway {
     session_manager: Arc<SessionManager>,
     udp_socket: Option<Arc<UdpSocket>>,
     nat_forwarder: Option<Arc<NatForwarder>>,
+    /// Channel-based TUN writer (replaces Mutex for upload throughput)
+    tun_write_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Per-IP rate limiter: (packet_count, window_start)
-    rate_limits: DashMap<IpAddr, (u64, Instant)>,
+    rate_limits: Arc<DashMap<IpAddr, (u64, Instant)>>,
     /// Neural Resonance Module (Patent 1) — periodic traffic validation
     neural_module: Arc<parking_lot::Mutex<NeuralResonanceModule>>,
     /// Mask catalog for automatic rotation (Patent 3)
@@ -199,7 +206,8 @@ impl Gateway {
             session_manager,
             udp_socket: None,
             nat_forwarder: None,
-            rate_limits: DashMap::new(),
+            tun_write_tx: None,
+            rate_limits: Arc::new(DashMap::new()),
             neural_module: Arc::new(parking_lot::Mutex::new(neural)),
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
@@ -208,7 +216,7 @@ impl Gateway {
     }
     
     /// Start the gateway
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         info!("Starting AIVPN Gateway on {}", self.config.listen_addr);
         info!("Per-IP UDP rate limit: {} pps", self.config.per_ip_pps_limit);
         
@@ -267,6 +275,7 @@ impl Gateway {
         }
         
         // Spawn TUN → Client read loop (reads packets from TUN, routes back to clients)
+        // Also set up channel-based TUN writer for upload path (avoids Mutex contention)
         if let Some(ref nat) = self.nat_forwarder {
             if let Some(tun_reader) = nat.take_reader().await {
                 let sessions = self.session_manager.clone();
@@ -274,21 +283,22 @@ impl Gateway {
                 let mask = aivpn_common::mask::preset_masks::webrtc_zoom_v3();
                 let tun_addr = self.config.tun_addr.clone();
                 
-                // Channel for ICMP replies to be written to TUN
-                let (icmp_tx, mut icmp_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+                // Channel for writing packets to TUN device (upload + ICMP replies)
+                let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(4096);
+                self.tun_write_tx = Some(tun_tx.clone());
                 
-                // Spawn ICMP writer task
-                let nat_for_icmp = nat.clone();
-                tokio::spawn(async move {
-                    while let Some(reply) = icmp_rx.recv().await {
-                        if let Err(e) = nat_for_icmp.forward_packet(&reply).await {
-                            debug!("ICMP reply write error: {}", e);
-                        }
-                    }
-                });
+                // Spawn dedicated TUN writer task — owns the DeviceWriter, no Mutex needed
+                if let Some(tun_writer) = nat.take_writer().await {
+                    tokio::spawn(async move {
+                        Self::tun_write_loop(tun_writer, tun_rx).await;
+                    });
+                    info!("TUN write loop spawned (channel-based, no Mutex)");
+                } else {
+                    warn!("Could not take TUN writer — falling back to forward_packet");
+                }
                 
                 tokio::spawn(async move {
-                    Self::tun_read_loop(tun_reader, icmp_tx, sessions, socket, mask, tun_addr).await;
+                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, tun_addr).await;
                 });
                 info!("TUN read loop spawned");
             }
@@ -330,8 +340,10 @@ impl Gateway {
             info!("Client DB hot-reload task spawned (10s interval)");
         }
         
-        // Start packet processing
-        self.process_packets().await?;
+        // Use session-aware receive sharding: preserve ordering within one
+        // session, but allow different sessions to make progress in parallel.
+        let gateway = Arc::new(self);
+        Self::process_packets_concurrent(gateway).await?;
         
         Ok(())
     }
@@ -624,7 +636,118 @@ impl Gateway {
         !sum as u16
     }
     
-    /// Main packet processing loop
+    /// Dedicated TUN writer task — owns the DeviceWriter, no Mutex contention
+    async fn tun_write_loop(mut writer: tun::DeviceWriter, mut rx: mpsc::Receiver<Vec<u8>>) {
+        while let Some(packet) = rx.recv().await {
+            if let Err(e) = writer.write_all(&packet).await {
+                error!("TUN write error: {}", e);
+            }
+            // No flush() — let the OS buffer writes for throughput
+        }
+        warn!("TUN write loop ended — channel closed");
+    }
+    
+    fn receive_worker_count() -> usize {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(4)
+            .clamp(2, 16)
+    }
+
+    fn worker_index_for_packet(&self, packet_data: &[u8], client_addr: SocketAddr, worker_count: usize) -> usize {
+        if worker_count <= 1 {
+            return 0;
+        }
+
+        let mut shard_addr = client_addr;
+
+        if packet_data.len() >= TAG_SIZE {
+            let mut tag = [0u8; TAG_SIZE];
+            tag.copy_from_slice(&packet_data[..TAG_SIZE]);
+
+            if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
+                shard_addr = session.lock().client_addr;
+            }
+        }
+
+        let key = match shard_addr.ip() {
+            IpAddr::V4(ip) => {
+                ((u32::from(ip) as u64) << 16) | shard_addr.port() as u64
+            }
+            IpAddr::V6(ip) => {
+                let octets = ip.octets();
+                u64::from_le_bytes(octets[..8].try_into().unwrap()) ^ shard_addr.port() as u64
+            }
+        };
+
+        (key as usize) % worker_count
+    }
+
+    /// Concurrent packet processing loop with shard workers.
+    /// Packets for the same session stay on the same worker and preserve order,
+    /// while different sessions can be processed in parallel.
+    async fn process_packets_concurrent(gateway: Arc<Self>) -> Result<()> {
+        let socket = gateway.udp_socket.as_ref().unwrap().clone();
+        let mut buf = vec![0u8; MAX_PACKET_SIZE];
+        let worker_count = Self::receive_worker_count();
+        let queue_depth = 4096;
+        let mut worker_txs = Vec::with_capacity(worker_count);
+
+        for worker_id in 0..worker_count {
+            let (tx, mut rx) = mpsc::channel::<QueuedPacket>(queue_depth);
+            worker_txs.push(tx);
+
+            let gw = gateway.clone();
+            tokio::spawn(async move {
+                while let Some(packet) = rx.recv().await {
+                    if let Err(e) = gw.handle_packet(&packet.packet_data, packet.client_addr).await {
+                        debug!(
+                            "Worker {} packet error from {}: {}",
+                            worker_id,
+                            hash_addr(&packet.client_addr),
+                            e
+                        );
+                    }
+                }
+                warn!("Receive worker {} ended — channel closed", worker_id);
+            });
+        }
+        
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((len, client_addr)) => {
+                    // Per-IP rate limiting (fast, stays in recv task)
+                    {
+                        let now = Instant::now();
+                        let mut entry = gateway.rate_limits.entry(client_addr.ip()).or_insert((0, now));
+                        if entry.1.elapsed() > Duration::from_secs(1) {
+                            entry.0 = 0;
+                            entry.1 = now;
+                        }
+                        entry.0 += 1;
+                        if entry.0 > gateway.config.per_ip_pps_limit {
+                            continue;
+                        }
+                    }
+                    
+                    let packet_data = buf[..len].to_vec();
+                    let worker_idx = gateway.worker_index_for_packet(&packet_data, client_addr, worker_count);
+                    let packet = QueuedPacket { packet_data, client_addr };
+
+                    if worker_txs[worker_idx].send(packet).await.is_err() {
+                        return Err(Error::Channel(format!("Receive worker {worker_idx} channel closed")));
+                    }
+                }
+                Err(e) => {
+                    error!("UDP recv error: {}", e);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    }
+    
+    /// Main packet processing loop (legacy sequential — unused, kept for reference)
+    #[allow(dead_code)]
     async fn process_packets(&self) -> Result<()> {
         let socket = self.udp_socket.as_ref().unwrap();
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
@@ -967,10 +1090,14 @@ impl Gateway {
         
         match inner_header.inner_type {
             InnerType::Data => {
-                // Forward to NAT/internet
+                // Forward to NAT/internet via TUN write channel (lock-free)
                 debug!("DATA packet from {} ({} bytes)", hash_addr(&client_addr), payload.len());
                 
-                if let Some(ref nat) = self.nat_forwarder {
+                if let Some(ref tx) = self.tun_write_tx {
+                    if tx.send(payload.to_vec()).await.is_err() {
+                        debug!("TUN write channel closed, dropping packet");
+                    }
+                } else if let Some(ref nat) = self.nat_forwarder {
                     nat.forward_packet(payload).await?;
                 } else {
                     debug!("NAT disabled, dropping packet");
@@ -1061,7 +1188,16 @@ impl Gateway {
         let socket = self.udp_socket.as_ref().unwrap();
         
         let encoded = payload.encode()?;
-        let packet = self.build_packet(&encoded, session)?;
+        let mut inner_payload = {
+            let mut sess = session.lock();
+            let inner_header = InnerHeader {
+                inner_type: InnerType::Control,
+                seq_num: sess.next_seq() as u16,
+            };
+            inner_header.encode().to_vec()
+        };
+        inner_payload.extend_from_slice(&encoded);
+        let packet = self.build_packet(&inner_payload, session)?;
         
         // Extract client_addr before dropping the guard to avoid holding
         // MutexGuard across .await (which would cause deadlock)

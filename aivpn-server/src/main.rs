@@ -101,7 +101,7 @@ async fn main() {
 
     // Create and run server
     match AivpnServer::new(config) {
-        Ok(mut server) => {
+        Ok(server) => {
             info!("Server initialized successfully");
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);

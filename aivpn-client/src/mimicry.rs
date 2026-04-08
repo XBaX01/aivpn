@@ -159,7 +159,9 @@ impl MimicryEngine {
         // encrypt adds POLY1305_TAG_SIZE bytes
         let target_size = self.sample_packet_size();
         let base_overhead = TAG_SIZE + mdh.len() + 2 + plaintext.len() + POLY1305_TAG_SIZE;
-        let pad_len = self.calc_padding(base_overhead, target_size);
+        let requested_pad_len = self.calc_padding(base_overhead, target_size);
+        let max_pad_len = MAX_PACKET_SIZE.saturating_sub(base_overhead) as u16;
+        let pad_len = requested_pad_len.min(max_pad_len);
 
         // Build padded plaintext: pad_len(u16) || plaintext || random_padding
         let mut padded = Vec::with_capacity(2 + plaintext.len() + pad_len as usize);

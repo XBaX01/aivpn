@@ -22,6 +22,7 @@ pub struct NatForwarder {
     tun_addr: String,
     tun_netmask: String,
     writer: Option<Arc<Mutex<tun::DeviceWriter>>>,
+    writer_taken: Option<Mutex<Option<tun::DeviceWriter>>>,
     reader: Option<Mutex<Option<tun::DeviceReader>>>,
 }
 
@@ -32,6 +33,7 @@ impl NatForwarder {
             tun_addr: tun_addr.to_string(),
             tun_netmask: tun_netmask.to_string(),
             writer: None,
+            writer_taken: None,
             reader: None,
         })
     }
@@ -57,7 +59,8 @@ impl NatForwarder {
         
         let (writer, reader) = dev.split()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
-        self.writer = Some(Arc::new(Mutex::new(writer)));
+        self.writer = None; // Writer accessed via take_writer() for channel-based I/O
+        self.writer_taken = Some(Mutex::new(Some(writer)));
         self.reader = Some(Mutex::new(Some(reader)));
         
         info!(
@@ -189,11 +192,20 @@ impl NatForwarder {
         let mut w = writer.lock().await;
         
         // Linux TUN with IFF_NO_PI (default) expects raw IP packets
+        // No flush() — let the OS buffer writes naturally for throughput
         w.write_all(packet).await?;
-        w.flush().await?;
         
         debug!("Forwarded {} bytes to TUN", packet.len());
         Ok(())
+    }
+    
+    /// Take ownership of the TUN writer (for use in a dedicated writer task)
+    pub async fn take_writer(&self) -> Option<tun::DeviceWriter> {
+        if let Some(ref lock) = self.writer_taken {
+            lock.lock().await.take()
+        } else {
+            None
+        }
     }
     
     /// Take ownership of the TUN reader (for use in a spawned task)

@@ -16,9 +16,67 @@ pub struct DecodedPacket {
     pub payload: Vec<u8>,
 }
 
+const RECV_REORDER_WINDOW: usize = 256;
+const RECV_FUTURE_SEARCH_WINDOW: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct Bitset256 {
+    lo: u128,
+    hi: u128,
+}
+
+impl Bitset256 {
+    fn new() -> Self {
+        Self { lo: 0, hi: 0 }
+    }
+
+    fn clear(&mut self) {
+        self.lo = 0;
+        self.hi = 0;
+    }
+
+    fn shl(self, shift: u64) -> Self {
+        if shift >= 256 {
+            return Self::new();
+        }
+        if shift == 0 {
+            return self;
+        }
+        if shift >= 128 {
+            return Self {
+                lo: 0,
+                hi: self.lo << (shift - 128),
+            };
+        }
+
+        Self {
+            lo: self.lo << shift,
+            hi: (self.hi << shift) | (self.lo >> (128 - shift)),
+        }
+    }
+
+    fn set_bit(&mut self, bit: usize) {
+        if bit < 128 {
+            self.lo |= 1u128 << bit;
+        } else if bit < 256 {
+            self.hi |= 1u128 << (bit - 128);
+        }
+    }
+
+    fn get_bit(&self, bit: usize) -> bool {
+        if bit < 128 {
+            (self.lo >> bit) & 1 == 1
+        } else if bit < 256 {
+            (self.hi >> (bit - 128)) & 1 == 1
+        } else {
+            false
+        }
+    }
+}
+
 pub struct RecvWindow {
     highest: i64,
-    bitmap: u64,
+    bitmap: Bitset256,
 }
 
 impl Default for RecvWindow {
@@ -31,13 +89,13 @@ impl RecvWindow {
     pub fn new() -> Self {
         Self {
             highest: -1,
-            bitmap: 0,
+            bitmap: Bitset256::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.highest = -1;
-        self.bitmap = 0;
+        self.bitmap.clear();
     }
 
     pub fn find_counter(&self, tag: &[u8; TAG_SIZE], keys: &SessionKeys) -> Option<u64> {
@@ -45,12 +103,15 @@ impl RecvWindow {
         let start = if self.highest < 0 {
             0
         } else {
-            (self.highest as u64).saturating_sub(63)
+            (self.highest as u64).saturating_sub((RECV_REORDER_WINDOW - 1) as u64)
         };
         let end = if self.highest < 0 {
-            256
+            RECV_FUTURE_SEARCH_WINDOW as u64
         } else {
-            std::cmp::max(256, self.highest as u64 + 257)
+            std::cmp::max(
+                RECV_FUTURE_SEARCH_WINDOW as u64,
+                self.highest as u64 + RECV_FUTURE_SEARCH_WINDOW as u64 + 1,
+            )
         };
 
         for tw_offset in [0i64, -1, 1] {
@@ -72,20 +133,24 @@ impl RecvWindow {
     pub fn mark(&mut self, counter: u64) {
         if self.highest < 0 || counter > self.highest as u64 {
             let shift = if self.highest < 0 {
-                64u64
+                RECV_REORDER_WINDOW as u64
             } else {
                 counter - self.highest as u64
             };
-            self.bitmap = if shift >= 64 {
-                1
+            self.bitmap = if shift >= RECV_REORDER_WINDOW as u64 {
+                let mut bitmap = Bitset256::new();
+                bitmap.set_bit(0);
+                bitmap
             } else {
-                (self.bitmap << shift) | 1
+                let mut bitmap = self.bitmap.shl(shift);
+                bitmap.set_bit(0);
+                bitmap
             };
             self.highest = counter as i64;
         } else {
             let diff = (self.highest as u64 - counter) as usize;
-            if diff < 64 {
-                self.bitmap |= 1u64 << diff;
+            if diff < RECV_REORDER_WINDOW {
+                self.bitmap.set_bit(diff);
             }
         }
     }
@@ -101,11 +166,11 @@ impl RecvWindow {
         }
 
         let diff = highest - counter;
-        if diff >= 64 {
+        if diff >= RECV_REORDER_WINDOW as u64 {
             return false;
         }
 
-        (self.bitmap >> diff) & 1 == 0
+        !self.bitmap.get_bit(diff as usize)
     }
 }
 

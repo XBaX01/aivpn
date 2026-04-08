@@ -73,7 +73,7 @@ impl AivpnServer {
     }
     
     /// Run the server
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         self.gateway.run().await
     }
 }
