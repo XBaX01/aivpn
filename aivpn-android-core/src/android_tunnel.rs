@@ -196,6 +196,7 @@ pub async fn run_tunnel_android(
         psk.as_ref(),
         &keypair.public_key_bytes(),
     ));
+    let mut transition_recv_deadline = Some(Instant::now() + Duration::from_secs(2));
     let mut transition_recv_win = std::mem::take(&mut recv_win);
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
@@ -304,6 +305,11 @@ pub async fn run_tunnel_android(
                 let n = r?;
                 last_rx = Instant::now();
                 upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
+                if transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    transition_recv_keys = None;
+                    transition_recv_deadline = None;
+                    transition_recv_win.reset();
+                }
                 let decoded = match decode_packet_with_mdh_len(
                     &udp_buf[..n],
                     &keys,
@@ -311,10 +317,6 @@ pub async fn run_tunnel_android(
                     DEFAULT_ZERO_MDH.len(),
                 ) {
                     Ok(decoded) => {
-                        if transition_recv_keys.take().is_some() {
-                            transition_recv_win.reset();
-                            log::info!("aivpn: receive ratchet complete");
-                        }
                         Some(decoded)
                     }
                     Err(_) => {
