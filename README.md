@@ -29,7 +29,8 @@ No need to compile — download and run:
 | Platform | File | Size | Notes |
 |----------|------|------|-------|
 | **macOS** | [aivpn-macos.dmg](releases/aivpn-macos.dmg) | ~1.8 MB | Menu bar app with RU/EN interface |
-| **Windows** | [aivpn-client.exe](releases/aivpn-client.exe) | ~6.4 MB | Requires [wintun.dll](https://www.wintun.net/) next to the exe |
+| **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 MB | Native x86_64 GNU/Linux CLI binary |
+| **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Includes `aivpn-client.exe` + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
 
 ### Quick Start (macOS)
@@ -42,12 +43,20 @@ No need to compile — download and run:
 > ⚠️ The VPN client requires root privileges for TUN device. The app will prompt for password via `sudo`.
 
 ### Quick Start (Windows)
-1. Download `aivpn-client.exe` and [wintun.dll](https://www.wintun.net/)
-2. Place both files in the same folder
+1. Download and extract [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
+2. Ensure `aivpn-client.exe` and `wintun.dll` remain in the same folder
 3. Run **as Administrator** in PowerShell:
    ```powershell
    .\aivpn-client.exe -k "your_connection_key_here"
    ```
+
+### Quick Start (Linux)
+1. Download [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64)
+2. Make it executable and run as root:
+    ```bash
+    chmod +x ./aivpn-client-linux-x86_64
+    sudo ./aivpn-client-linux-x86_64 -k "your_connection_key_here"
+    ```
 
 ### Quick Start (Android)
 1. Download and install `aivpn-client.apk`

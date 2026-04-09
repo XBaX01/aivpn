@@ -129,7 +129,8 @@ chmod 644 "$PKG_ROOT/Library/LaunchDaemons/com.aivpn.helper.plist"
 # Bundle aivpn-client binary into app
 # ──────────────────────────────────────────────
 echo "📦 Bundling aivpn-client binary..."
-CLIENT_BIN_UNIVERSAL="$PROJECT_DIR/releases/aivpn-client-universal"
+CLIENT_BIN_MACOS_UNIVERSAL="$PROJECT_DIR/releases/aivpn-client-macos-universal"
+CLIENT_BIN_UNIVERSAL_LEGACY="$PROJECT_DIR/releases/aivpn-client-universal"
 CLIENT_BIN_X86="$PROJECT_DIR/target/release/aivpn-client"
 CLIENT_BIN_ARM="$PROJECT_DIR/target/aarch64-apple-darwin/release/aivpn-client"
 
@@ -142,10 +143,14 @@ elif [ -f "$CLIENT_BIN_X86" ]; then
     cp "$CLIENT_BIN_X86" "$RESOURCES/aivpn-client"
     chmod +x "$RESOURCES/aivpn-client"
     echo "  ⚠️  aivpn-client bundled (x86_64 only)"
-elif [ -f "$CLIENT_BIN_UNIVERSAL" ]; then
-    cp "$CLIENT_BIN_UNIVERSAL" "$RESOURCES/aivpn-client"
+elif [ -f "$CLIENT_BIN_MACOS_UNIVERSAL" ]; then
+    cp "$CLIENT_BIN_MACOS_UNIVERSAL" "$RESOURCES/aivpn-client"
     chmod +x "$RESOURCES/aivpn-client"
-    echo "  ⚠️  aivpn-client bundled from fallback universal artifact"
+    echo "  ⚠️  aivpn-client bundled from macOS universal artifact"
+elif [ -f "$CLIENT_BIN_UNIVERSAL_LEGACY" ]; then
+    cp "$CLIENT_BIN_UNIVERSAL_LEGACY" "$RESOURCES/aivpn-client"
+    chmod +x "$RESOURCES/aivpn-client"
+    echo "  ⚠️  aivpn-client bundled from legacy universal artifact"
 else
     echo "  ⚠️  aivpn-client not found"
     echo "  Run 'cargo build --release --bin aivpn-client' first"

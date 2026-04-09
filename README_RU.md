@@ -30,7 +30,8 @@
 | Платформа | Файл | Размер | Примечания |
 |-----------|------|--------|------------|
 | **macOS** | [aivpn-macos.dmg](releases/aivpn-macos.dmg) | ~1.8 МБ | Приложение в menu bar с интерфейсом RU/EN |
-| **Windows** | [aivpn-client.exe](releases/aivpn-client.exe) | ~6.4 МБ | Требуется [wintun.dll](https://www.wintun.net/) рядом с exe |
+| **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 МБ | Нативный x86_64 GNU/Linux CLI бинарник |
+| **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Внутри `aivpn-client.exe` и `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
 
 ### Быстрый старт (macOS)
@@ -43,12 +44,20 @@
 > ⚠️ VPN-клиенту требуются права root для создания TUN-устройства. Приложение запросит пароль через `sudo`.
 
 ### Быстрый старт (Windows)
-1. Скачайте `aivpn-client.exe` и [wintun.dll](https://www.wintun.net/)
-2. Положите оба файла в одну папку
+1. Скачайте и распакуйте [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
+2. Убедитесь, что `aivpn-client.exe` и `wintun.dll` лежат в одной папке
 3. Запустите **от имени администратора** в PowerShell:
    ```powershell
    .\aivpn-client.exe -k "ваш_ключ_подключения"
    ```
+
+### Быстрый старт (Linux)
+1. Скачайте [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64)
+2. Сделайте файл исполняемым и запустите от root:
+    ```bash
+    chmod +x ./aivpn-client-linux-x86_64
+    sudo ./aivpn-client-linux-x86_64 -k "ваш_ключ_подключения"
+    ```
 
 ### Быстрый старт (Android)
 1. Скачайте и установите `aivpn-client.apk`

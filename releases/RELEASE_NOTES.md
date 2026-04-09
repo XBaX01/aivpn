@@ -84,14 +84,14 @@ sudo installer -pkg aivpn-macos.pkg -target /
 
 ## 🪟 Windows
 
-**Файл:** `aivpn-client.exe`  
+**Файлы:** `aivpn-windows-package.zip`, `aivpn-client.exe`, `wintun.dll`  
 **Размер:** 6.4 MB  
 **Архитектура:** x86_64  
 **Требования:** Windows 10/11, [wintun.dll](https://www.wintun.net/)
 
 ### Установка:
-1. Скачайте [wintun.dll](https://www.wintun.net/)
-2. Положите `wintun.dll` рядом с `aivpn-client.exe`
+1. Рекомендуется скачать и распаковать `aivpn-windows-package.zip`
+2. Либо положить `wintun.dll` рядом с `aivpn-client.exe`
 3. Запустите PowerShell **от имени Администратора**
 
 ### Быстрый старт:
@@ -103,8 +103,10 @@ sudo installer -pkg aivpn-macos.pkg -target /
 
 ## 🔧 Linux (CLI)
 
-**Файл:** `aivpn-client-universal`  
+**Файл:** `aivpn-client-linux-x86_64`  
 **Требования:** sudo права для TUN устройства
+
+`aivpn-client-universal` в `releases/` это macOS Mach-O Universal Binary (arm64 + x86_64), а Linux-релизный ELF публикуется отдельно как `aivpn-client-linux-x86_64`.
 
 ### Сборка из исходников:
 ```bash
@@ -152,8 +154,10 @@ docker exec aivpn-server aivpn-server \
 | macOS PKG | aivpn-macos.pkg | 5.9 MB | ✅ Universal (ARM+Intel) |
 | macOS DMG | aivpn-macos.dmg | 3.7 MB | ✅ Universal (ARM+Intel) |
 | Windows EXE | aivpn-client.exe | 6.4 MB | ✅ Готово |
+| Windows DLL | wintun.dll | ~0.4 MB | ✅ Required runtime |
+| Linux Binary | aivpn-client-linux-x86_64 | ~4.0 MB | ✅ x86_64 GNU/Linux |
 | Android APK | aivpn-client-universal.apk | ~6.5 MB | ✅ Все ABI |
-| macOS Binary | aivpn-client-universal | 6.3 MB | ✅ Universal (ARM+Intel) |
+| macOS Binary | aivpn-client-universal | 6.3 MB | ✅ Universal (ARM+Intel, Mach-O) |
 
 ---
 
