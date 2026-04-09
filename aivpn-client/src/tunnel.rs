@@ -64,6 +64,72 @@ impl Tunnel {
             saved_ipv6_iface: None,
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn windows_command_output(output: &std::process::Output) -> String {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        match (stdout.is_empty(), stderr.is_empty()) {
+            (false, false) => format!("{} | {}", stdout, stderr),
+            (false, true) => stdout,
+            (true, false) => stderr,
+            (true, true) => format!("route exited with status {}", output.status),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_windows_route(args: &[&str], context: &str) -> Result<std::process::Output> {
+        std::process::Command::new("route")
+            .args(args)
+            .output()
+            .map_err(|e| Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to run route for {}: {}", context, e),
+            )))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn add_windows_route_with_retry(
+        &self,
+        add_args: &[&str],
+        delete_args: &[&str],
+        success_message: &str,
+        context: &str,
+    ) -> Result<()> {
+        let first_attempt = Self::run_windows_route(add_args, context)?;
+        if first_attempt.status.success() {
+            info!("{}", success_message);
+            return Ok(());
+        }
+
+        let first_error = Self::windows_command_output(&first_attempt);
+        debug!("Initial route add failed for {}: {}", context, first_error);
+
+        let delete_attempt = Self::run_windows_route(delete_args, context)?;
+        if !delete_attempt.status.success() {
+            debug!(
+                "Route delete before retry failed for {}: {}",
+                context,
+                Self::windows_command_output(&delete_attempt)
+            );
+        }
+
+        let retry_attempt = Self::run_windows_route(add_args, context)?;
+        if retry_attempt.status.success() {
+            info!("{}", success_message);
+            return Ok(());
+        }
+
+        Err(Error::Io(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to configure {} after retry: {}",
+                context,
+                Self::windows_command_output(&retry_attempt)
+            ),
+        )))
+    }
     
     /// Create TUN device (works on Linux, macOS, Windows)
     pub fn create(&mut self) -> Result<()> {
@@ -287,23 +353,14 @@ impl Tunnel {
     /// Configure TUN device on Windows (netsh / route add)
     #[cfg(target_os = "windows")]
     fn configure_windows(&self) -> Result<()> {
-        use std::process::Command;
-        
-        let tun_addr = &self.config.tun_addr;
         let peer_addr = "10.0.0.1";
-        
-        // Add route for VPN subnet via our TUN adapter
-        let status = Command::new("route")
-            .args(["add", "10.0.0.0", "mask", "255.255.255.0", peer_addr])
-            .status()
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
-                format!("Failed to add route: {}", e))))?;
-        
-        if status.success() {
-            info!("Added route 10.0.0.0/24 via {} (Windows)", peer_addr);
-        } else {
-            debug!("route add failed (may already exist)");
-        }
+
+        self.add_windows_route_with_retry(
+            &["add", "10.0.0.0", "mask", "255.255.255.0", peer_addr],
+            &["delete", "10.0.0.0", "mask", "255.255.255.0"],
+            &format!("Added route 10.0.0.0/24 via {} (Windows)", peer_addr),
+            "VPN subnet route 10.0.0.0/24",
+        )?;
         
         Ok(())
     }
@@ -529,19 +586,28 @@ impl Tunnel {
         
         // 2. Add bypass route for VPN server IP via original gateway
         if let Some(ref server_ip) = self.server_ip {
-            let _ = Command::new("route").args(["delete", server_ip]).status();
-            let _ = Command::new("route")
-                .args(["add", server_ip, "mask", "255.255.255.255", &gw])
-                .status();
-            info!("Added bypass route: {} via {}", server_ip, gw);
+            let success_message = format!("Added bypass route: {} via {}", server_ip, gw);
+            let add_args = ["add", server_ip.as_str(), "mask", "255.255.255.255", gw.as_str()];
+            let delete_args = ["delete", server_ip.as_str(), "mask", "255.255.255.255"];
+            self.add_windows_route_with_retry(
+                &add_args,
+                &delete_args,
+                &success_message,
+                &format!("server bypass route {}", server_ip),
+            )?;
         }
         
         // 3. Route all traffic through TUN via 0/1 + 128/1 trick
         for net in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
-            let _ = Command::new("route").args(["delete", net.0, "mask", net.1]).status();
-            let _ = Command::new("route")
-                .args(["add", net.0, "mask", net.1, peer_addr, "metric", "5"])
-                .status();
+            let success_message = format!("Added full-tunnel route: {}/1 via {}", net.0, peer_addr);
+            let add_args = ["add", net.0, "mask", net.1, peer_addr, "metric", "5"];
+            let delete_args = ["delete", net.0, "mask", net.1];
+            self.add_windows_route_with_retry(
+                &add_args,
+                &delete_args,
+                &success_message,
+                &format!("full-tunnel route {}/{}", net.0, net.1),
+            )?;
         }
         
         info!("Full tunnel mode enabled — all traffic routed through VPN");
