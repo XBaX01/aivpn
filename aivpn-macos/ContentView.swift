@@ -41,13 +41,11 @@ struct ContentView: View {
             // Helper status indicator
             HStack {
                 Circle()
-                    .fill(vpn.helperAvailable ? Color.green : Color.orange)
+                    .fill(vpn.helperAvailable ? Color.green : (vpn.isCheckingHelper ? .secondary : Color.orange))
                     .frame(width: 8, height: 8)
-                Text(vpn.helperAvailable
-                     ? loc.t("helper_ready")
-                     : loc.t("helper_missing"))
+                Text(helperStatusText)
                     .font(.caption2)
-                    .foregroundColor(vpn.helperAvailable ? .secondary : .orange)
+                    .foregroundColor(helperStatusColor)
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -282,10 +280,19 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(.vertical, 6)
+                .foregroundStyle(connectButtonForegroundColor)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(connectButtonBackgroundColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(connectButtonBorderColor, lineWidth: connectButtonEnabled ? 0 : 1)
+                )
             }
-            .buttonStyle(.borderedProminent)
-            .tint(vpn.isConnected ? .red : .blue)
-            .disabled(vpn.isConnecting || !vpn.helperAvailable || vpn.keys.isEmpty)
+            .buttonStyle(.plain)
+            .disabled(!connectButtonEnabled)
+            .opacity(connectButtonEnabled ? 1.0 : 0.92)
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
 
@@ -332,6 +339,48 @@ struct ContentView: View {
         if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024.0) }
         if bytes < 1024 * 1024 * 1024 { return String(format: "%.1f MB", Double(bytes) / 1024.0 / 1024.0) }
         return String(format: "%.1f GB", Double(bytes) / 1024.0 / 1024.0 / 1024.0)
+    }
+
+    private var helperStatusText: String {
+        if vpn.helperAvailable {
+            return loc.t("helper_ready")
+        }
+        if vpn.isCheckingHelper {
+            return loc.t("helper_starting")
+        }
+        return loc.t("helper_missing")
+    }
+
+    private var helperStatusColor: Color {
+        if vpn.helperAvailable || vpn.isCheckingHelper {
+            return .secondary
+        }
+        return .orange
+    }
+
+    private var connectButtonEnabled: Bool {
+        !vpn.isConnecting && vpn.helperAvailable && !vpn.keys.isEmpty
+    }
+
+    private var connectButtonBackgroundColor: Color {
+        if vpn.isConnected {
+            return .red
+        }
+        if vpn.isConnecting || connectButtonEnabled {
+            return .blue
+        }
+        return Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var connectButtonForegroundColor: Color {
+        if vpn.isConnected || vpn.isConnecting || connectButtonEnabled {
+            return .white
+        }
+        return Color(nsColor: .labelColor)
+    }
+
+    private var connectButtonBorderColor: Color {
+        Color(nsColor: .separatorColor)
     }
 }
 

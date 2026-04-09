@@ -60,12 +60,12 @@ class LocalizationManager: ObservableObject {
             "ru": "Сервис готов"
         ],
         "helper_missing": [
-            "en": "Service not installed — reinstall AIVPN",
-            "ru": "Сервис не установлен — переустановите AIVPN"
+            "en": "Service unavailable — install AIVPN from the .pkg installer",
+            "ru": "Сервис недоступен — установите AIVPN через файл .pkg"
         ],
         "helper_starting": [
-            "en": "Starting service...",
-            "ru": "Запуск сервиса..."
+            "en": "Checking service...",
+            "ru": "Проверка сервиса..."
         ],
         "key_name": [
             "en": "Key Name",

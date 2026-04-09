@@ -248,15 +248,31 @@ pkgbuild \
 echo "  ✅ Package created: $PKG_OUTPUT ($(du -sh "$PKG_OUTPUT" | cut -f1))"
 
 # ──────────────────────────────────────────────
-# Also create DMG for manual distribution
+# Also create DMG for guided distribution
 # ──────────────────────────────────────────────
 echo "💿 Creating DMG..."
+Dmg_STAGE="$(mktemp -d /tmp/aivpn-dmg.XXXXXX)"
+Dmg_PKG_NAME="AIVPN Installer.pkg"
+
+cp "$PKG_OUTPUT" "$Dmg_STAGE/$Dmg_PKG_NAME"
+cat > "$Dmg_STAGE/INSTALL.txt" << 'EOF'
+AIVPN installation
+
+1. Open "AIVPN Installer.pkg".
+2. Finish the installer. It installs the app, helper service, and VPN binary.
+3. Launch AIVPN from Applications.
+
+Do not copy the app directly from this disk image.
+The required helper service is installed only by the package installer.
+EOF
+
 DMG_OUTPUT="$PROJECT_DIR/releases/aivpn-macos.dmg"
 hdiutil create \
-    -volname "AIVPN" \
-    -srcfolder "$SIGNED_APP_BUNDLE" \
+    -volname "AIVPN Installer" \
+    -srcfolder "$Dmg_STAGE" \
     -ov -format UDZO \
     "$DMG_OUTPUT"
+rm -rf "$Dmg_STAGE"
 echo "  ✅ DMG created: $DMG_OUTPUT ($(du -sh "$DMG_OUTPUT" | cut -f1))"
 
 echo ""

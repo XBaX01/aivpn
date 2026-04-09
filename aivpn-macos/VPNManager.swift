@@ -31,6 +31,7 @@ class VPNManager: ObservableObject {
     @Published var bytesReceived: Int64 = 0
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
+    @Published var isCheckingHelper: Bool = true
     @Published var helperVersion: String = ""
     
     // Поддержка списка ключей
@@ -141,7 +142,6 @@ class VPNManager: ObservableObject {
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else {
                 DispatchQueue.main.async {
-                    self?.helperAvailable = false
                     completion(nil)
                 }
                 return
@@ -171,7 +171,6 @@ class VPNManager: ObservableObject {
             guard connectResult == 0 else {
                 close(fd)
                 DispatchQueue.main.async {
-                    self?.helperAvailable = false
                     completion(nil)
                 }
                 return
@@ -212,9 +211,11 @@ class VPNManager: ObservableObject {
 
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
+        isCheckingHelper = true
         sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil),
                      timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
+            self.isCheckingHelper = false
             if let response = response, response.status == "ok" {
                 self.helperAvailable = true
                 self.helperVersion = response.version ?? ""
@@ -272,7 +273,7 @@ class VPNManager: ObservableObject {
                     self.lastError = response.message
                 } else {
                     self.lastError = "Helper not responding"
-                    self.helperAvailable = false
+                    self.checkHelperAvailable()
                 }
             }
         }
