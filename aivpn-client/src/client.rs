@@ -132,12 +132,6 @@ impl AivpnClient {
             .map_err(|e: std::net::AddrParseError| Error::Io(
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
             ))?;
-        self.tunnel.set_server_ip(server_addr.ip().to_string());
-        
-        // Enable full tunnel if configured
-        if self.config.tun_config.full_tunnel {
-            self.tunnel.enable_full_tunnel()?;
-        }
         
         // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
         let domain = if server_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 };
@@ -162,6 +156,13 @@ impl AivpnClient {
         let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
         
         self.udp_socket = Some(Arc::new(socket));
+
+        self.tunnel.set_server_ip(server_addr.ip().to_string());
+        
+        // Enable full tunnel only after the server UDP path is established.
+        if self.config.tun_config.full_tunnel {
+            self.tunnel.enable_full_tunnel()?;
+        }
         
         // Initialize mimicry engine
         self.mimicry_engine = Some(MimicryEngine::new(self.config.initial_mask.clone()));

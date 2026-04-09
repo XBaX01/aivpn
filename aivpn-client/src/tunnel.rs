@@ -267,12 +267,8 @@ impl Tunnel {
         let peer_addr = "10.0.0.1";
         
         // Add route for the VPN subnet through our TUN device
-        let _ = Command::new("ip")
-            .args(["route", "del", "10.0.0.0/24"])
-            .status();
-        
         let status = Command::new("ip")
-            .args(["route", "add", "10.0.0.0/24", "dev", tun_name])
+            .args(["route", "replace", "10.0.0.0/24", "dev", tun_name])
             .status()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
                 format!("Failed to add route: {}", e))))?;
@@ -398,47 +394,108 @@ impl Tunnel {
                 format!("Failed to get default route: {}", e))))?;
         
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Parse "default via X.X.X.X dev ethN"
-        let default_gw = stdout.split_whitespace()
-            .skip_while(|w| *w != "via")
-            .nth(1)
-            .map(|s| s.to_string());
-        
-        let gw = match default_gw {
-            Some(g) => g,
-            None => {
-                error!("Could not determine default gateway");
+        let route_fields: Vec<&str> = stdout.split_whitespace().collect();
+        let default_gw = route_fields.windows(2)
+            .find(|window| window[0] == "via")
+            .map(|window| window[1].to_string());
+        let default_dev = route_fields.windows(2)
+            .find(|window| window[0] == "dev")
+            .map(|window| window[1].to_string());
+        let default_onlink = route_fields.iter().any(|field| *field == "onlink");
+
+        let (gw, default_dev) = match (default_gw, default_dev) {
+            (Some(gw), Some(default_dev)) => (gw, default_dev),
+            _ => {
+                error!("Could not determine default gateway/interface");
                 return Err(Error::Io(io::Error::new(io::ErrorKind::Other,
-                    "Could not determine default gateway")));
+                    "Could not determine default gateway/interface")));
             }
         };
         
-        info!("Current default gateway: {}", gw);
+        info!("Current default gateway: {} via {}{}", gw, default_dev, if default_onlink { " onlink" } else { "" });
         self.saved_default_gw = Some(gw.clone());
         
         // 2. Add bypass route for VPN server IP via original gateway
         if let Some(ref server_ip) = self.server_ip {
-            let _ = Command::new("ip").args(["route", "del", server_ip]).status();
-            let status = Command::new("ip")
-                .args(["route", "add", server_ip, "via", &gw])
-                .status()
-                .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
-                    format!("Failed to add server bypass route: {}", e))))?;
-            if status.success() {
-                info!("Added bypass route: {} via {}", server_ip, gw);
+            let mut bypass_added = false;
+
+            let mut route_attempts = Vec::new();
+            if default_onlink {
+                route_attempts.push(vec!["route", "replace", server_ip.as_str(), "via", gw.as_str(), "dev", default_dev.as_str(), "onlink"]);
+            }
+            route_attempts.push(vec!["route", "replace", server_ip.as_str(), "via", gw.as_str(), "dev", default_dev.as_str()]);
+            if !default_onlink {
+                route_attempts.push(vec!["route", "replace", server_ip.as_str(), "via", gw.as_str(), "dev", default_dev.as_str(), "onlink"]);
+            }
+
+            for args in route_attempts {
+                let status = Command::new("ip")
+                    .args(&args)
+                    .status()
+                    .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
+                        format!("Failed to add server bypass route: {}", e))))?;
+                if status.success() {
+                    bypass_added = true;
+                    let used_onlink = args.last().is_some_and(|arg| *arg == "onlink");
+                    info!(
+                        "Added bypass route: {} via {} dev {}{}",
+                        server_ip,
+                        gw,
+                        default_dev,
+                        if used_onlink { " onlink" } else { "" }
+                    );
+                    break;
+                }
+            }
+
+            if !bypass_added {
+                let gateway_link_status = Command::new("ip")
+                    .args(["route", "replace", gw.as_str(), "dev", default_dev.as_str(), "scope", "link"])
+                    .status()
+                    .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
+                        format!("Failed to add gateway link route: {}", e))))?;
+
+                if gateway_link_status.success() {
+                    let status = Command::new("ip")
+                        .args(["route", "replace", server_ip.as_str(), "via", gw.as_str(), "dev", default_dev.as_str()])
+                        .status()
+                        .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
+                            format!("Failed to add server bypass route after gateway link route: {}", e))))?;
+
+                    if status.success() {
+                        bypass_added = true;
+                        info!(
+                            "Added bypass route: {} via {} dev {} after gateway link route",
+                            server_ip,
+                            gw,
+                            default_dev
+                        );
+                    }
+                }
+            }
+
+            if !bypass_added {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to add bypass route for {} via {} dev {}", server_ip, gw, default_dev),
+                )));
             }
         }
         
         // 3. Route all traffic through TUN using 0/1 + 128/1 trick
         for net in ["0.0.0.0/1", "128.0.0.0/1"] {
-            let _ = Command::new("ip").args(["route", "del", net]).status();
             let status = Command::new("ip")
-                .args(["route", "add", net, "dev", tun_name])
+                .args(["route", "replace", net, "dev", tun_name])
                 .status()
                 .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
                     format!("Failed to add full-tunnel route {}: {}", net, e))))?;
             if status.success() {
                 info!("Added full-tunnel route: {} via {}", net, tun_name);
+            } else {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to add full-tunnel route {} via {}", net, tun_name),
+                )));
             }
         }
         

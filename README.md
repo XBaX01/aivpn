@@ -127,7 +127,7 @@ The project is split into workspaces: `aivpn-common` (crypto & masks), `aivpn-se
 cargo build --release
 ```
 
-> On Windows, make sure you have [Wintun](https://www.wintun.net/) installed — download `wintun.dll` and place it next to the binary.
+> For GitHub Releases, publish `aivpn-windows-package.zip` as the primary Windows asset. Raw `aivpn-client.exe` is only safe when `wintun.dll` is shipped next to it.
 
 ### 3. Server (Linux only)
 
@@ -295,7 +295,9 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Download `wintun.dll` from [WireGuard/wintun](https://www.wintun.net/) and place it next to the `.exe`:
+Preferred for users: download and extract `releases/aivpn-windows-package.zip`.
+
+If you distribute raw files instead, keep `wintun.dll` next to the `.exe`:
 
 ```
 aivpn-client.exe

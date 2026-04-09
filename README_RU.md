@@ -106,7 +106,7 @@ cd aivpn
 cargo build --release
 ```
 
-> На Windows убедитесь, что установлен [Wintun](https://www.wintun.net/) — скачайте `wintun.dll` и положите рядом с бинарником.
+> Для GitHub Releases основным Windows-артефактом должен быть `aivpn-windows-package.zip`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
 
 ### 3. Сервер (только Linux)
 
@@ -274,7 +274,9 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Скачайте и положите `wintun.dll` (от [WireGuard/wintun](https://www.wintun.net/)) рядом с `.exe`:
+Для пользователей предпочтительно скачивать и распаковывать `releases/aivpn-windows-package.zip`.
+
+Если выкладываете файлы по отдельности, `wintun.dll` (от [WireGuard/wintun](https://www.wintun.net/)) должен лежать рядом с `.exe`:
 
 ```
 aivpn-client.exe

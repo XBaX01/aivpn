@@ -89,6 +89,8 @@ sudo installer -pkg aivpn-macos.pkg -target /
 **Архитектура:** x86_64  
 **Требования:** Windows 10/11, [wintun.dll](https://www.wintun.net/)
 
+**Основной артефакт для GitHub Releases:** `aivpn-windows-package.zip`
+
 ### Установка:
 1. Рекомендуется скачать и распаковать `aivpn-windows-package.zip`
 2. Либо положить `wintun.dll` рядом с `aivpn-client.exe`
@@ -141,7 +143,7 @@ docker exec aivpn-server aivpn-server \
 
 ## 🐛 Известные Проблемы
 
-- ⚠️ Windows: Требуется wintun.dll отдельно
+- ⚠️ Windows: Если выкладывать raw `aivpn-client.exe`, рядом обязательно нужен `wintun.dll`; для релизов предпочтителен `aivpn-windows-package.zip`
 - ⚠️ macOS DMG: При первом запуске может потребоваться `xattr -cr` для снятия карантина
 - ⚠️ Android: На некоторых устройствах требуется ручное разрешение VPN
 
