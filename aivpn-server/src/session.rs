@@ -568,6 +568,31 @@ impl SessionManager {
         }
     }
 
+    /// Remove old sessions for the same VPN IP (same client) except the
+    /// specified one. Unlike `cleanup_old_sessions_for_ip`, this does NOT
+    /// affect sessions belonging to other clients behind the same NAT.
+    pub fn cleanup_old_sessions_for_vpn_ip(
+        &self,
+        vpn_ip: &Ipv4Addr,
+        keep_session_id: &[u8; 16],
+    ) {
+        let to_remove: Vec<[u8; 16]> = self.sessions.iter()
+            .filter_map(|entry| {
+                let session = entry.value().lock();
+                if session.vpn_ip == Some(*vpn_ip) && entry.key() != keep_session_id {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for session_id in to_remove {
+            info!("Removing stale session for VPN IP {} after successful re-handshake", vpn_ip);
+            self.remove_session(&session_id);
+        }
+    }
+
     /// Rollback a session that was created but failed tag validation.
     /// Restores vpn_ip_map to the old session that still owns that IP.
     pub fn rollback_failed_session(&self, session_id: &[u8; 16]) {

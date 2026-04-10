@@ -912,13 +912,20 @@ impl Gateway {
             };
             
             // Tag is valid — this is a real handshake.
-            // Clean up any old sessions from the same client IP.
+            // Clean up old sessions for the SAME CLIENT (by VPN IP), not
+            // all sessions from this source IP — different clients behind
+            // the same NAT must coexist.
             {
-                let session_id = session.lock().session_id;
-                self.session_manager.cleanup_old_sessions_for_ip(
-                    &client_addr.ip(),
-                    &session_id,
-                );
+                let sess_lock = session.lock();
+                let session_id = sess_lock.session_id;
+                let vpn_ip = sess_lock.vpn_ip;
+                drop(sess_lock);
+                if let Some(vpn_ip) = vpn_ip {
+                    self.session_manager.cleanup_old_sessions_for_vpn_ip(
+                        &vpn_ip,
+                        &session_id,
+                    );
+                }
             }
             
             // Record handshake in client DB
