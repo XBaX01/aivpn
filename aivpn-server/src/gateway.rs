@@ -853,22 +853,9 @@ impl Gateway {
             // Counter drift recovery — client counter was out of range but session keys match
             (session, counter, is_ratcheted)
         } else {
-            // Small packets from a competing endpoint on the same public IP are
-            // usually stale duplicate control/init traffic after a successful
-            // ratcheted session has already been established. Dropping them is
-            // safer than spawning another ServerHello loop.
-            if packet_data.len() <= 160
-                && self
-                    .session_manager
-                    .has_recent_ratcheted_session_on_other_endpoint(&client_addr, Duration::from_secs(30))
-            {
-                debug!(
-                    "Dropping duplicate-endpoint control/init packet from {} (packet_len={})",
-                    hash_addr(&client_addr),
-                    packet_data.len()
-                );
-                return Err(Error::InvalidPacket("Stale duplicate-endpoint packet"));
-            }
+            // NOTE: We intentionally do NOT drop packets from the same public IP
+            // on a different port. Multiple clients behind the same NAT must be
+            // able to handshake independently (different PSKs → different sessions).
 
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
