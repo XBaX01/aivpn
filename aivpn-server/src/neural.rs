@@ -48,8 +48,8 @@ impl Default for NeuralConfig {
         Self {
             hidden_size: 128,
             check_interval_secs: 30,
-            compromised_threshold: 0.15,
-            warning_threshold: 0.08,
+            compromised_threshold: 0.35,
+            warning_threshold: 0.15,
             enable_anomaly_detection: true,
         }
     }

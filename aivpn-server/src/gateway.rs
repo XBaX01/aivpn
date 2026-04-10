@@ -1051,8 +1051,12 @@ impl Gateway {
             let packet_size = packet_data.len() as u16;
             // Compute byte-level entropy of the encrypted payload
             let entropy = Self::compute_entropy(encrypted_payload);
-            // IAT is approximated by the last_seen timing
-            let iat_ms = 0.0; // Will be calculated from session timestamps in check loop
+            // Compute real IAT from session's last_seen timestamp
+            let iat_ms = {
+                let sess = session.lock();
+                let elapsed = sess.last_seen.elapsed();
+                elapsed.as_secs_f64() * 1000.0
+            };
             // Neural model update is expensive under lock. Sampling every 16th packet
             // preserves trends while reducing lock contention in the receive hot path.
             if counter & 0x0f == 0 {

@@ -105,7 +105,7 @@ fn battle_session_creation() {
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
 
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
     let sess = session.lock();
     assert_eq!(sess.state, SessionState::Active);
     assert_eq!(sess.client_addr, addr);
@@ -124,7 +124,7 @@ fn battle_session_count() {
 
     for i in 0..10 {
         let kp = KeyPair::generate();
-        mgr.create_session(make_unique_addr(i), kp.public_key_bytes(), None).unwrap();
+        mgr.create_session(make_unique_addr(i), kp.public_key_bytes(), None, None).unwrap();
     }
     assert_eq!(mgr.session_count(), 10);
 }
@@ -138,7 +138,7 @@ fn battle_session_tag_lookup() {
 
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
 
     // Get one of the expected tags
     let tag = {
@@ -160,7 +160,7 @@ fn battle_session_tag_validation() {
 
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
 
     // Client derives same keys
     let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
@@ -187,7 +187,7 @@ fn battle_session_anti_replay() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
@@ -221,7 +221,7 @@ fn battle_session_removal() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     let session_id = session.lock().session_id;
     assert!(mgr.get_session(&session_id).is_some());
@@ -239,7 +239,7 @@ fn battle_session_remove_clears_tags() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Capture a tag before removal
     let tag = {
@@ -268,7 +268,7 @@ fn battle_session_multiple_clients() {
     for i in 0..50 {
         let client_kp = KeyPair::generate();
         let addr = make_unique_addr(i);
-        let session = mgr.create_session(addr, client_kp.public_key_bytes(), None).unwrap();
+        let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
 
         let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
         let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
@@ -296,7 +296,7 @@ fn battle_session_send_counter() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // next_send_nonce should increment counter
     let mut sess = session.lock();
@@ -318,7 +318,7 @@ fn battle_session_seq_wrapping() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     let mut sess = session.lock();
     // Set seq near u32 max
@@ -339,7 +339,7 @@ fn battle_session_idle_detection() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Freshly created session is not idle
     assert!(!session.lock().is_idle());
@@ -369,6 +369,7 @@ fn battle_full_pipeline_data_packet() {
     let _session = mgr.create_session(
         make_addr(10000),
         client_kp.public_key_bytes(),
+        None,
         None,
     ).unwrap();
 
@@ -453,7 +454,7 @@ fn battle_full_pipeline_100_packets() {
     let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
 
     for counter in 0u64..100 {
@@ -512,7 +513,7 @@ fn battle_full_pipeline_control_messages() {
     let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
-    let _session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let _session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Test each control message type
     let controls = vec![
@@ -584,8 +585,8 @@ fn battle_cross_session_isolation() {
     let client1_kp = KeyPair::generate();
     let client2_kp = KeyPair::generate();
 
-    let session1 = mgr.create_session(make_addr(10000), client1_kp.public_key_bytes(), None).unwrap();
-    let session2 = mgr.create_session(make_addr(10001), client2_kp.public_key_bytes(), None).unwrap();
+    let session1 = mgr.create_session(make_addr(10000), client1_kp.public_key_bytes(), None, None).unwrap();
+    let session2 = mgr.create_session(make_addr(10001), client2_kp.public_key_bytes(), None, None).unwrap();
 
     // Derive keys for both
     let shared1 = client1_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
@@ -652,7 +653,7 @@ fn battle_stress_100_sessions() {
 
     for i in 0..100 {
         let client_kp = KeyPair::generate();
-        let session = mgr.create_session(make_unique_addr(i), client_kp.public_key_bytes(), None).unwrap();
+        let session = mgr.create_session(make_unique_addr(i), client_kp.public_key_bytes(), None, None).unwrap();
 
         let shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
         let keys = derive_session_keys(&shared, None, &client_kp.public_key_bytes());
@@ -682,7 +683,7 @@ fn battle_ratchet_keys_created() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     let sess = session.lock();
     // Server should have generated ephemeral key and ratcheted keys
@@ -706,7 +707,7 @@ fn battle_ratchet_tag_validation() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Generate tag using ratcheted keys (simulating client after receiving ServerHello)
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
@@ -737,7 +738,7 @@ fn battle_complete_ratchet() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Save initial and ratcheted key material
     let (initial_key, ratcheted_key, session_id, initial_tag_secret, ratcheted_tag_secret) = {
@@ -827,13 +828,13 @@ fn battle_per_ip_session_limit() {
     // Create 5 sessions from same IP (should succeed)
     for i in 0..5 {
         let client_kp = KeyPair::generate();
-        let result = mgr.create_session(addr, client_kp.public_key_bytes(), None);
+        let result = mgr.create_session(addr, client_kp.public_key_bytes(), None, None);
         assert!(result.is_ok(), "Session {i} from same IP should succeed");
     }
 
     // 6th session from same IP should fail (MED-6 limit)
     let client_kp = KeyPair::generate();
-    let result = mgr.create_session(addr, client_kp.public_key_bytes(), None);
+    let result = mgr.create_session(addr, client_kp.public_key_bytes(), None, None);
     assert!(result.is_err(), "6th session from same IP must be rejected");
 }
 
@@ -845,7 +846,7 @@ fn battle_refresh_session_tags() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Advance counter and update tag window
     let session_id = {
@@ -880,7 +881,7 @@ fn battle_ratchet_full_crypto_pipeline() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
 
     // Client-side: derive ratcheted keys (simulating ServerHello processing)
     let (server_eph_pub, server_hello_sig, initial_session_key) = {
@@ -1115,7 +1116,7 @@ fn test_session_mask_update() {
     let (mgr, _) = make_session_manager();
     let client_kp = KeyPair::generate();
     let addr = make_addr(30000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None).unwrap();
+    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
     let session_id = session.lock().session_id;
     
     // Initially no mask set
@@ -1129,7 +1130,7 @@ fn test_session_mask_update() {
     let sess = session.lock();
     assert!(sess.mask.is_some());
     assert_eq!(sess.mask.as_ref().unwrap().mask_id, "quic_https_v2");
-    assert_eq!(sess.state, SessionState::MaskChange);
+    assert_eq!(sess.state, SessionState::Active);
     assert_eq!(sess.fsm_state, 0, "FSM must reset after mask change");
 }
 
@@ -1224,7 +1225,7 @@ fn test_gateway_config_default_has_neural() {
     let config = GatewayConfig::default();
     assert!(config.enable_neural, "Neural must be enabled by default");
     assert_eq!(config.neural_config.check_interval_secs, 30);
-    assert_eq!(config.neural_config.compromised_threshold, 0.15);
+    assert_eq!(config.neural_config.compromised_threshold, 0.35);
 }
 
 #[test]

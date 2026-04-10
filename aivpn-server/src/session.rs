@@ -883,11 +883,12 @@ impl SessionManager {
                 new_mask.mask_id
             );
             sess.mask = Some(new_mask);
-            sess.state = SessionState::MaskChange;
             // Reset FSM state for the new mask
             sess.fsm_state = 0;
             sess.fsm_packets = 0;
             sess.fsm_state_start = Instant::now();
+            // Return to Active state — MaskChange was a dead-end that froze the session
+            sess.state = SessionState::Active;
         }
     }
 }
