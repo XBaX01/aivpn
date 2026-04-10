@@ -146,6 +146,9 @@ pub struct Gateway {
     tun_write_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Per-IP rate limiter: (packet_count, window_start)
     rate_limits: Arc<DashMap<IpAddr, (u64, Instant)>>,
+    /// Per-IP handshake failure cooldown: (failure_count, last_failure_time)
+    /// Prevents rapid session-creation loops when client retries with stale keys
+    handshake_cooldowns: Arc<DashMap<IpAddr, (u32, Instant)>>,
     /// Neural Resonance Module (Patent 1) — periodic traffic validation
     neural_module: Arc<parking_lot::Mutex<NeuralResonanceModule>>,
     /// Mask catalog for automatic rotation (Patent 3)
@@ -208,6 +211,7 @@ impl Gateway {
             nat_forwarder: None,
             tun_write_tx: None,
             rate_limits: Arc::new(DashMap::new()),
+            handshake_cooldowns: Arc::new(DashMap::new()),
             neural_module: Arc::new(parking_lot::Mutex::new(neural)),
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
@@ -267,9 +271,10 @@ impl Gateway {
             let catalog = self.mask_catalog.clone();
             let metrics = self.metrics.clone();
             let check_interval = self.config.neural_config.check_interval_secs;
+            let socket = self.udp_socket.as_ref().unwrap().clone();
             
             tokio::spawn(async move {
-                Self::resonance_check_loop(neural, sessions, catalog, metrics, check_interval).await;
+                Self::resonance_check_loop(neural, sessions, catalog, metrics, check_interval, socket).await;
             });
             info!("Neural resonance check loop spawned (interval: {}s)", check_interval);
         }
@@ -360,6 +365,7 @@ impl Gateway {
         catalog: Arc<MaskCatalog>,
         metrics: Arc<MetricsCollector>,
         check_interval_secs: u64,
+        socket: Arc<UdpSocket>,
     ) {
         let interval = Duration::from_secs(check_interval_secs);
         
@@ -380,73 +386,105 @@ impl Gateway {
                 continue;
             }
             
-            let neural_guard = neural.lock();
+            // Collect mask update packets to send AFTER releasing the neural lock
+            // (parking_lot::MutexGuard is !Send, cannot hold across .await)
+            let mut pending_sends: Vec<(Vec<u8>, std::net::SocketAddr)> = Vec::new();
             
-            for (session_id, mask_id) in &session_checks {
-                // Check neural resonance (Patent 1: Signal Reconstruction Resonance)
-                match neural_guard.check_resonance(*session_id, mask_id) {
-                    Ok(result) => {
-                        metrics.record_neural_check(result.status == ResonanceStatus::Compromised);
-                        
-                        match result.status {
-                            ResonanceStatus::Compromised => {
-                                warn!(
-                                    "Mask '{}' compromised (MSE={:.4}) — triggering rotation (Patent 3)",
-                                    mask_id, result.mse
-                                );
-                                
-                                // Mark mask as compromised in catalog
-                                catalog.mark_compromised(mask_id);
-                                
-                                // Select fallback mask
-                                if let Some(new_mask) = catalog.select_fallback(mask_id) {
-                                    info!(
-                                        "Auto-rotating to mask '{}' ({} masks remaining)",
-                                        new_mask.mask_id,
-                                        catalog.available_count()
+            {
+                let neural_guard = neural.lock();
+                
+                for (session_id, mask_id) in &session_checks {
+                    // Check neural resonance (Patent 1: Signal Reconstruction Resonance)
+                    match neural_guard.check_resonance(*session_id, mask_id) {
+                        Ok(result) => {
+                            metrics.record_neural_check(result.status == ResonanceStatus::Compromised);
+                            
+                            match result.status {
+                                ResonanceStatus::Compromised => {
+                                    warn!(
+                                        "Mask '{}' compromised (MSE={:.4}) — triggering rotation (Patent 3)",
+                                        mask_id, result.mse
                                     );
                                     
-                                    // Update session's mask
-                                    sessions.update_session_mask(session_id, new_mask.clone());
+                                    // Mark mask as compromised in catalog
+                                    catalog.mark_compromised(mask_id);
                                     
-                                    metrics.record_mask_rotation();
-                                } else {
-                                    error!("No fallback masks available! All masks compromised.");
+                                    // Select fallback mask
+                                    if let Some(new_mask) = catalog.select_fallback(mask_id) {
+                                        info!(
+                                            "Auto-rotating to mask '{}' ({} masks remaining)",
+                                            new_mask.mask_id,
+                                            catalog.available_count()
+                                        );
+                                        
+                                        // Update session's mask and build notification packet
+                                        if let Some((session, client_addr)) =
+                                            sessions.update_session_mask(session_id, new_mask.clone())
+                                        {
+                                            match sessions.build_mask_update_packet(&session, &new_mask) {
+                                                Ok(packet) => {
+                                                    pending_sends.push((packet, client_addr));
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to build MaskUpdate packet: {}", e);
+                                                }
+                                            }
+                                        }
+                                        
+                                        metrics.record_mask_rotation();
+                                    } else {
+                                        error!("No fallback masks available! All masks compromised.");
+                                    }
+                                }
+                                ResonanceStatus::Warning => {
+                                    debug!(
+                                        "Mask '{}' warning (MSE={:.4}) — monitoring",
+                                        mask_id, result.mse
+                                    );
+                                }
+                                ResonanceStatus::Healthy => {
+                                    // All good
+                                }
+                                ResonanceStatus::Skip => {
+                                    // Not enough data or model not loaded
                                 }
                             }
-                            ResonanceStatus::Warning => {
-                                debug!(
-                                    "Mask '{}' warning (MSE={:.4}) — monitoring",
-                                    mask_id, result.mse
-                                );
-                            }
-                            ResonanceStatus::Healthy => {
-                                // All good
-                            }
-                            ResonanceStatus::Skip => {
-                                // Not enough data or model not loaded
-                            }
+                        }
+                        Err(e) => {
+                            debug!("Resonance check error for session: {}", e);
                         }
                     }
-                    Err(e) => {
-                        debug!("Resonance check error for session: {}", e);
+                    
+                    // Check anomaly detection (DPI blocking indicators)
+                    if neural_guard.is_mask_anomalous(mask_id) {
+                        warn!("Anomaly detected for mask '{}' (packet loss / RTT spike)", mask_id);
+                        metrics.record_dpi_attack();
+                        catalog.mark_compromised(mask_id);
+                        
+                        if let Some(new_mask) = catalog.select_fallback(mask_id) {
+                            info!(
+                                "Anomaly-triggered rotation to mask '{}'",
+                                new_mask.mask_id
+                            );
+                            if let Some((session, client_addr)) =
+                                sessions.update_session_mask(session_id, new_mask.clone())
+                            {
+                                if let Ok(packet) = sessions.build_mask_update_packet(&session, &new_mask) {
+                                    pending_sends.push((packet, client_addr));
+                                }
+                            }
+                            metrics.record_mask_rotation();
+                        }
                     }
                 }
-                
-                // Check anomaly detection (DPI blocking indicators)
-                if neural_guard.is_mask_anomalous(mask_id) {
-                    warn!("Anomaly detected for mask '{}' (packet loss / RTT spike)", mask_id);
-                    metrics.record_dpi_attack();
-                    catalog.mark_compromised(mask_id);
-                    
-                    if let Some(new_mask) = catalog.select_fallback(mask_id) {
-                        info!(
-                            "Anomaly-triggered rotation to mask '{}'",
-                            new_mask.mask_id
-                        );
-                        sessions.update_session_mask(session_id, new_mask);
-                        metrics.record_mask_rotation();
-                    }
+            } // neural_guard dropped here
+            
+            // Send collected MaskUpdate packets (async, safe now)
+            for (packet, client_addr) in pending_sends {
+                if let Err(e) = socket.send_to(&packet, client_addr).await {
+                    warn!("Failed to send MaskUpdate to {}: {}", client_addr, e);
+                } else {
+                    info!("MaskUpdate control message sent to {}", client_addr);
                 }
             }
         }
@@ -833,6 +871,23 @@ impl Gateway {
             }
 
             // No session found — try handshake
+            // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
+            // After mask rotation or session timeout, stale clients may flood the server
+            // with packets that consistently fail tag validation (issue #21).
+            {
+                let ip = client_addr.ip();
+                if let Some(entry) = self.handshake_cooldowns.get(&ip) {
+                    let (fail_count, last_fail) = *entry;
+                    // Exponential cooldown: 1s for first failures, up to 5s after many
+                    let cooldown = Duration::from_millis(
+                        (250 * (1 << fail_count.min(4))) as u64
+                    );
+                    if last_fail.elapsed() < cooldown {
+                        return Err(Error::InvalidPacket("Handshake cooldown active"));
+                    }
+                }
+            }
+
             // Try to establish a new one from eph_pub in MDH
             if packet_data.len() < TAG_SIZE + mdh_len + 32 {
                 return Err(Error::InvalidPacket("Too short for session init"));
@@ -883,6 +938,19 @@ impl Gateway {
                 match found {
                     Some(f) => f,
                     None => {
+                        // Track failed handshake for cooldown
+                        let ip = client_addr.ip();
+                        let fail_count = self.handshake_cooldowns
+                            .get(&ip)
+                            .map(|e| e.0)
+                            .unwrap_or(0);
+                        self.handshake_cooldowns.insert(ip, (fail_count + 1, Instant::now()));
+                        warn!(
+                            "Handshake failed for {} (attempt #{}) — tag mismatch for all {} registered clients",
+                            hash_addr(&client_addr),
+                            fail_count + 1,
+                            clients.len()
+                        );
                         return Err(Error::InvalidPacket("No registered client matches this handshake"));
                     }
                 }
@@ -928,6 +996,9 @@ impl Gateway {
                 }
             }
             
+            // Successful handshake — clear cooldown for this IP
+            self.handshake_cooldowns.remove(&client_addr.ip());
+
             // Record handshake in client DB
             if let (Some(ref db), Some(ref cid)) = (&self.client_db, &matched_client_id) {
                 db.record_handshake(cid);
