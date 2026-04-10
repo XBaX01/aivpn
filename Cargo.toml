@@ -4,6 +4,7 @@ members = [
     "aivpn-client",
     "aivpn-server",
     "aivpn-android-core",
+    "aivpn-windows",
 ]
 default-members = [
     "aivpn-common",
