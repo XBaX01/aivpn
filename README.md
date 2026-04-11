@@ -32,6 +32,8 @@ No need to compile — download and run:
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 MB | Native x86_64 GNU/Linux CLI binary |
 | **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Includes `aivpn-client.exe` + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
+| **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | Prebuilt x86_64 GNU/Linux server binary for VPS or fast Docker deploy |
+
 
 ### Quick Start (macOS)
 1. Download and open `aivpn-macos.dmg`
@@ -39,7 +41,6 @@ No need to compile — download and run:
 3. Launch — the app appears in the menu bar (no dock icon)
 4. Paste your connection key (`aivpn://...`) and click **Connect**
 5. Toggle 🇷🇺/🇬🇧 to switch language
-
 > ⚠️ The VPN client requires root privileges for TUN device. The app will prompt for password via `sudo`.
 
 ### Quick Start (Windows)
@@ -127,7 +128,21 @@ The project is split into workspaces: `aivpn-common` (crypto & masks), `aivpn-se
 cargo build --release
 ```
 
-> For GitHub Releases, publish `aivpn-windows-package.zip` as the primary Windows asset. Raw `aivpn-client.exe` is only safe when `wintun.dll` is shipped next to it.
+To refresh the Linux server release artifact without installing Rust on the host:
+
+```bash
+./build-server-release.sh
+```
+
+To deploy the latest published Linux server release to a VPS in one command:
+
+```bash
+./deploy-server-release.sh
+```
+
+> For GitHub Releases, publish `aivpn-server-linux-x86_64` as the Linux server asset and `aivpn-windows-package.zip` as the primary Windows asset. Raw `aivpn-client.exe` is only safe when `wintun.dll` is shipped next to it.
+
+GitHub Releases automation: the workflow in `.github/workflows/server-release-asset.yml` builds `aivpn-server-linux-x86_64` on each published Release and uploads it automatically.
 
 ### 3. Server (Linux only)
 
@@ -145,9 +160,16 @@ chmod 600 config/server.key
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
 
-# Build and start
+# Fast start from the prebuilt Linux release binary
+AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt docker compose up -d aivpn-server
+
+# Or keep the original source build path
 docker compose up -d aivpn-server
 ```
+
+The fast path expects `releases/aivpn-server-linux-x86_64` to be present locally. Build it with `./build-server-release.sh` or download it from Releases before starting Docker.
+
+For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, enables IPv4 forwarding, adds the NAT rule for the default interface, and starts Docker with `Dockerfile.prebuilt`.
 
 > The container runs with `network_mode: "host"` and mounts `./config` → `/etc/aivpn` inside the container.
 

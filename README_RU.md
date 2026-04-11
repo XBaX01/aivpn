@@ -33,6 +33,8 @@
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 МБ | Нативный x86_64 GNU/Linux CLI бинарник |
 | **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Внутри `aivpn-client.exe` и `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
+| **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 МБ | Готовый x86_64 GNU/Linux бинарник сервера для VPS или быстрого Docker-деплоя |
+
 
 ### Быстрый старт (macOS)
 1. Скачайте и откройте `aivpn-macos.dmg`
@@ -40,7 +42,6 @@
 3. Запустите — приложение появится в menu bar (без иконки в Dock)
 4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
 5. Нажмите 🇷🇺/🇬🇧 для переключения языка
-
 > ⚠️ VPN-клиенту требуются права root для создания TUN-устройства. Приложение запросит пароль через `sudo`.
 
 ### Быстрый старт (Windows)
@@ -106,7 +107,21 @@ cd aivpn
 cargo build --release
 ```
 
-> Для GitHub Releases основным Windows-артефактом должен быть `aivpn-windows-package.zip`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
+Чтобы обновить Linux-артефакт сервера без установки Rust на хост:
+
+```bash
+./build-server-release.sh
+```
+
+Чтобы развернуть последнюю опубликованную Linux-версию сервера на VPS одной командой:
+
+```bash
+./deploy-server-release.sh
+```
+
+> Для GitHub Releases серверным Linux-артефактом должен быть `aivpn-server-linux-x86_64`, а основным Windows-артефактом — `aivpn-windows-package.zip`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
+
+Автоматизация GitHub Releases: workflow в `.github/workflows/server-release-asset.yml` собирает `aivpn-server-linux-x86_64` при публикации Release и автоматически прикладывает его к релизу.
 
 ### 3. Сервер (только Linux)
 
@@ -124,9 +139,16 @@ chmod 600 config/server.key
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
 
-# Собираем и запускаем
+# Быстрый старт из готового Linux-бинарника
+AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt docker compose up -d aivpn-server
+
+# Или оставить исходный путь со сборкой из исходников
 docker compose up -d aivpn-server
 ```
+
+Быстрый путь ожидает локальный файл `releases/aivpn-server-linux-x86_64`. Его можно собрать командой `./build-server-release.sh` или скачать из Releases перед запуском Docker.
+
+Для быстрого деплоя на VPS одной командой используйте `./deploy-server-release.sh`. Скрипт скачивает релизный артефакт, создаёт `config/server.key` при необходимости, включает IPv4 forwarding, добавляет NAT-правило для интерфейса по умолчанию и запускает Docker через `Dockerfile.prebuilt`.
 
 > Контейнер запускается с `network_mode: "host"` и монтирует `./config` → `/etc/aivpn` внутри контейнера.
 

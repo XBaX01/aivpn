@@ -4,7 +4,7 @@ services:
     image: aivpn-server:latest
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: ${AIVPN_SERVER_DOCKERFILE:-Dockerfile}
     restart: unless-stopped
     network_mode: "host"
     cap_add:

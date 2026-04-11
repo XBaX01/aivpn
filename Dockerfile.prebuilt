@@ -1,0 +1,38 @@
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    iptables \
+    iproute2 \
+    netcat-openbsd \
+    bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 aivpn
+
+WORKDIR /app
+
+# Copy prebuilt Linux server binary from releases/
+COPY releases/aivpn-server-linux-x86_64 /usr/local/bin/aivpn-server
+RUN chmod +x /usr/local/bin/aivpn-server
+
+# Create config directory and TUN device node
+RUN mkdir -p /etc/aivpn /dev/net && \
+    mknod /dev/net/tun c 10 200 2>/dev/null || true && \
+    chmod 600 /dev/net/tun
+
+# Copy example config
+COPY config/server.json.example /etc/aivpn/server.json
+
+# Expose port
+EXPOSE 443/udp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD test "$(basename "$(readlink /proc/1/exe 2>/dev/null)")" = "aivpn-server" || exit 1
+
+# Run as root (required for TUN device and NAT)
+ENTRYPOINT ["/usr/local/bin/aivpn-server"]
+CMD ["--listen", "0.0.0.0:443", "--key-file", "/etc/aivpn/server.key"]

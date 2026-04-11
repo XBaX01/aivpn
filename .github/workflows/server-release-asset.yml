@@ -1,0 +1,42 @@
+name: Server Release Asset
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to upload to. Required only for manual runs that should publish to a release.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-server-asset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Linux server asset via Docker builder stage
+        run: |
+          chmod +x ./build-server-release.sh
+          ./build-server-release.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-server-linux-x86_64
+          path: releases/aivpn-server-linux-x86_64
+          if-no-files-found: error
+
+      - name: Publish asset to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: releases/aivpn-server-linux-x86_64
+          fail_on_unmatched_files: true
