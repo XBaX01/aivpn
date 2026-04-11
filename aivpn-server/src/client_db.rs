@@ -5,7 +5,6 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -218,15 +217,7 @@ impl ClientDatabase {
             Err(_) => return false,
         };
 
-        let modified = metadata.modified().ok();
-
-        {
-            let data = self.data.read();
-            // Check if we already have a cached mtime
-            // We store it as a side-channel: compare current file size + mtime
-            // For simplicity, always reload if file exists and we can read it
-            // The merge logic below is idempotent for unchanged data
-        }
+        let _ = metadata;
 
         match self.reload_from_disk() {
             Ok(true) => {

@@ -53,3 +53,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 bytes = "1.5"
 chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release.package.aivpn-android-core]
+opt-level = "s"
+strip = true

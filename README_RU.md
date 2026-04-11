@@ -31,9 +31,13 @@
 |-----------|------|--------|------------|
 | **macOS** | [aivpn-macos.dmg](releases/aivpn-macos.dmg) | ~1.8 МБ | Приложение в menu bar с интерфейсом RU/EN |
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 МБ | Нативный x86_64 GNU/Linux CLI бинарник |
+| **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl CLI-клиент для ARMv7 серверов и SBC |
+| **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 МБ | Статический musl CLI-клиент для роутеров с Entware |
 | **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Внутри `aivpn-client.exe` и `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 МБ | Готовый x86_64 GNU/Linux бинарник сервера для VPS или быстрого Docker-деплоя |
+| **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl бинарник сервера для ARMv7 Linux-хостов |
+| **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 МБ | Статический musl бинарник сервера для лёгких MIPSel/Entware систем |
 
 
 ### Быстрый старт (macOS)
@@ -59,6 +63,16 @@
     chmod +x ./aivpn-client-linux-x86_64
     sudo ./aivpn-client-linux-x86_64 -k "ваш_ключ_подключения"
     ```
+
+### Быстрый старт (Entware роутеры)
+1. Скачайте [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) для MIPSel роутеров или [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) для ARMv7 роутеров.
+2. Скопируйте бинарник на роутер, например в `/opt/bin/aivpn-client`.
+3. Сделайте файл исполняемым и запустите из Entware shell от root:
+    ```sh
+    chmod +x /opt/bin/aivpn-client
+    /opt/bin/aivpn-client -k "ваш_ключ_подключения"
+    ```
+4. Эти musl-сборки статически слинкованы, поэтому на роутере не нужен Rust toolchain и дополнительные shared libraries.
 
 ### Быстрый старт (Android)
 1. Скачайте и установите `aivpn-client.apk`
@@ -113,15 +127,35 @@ cargo build --release
 ./build-server-release.sh
 ```
 
+Для статических musl-сборок под ARMv7 серверы и MIPSel/Entware роутеры:
+
+```bash
+./build-musl-release.sh server armv7-unknown-linux-musleabihf
+./build-musl-release.sh server mipsel-unknown-linux-musl
+./build-musl-release.sh client armv7-unknown-linux-musleabihf
+./build-musl-release.sh client mipsel-unknown-linux-musl
+```
+
 Чтобы развернуть последнюю опубликованную Linux-версию сервера на VPS одной командой:
 
 ```bash
 ./deploy-server-release.sh
 ```
 
-> Для GitHub Releases серверным Linux-артефактом должен быть `aivpn-server-linux-x86_64`, а основным Windows-артефактом — `aivpn-windows-package.zip`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
+> Для GitHub Releases серверным Linux-артефактом по умолчанию должен оставаться `aivpn-server-linux-x86_64`, основным Windows-артефактом — `aivpn-windows-package.zip`, а для ARM/Entware нужно прикладывать musl-артефакты `aivpn-server-linux-armv7-musleabihf`, `aivpn-server-linux-mipsel-musl`, `aivpn-client-linux-armv7-musleabihf` и `aivpn-client-linux-mipsel-musl`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
 
-Автоматизация GitHub Releases: workflow в `.github/workflows/server-release-asset.yml` собирает `aivpn-server-linux-x86_64` при публикации Release и автоматически прикладывает его к релизу.
+Автоматизация GitHub Releases: workflow в `.github/workflows/server-release-asset.yml` собирает `aivpn-server-linux-x86_64`, а также ARMv7 и MIPSel musl-артефакты для сервера и клиента при публикации Release и автоматически прикладывает их к релизу.
+
+Для Docker-backed кросс-сборки без локального тулчейна используйте:
+
+```bash
+./build-musl-release.sh client armv7-unknown-linux-musleabihf
+./build-musl-release.sh client mipsel-unknown-linux-musl
+./build-musl-release.sh server armv7-unknown-linux-musleabihf
+./build-musl-release.sh server mipsel-unknown-linux-musl
+```
+
+Эти артефакты рассчитаны на ARM Linux-серверы/SBC и MIPSel-роутеры с Entware.
 
 ### 3. Сервер (только Linux)
 
@@ -340,6 +374,19 @@ cargo build --release --target x86_64-unknown-linux-gnu
 rustup target add x86_64-pc-windows-msvc
 cargo build --release --target x86_64-pc-windows-msvc
 ```
+
+Для статических musl-кросс-сборок без локального тулчейна используйте Docker-backed release builds:
+
+```bash
+./build-musl-release.sh client armv7-unknown-linux-musleabihf
+./build-musl-release.sh client mipsel-unknown-linux-musl
+./build-musl-release.sh server armv7-unknown-linux-musleabihf
+./build-musl-release.sh server mipsel-unknown-linux-musl
+```
+
+Эти артефакты рассчитаны на ARM Linux-серверы/SBC и MIPSel-роутеры с Entware.
+
+Для Entware-роутеров обычный поток такой: собрать или скачать musl-артефакт, скопировать его в `/opt/bin`, выдать `chmod +x` и запускать прямо из shell роутера.
 
 ## Структура проекта
 

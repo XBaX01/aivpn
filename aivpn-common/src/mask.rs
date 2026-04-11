@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use rand::{Rng, distributions::Distribution};
 use rand::distributions::weighted::WeightedIndex;
-use serde_bytes::ByteBuf;
 
 use crate::error::{Error, Result};
 
@@ -55,6 +54,7 @@ pub struct MaskProfile {
 
 /// Protocol spoofing types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum SpoofProtocol {
     None,
     QUIC,

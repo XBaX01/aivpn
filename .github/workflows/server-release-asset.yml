@@ -40,3 +40,46 @@ jobs:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           files: releases/aivpn-server-linux-x86_64
           fail_on_unmatched_files: true
+
+  build-musl-release-assets:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_kind: server
+            target: armv7-unknown-linux-musleabihf
+            artifact_name: aivpn-server-linux-armv7-musleabihf
+          - package_kind: server
+            target: mipsel-unknown-linux-musl
+            artifact_name: aivpn-server-linux-mipsel-musl
+          - package_kind: client
+            target: armv7-unknown-linux-musleabihf
+            artifact_name: aivpn-client-linux-armv7-musleabihf
+          - package_kind: client
+            target: mipsel-unknown-linux-musl
+            artifact_name: aivpn-client-linux-mipsel-musl
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build musl release artifact
+        run: |
+          chmod +x ./build-musl-release.sh
+          ./build-musl-release.sh "${{ matrix.package_kind }}" "${{ matrix.target }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: releases/${{ matrix.artifact_name }}
+          if-no-files-found: error
+
+      - name: Publish asset to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: releases/${{ matrix.artifact_name }}
+          fail_on_unmatched_files: true

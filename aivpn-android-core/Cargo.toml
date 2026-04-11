@@ -18,8 +18,3 @@ tokio     = { version = "1.35", features = ["rt", "net", "time", "io-util", "mac
 rand      = "0.8"
 log       = "0.4"
 android_logger = "0.14"
-
-[profile.release]
-opt-level = "s"    # binary size matters on mobile
-lto       = "thin"
-strip     = true

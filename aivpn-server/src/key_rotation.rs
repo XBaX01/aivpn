@@ -9,11 +9,11 @@
 //! - Zero-downtime key transition
 
 use std::time::{Duration, Instant};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
-use aivpn_common::crypto::{KeyPair, SessionKeys, X25519_PUBLIC_KEY_SIZE};
+use aivpn_common::crypto::{KeyPair, X25519_PUBLIC_KEY_SIZE};
 use aivpn_common::error::Result;
-use aivpn_common::protocol::{ControlPayload, ControlSubtype};
+use aivpn_common::protocol::ControlPayload;
 
 /// Key rotation configuration
 #[derive(Debug, Clone)]

@@ -2,7 +2,6 @@
 //! 
 //! Main server entry point
 
-use tracing::{info, error};
 use tracing_subscriber::{self, EnvFilter};
 
 use clap::Parser;

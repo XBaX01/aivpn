@@ -11,7 +11,6 @@
 use std::net::{Ipv4Addr, SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bytes::BytesMut;
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -19,17 +18,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error, debug};
 
 use aivpn_common::crypto::{
-    self, encrypt_payload, decrypt_payload, SessionKeys,
-    TAG_SIZE, NONCE_SIZE, CHACHA20_KEY_SIZE,
+    self, encrypt_payload, decrypt_payload,
+    TAG_SIZE, NONCE_SIZE,
 };
 use aivpn_common::protocol::{
-    AivpnPacket, InnerType, InnerHeader, ControlPayload, ControlSubtype,
-    MAX_PACKET_SIZE, MIN_HEADER_OVERHEAD, AckPacket,
+    InnerType, InnerHeader, ControlPayload, ControlSubtype,
+    MAX_PACKET_SIZE,
 };
-use aivpn_common::mask::{MaskProfile, SpoofProtocol};
+use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
 
-use crate::session::{SessionManager, Session, SessionState};
+use crate::session::{SessionManager, Session};
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
@@ -289,7 +288,7 @@ impl Gateway {
                 let tun_addr = self.config.tun_addr.clone();
                 
                 // Channel for writing packets to TUN device (upload + ICMP replies)
-                let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(4096);
+                let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>(4096);
                 self.tun_write_tx = Some(tun_tx.clone());
                 
                 // Spawn dedicated TUN writer task — owns the DeviceWriter, no Mutex needed
@@ -499,7 +498,6 @@ impl Gateway {
         mask: MaskProfile,
         tun_addr: String,
     ) {
-        use aivpn_common::crypto::POLY1305_TAG_SIZE;
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(10, 0, 0, 1));
         
@@ -535,7 +533,7 @@ impl Gateway {
                     
                     // Build encrypted response packet
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
-                    let (client_addr, nonce, tag, mdh, ciphertext) = {
+                    let (client_addr, _nonce, tag, mdh, ciphertext) = {
                         let mut sess = session.lock();
                         let client_addr = sess.client_addr;
                         let seq_num = sess.next_seq() as u16;
@@ -1201,7 +1199,7 @@ impl Gateway {
         let control = ControlPayload::decode(payload)?;
         
         match control {
-            ControlPayload::KeyRotate { new_eph_pub } => {
+            ControlPayload::KeyRotate { new_eph_pub: _ } => {
                 info!("Key rotation request from {}", hash_addr(&client_addr));
                 // TODO: Implement key rotation
             }
@@ -1224,7 +1222,7 @@ impl Gateway {
                 };
                 self.send_control_message(&ack, session).await?;
             }
-            ControlPayload::TelemetryRequest { metric_flags } => {
+            ControlPayload::TelemetryRequest { metric_flags: _ } => {
                 debug!("Telemetry request from {}", hash_addr(&client_addr));
                 // Send response
                 let response = ControlPayload::TelemetryResponse {

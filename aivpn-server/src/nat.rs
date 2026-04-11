@@ -8,8 +8,8 @@
 use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, debug, error};
+use tokio::io::AsyncWriteExt;
+use tracing::{info, warn, debug};
 
 use aivpn_common::error::{Error, Result};
 
@@ -43,7 +43,7 @@ impl NatForwarder {
         let mut config = tun::Configuration::default();
         
         config
-            .name(&self.tun_name)
+            .tun_name(&self.tun_name)
             .address(&self.tun_addr)
             .netmask(&self.tun_netmask)
             .mtu(TUN_MTU)

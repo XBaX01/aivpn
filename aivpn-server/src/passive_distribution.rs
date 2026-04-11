@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug, warn, error};
+use tracing::{info, debug};
 
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::Result;
@@ -167,6 +167,7 @@ impl PassiveMaskReceiver {
     }
     
     /// Decode mask from steganographic payload
+    #[allow(dead_code)]
     fn decode_mask_payload(&self, payload: &[u8]) -> Result<Option<MaskProfile>> {
         use aivpn_common::error::Error;
         
@@ -206,13 +207,13 @@ impl PassiveMaskReceiver {
 /// Steganographic encoder (for server-side mask publishing)
 pub struct SteganographicEncoder {
     /// Server's Ed25519 signing key
-    signing_key: [u8; 64],
+    _signing_key: [u8; 64],
 }
 
 impl SteganographicEncoder {
     /// Create new encoder
     pub fn new(signing_key: [u8; 64]) -> Self {
-        Self { signing_key }
+        Self { _signing_key: signing_key }
     }
     
     /// Encode mask for DNS TXT record
@@ -275,8 +276,6 @@ impl SteganographicEncoder {
 
 /// Simple base64 encoder
 fn base64_encode(data: &[u8]) -> String {
-    use std::collections::HashMap;
-    
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
     

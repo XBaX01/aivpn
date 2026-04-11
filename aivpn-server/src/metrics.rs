@@ -14,7 +14,6 @@
 use prometheus::{Registry, Counter, Gauge, Histogram, Opts, TextEncoder};
 #[cfg(feature = "metrics")]
 use tracing::warn;
-use std::sync::Arc;
 
 /// Metrics collector
 pub struct MetricsCollector {
@@ -182,6 +181,9 @@ impl MetricsCollector {
             self.sessions_total.set(total as i64);
             self.sessions_active.set(active as i64);
         }
+
+        #[cfg(not(feature = "metrics"))]
+        let _ = (total, active);
     }
     
     /// Record packet received
@@ -191,6 +193,9 @@ impl MetricsCollector {
             self.packets_received.inc();
             self.bytes_received.inc_by(bytes as u64);
         }
+
+        #[cfg(not(feature = "metrics"))]
+        let _ = bytes;
     }
     
     /// Record packet sent
@@ -200,6 +205,9 @@ impl MetricsCollector {
             self.packets_sent.inc();
             self.bytes_sent.inc_by(bytes as u64);
         }
+
+        #[cfg(not(feature = "metrics"))]
+        let _ = bytes;
     }
     
     /// Record packet processing time

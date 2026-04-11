@@ -4,7 +4,7 @@
 //! Handles TUN device creation, packet capture, and routing.
 
 use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tracing::{info, debug, error};
 
 use aivpn_common::error::{Error, Result};
@@ -754,6 +754,6 @@ mod tests {
         let config = TunnelConfig::default();
         assert!(config.tun_name.starts_with("tun"), "TUN name should start with 'tun'");
         assert_eq!(config.tun_addr, "10.0.0.1");
-        assert_eq!(config.mtu, 1280);
+        assert_eq!(config.mtu, WAN_SAFE_TUN_MTU);
     }
 }

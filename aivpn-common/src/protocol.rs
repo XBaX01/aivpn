@@ -2,7 +2,7 @@
 //! 
 //! Implements packet format, inner payload encoding, and control messages
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 

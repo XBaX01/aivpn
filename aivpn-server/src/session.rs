@@ -17,9 +17,9 @@ use tracing::info;
 
 use aivpn_common::crypto::{
     self, SessionKeys, KeyPair, TAG_SIZE, X25519_PUBLIC_KEY_SIZE, 
-    NONCE_SIZE, CHACHA20_KEY_SIZE, DEFAULT_WINDOW_MS,
+    NONCE_SIZE, DEFAULT_WINDOW_MS,
 };
-use aivpn_common::protocol::{InnerType, InnerHeader, ControlPayload, ControlSubtype};
+use aivpn_common::protocol::{InnerType, InnerHeader, ControlPayload};
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
 
@@ -106,6 +106,7 @@ pub struct Session {
 
 /// 256-bit bitmap for tracking received packets
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(non_camel_case_types)]
 pub struct u256 {
     lo: u128,
     hi: u128,
@@ -326,7 +327,7 @@ impl Session {
     pub fn update_fsm(&mut self) {
         if let Some(mask) = &self.mask {
             let duration_ms = self.fsm_state_start.elapsed().as_millis() as u64;
-            let (new_state, size_override, iat_override, padding_override) = 
+            let (new_state, _size_override, _iat_override, _padding_override) = 
                 mask.process_transition(self.fsm_state, self.fsm_packets, duration_ms);
             
             if new_state != self.fsm_state {
@@ -400,7 +401,7 @@ pub struct SessionManager {
     /// Server's signing key (Ed25519)
     signing_key: ed25519_dalek::SigningKey,
     /// Default mask profile
-    default_mask: MaskProfile,
+    _default_mask: MaskProfile,
 }
 
 impl SessionManager {
@@ -416,7 +417,7 @@ impl SessionManager {
             next_ip_octet: AtomicU32::new(2),
             server_keys,
             signing_key,
-            default_mask,
+            _default_mask: default_mask,
         }
     }
     

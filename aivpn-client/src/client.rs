@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use portable_atomic::AtomicU64;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -76,15 +77,15 @@ pub struct AivpnClient {
     keypair: KeyPair,
     counter: u64,
     send_seq: u32,
-    recv_seq: u32,
+    _recv_seq: u32,
     recv_window: RecvWindow,
     transition_recv_window: RecvWindow,
     // Traffic counters
-    bytes_sent: Arc<std::sync::atomic::AtomicU64>,
-    bytes_received: Arc<std::sync::atomic::AtomicU64>,
+    bytes_sent: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
     // Pre-allocated buffers for zero-copy I/O (OPTIMIZATION)
-    send_buf: Vec<u8>,
-    recv_buf: Vec<u8>,
+    _send_buf: Vec<u8>,
+    _recv_buf: Vec<u8>,
 }
 
 impl AivpnClient {
@@ -92,8 +93,8 @@ impl AivpnClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
         let keypair = KeyPair::generate();
         let tunnel = Tunnel::new(config.tun_config.clone());
-        let bytes_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let bytes_received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
             config,
@@ -108,14 +109,14 @@ impl AivpnClient {
             keypair,
             counter: 0,
             send_seq: 0,
-            recv_seq: 0,
+            _recv_seq: 0,
             recv_window: RecvWindow::new(),
             transition_recv_window: RecvWindow::new(),
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
-            send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
-            recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
+            _send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
+            _recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
         })
     }
     
@@ -305,8 +306,8 @@ impl AivpnClient {
                 if stats_shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                let sent = stats_bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
-                let received = stats_bytes_received.load(std::sync::atomic::Ordering::Relaxed);
+                let sent = stats_bytes_sent.load(Ordering::Relaxed);
+                let received = stats_bytes_received.load(Ordering::Relaxed);
                 let stats = format!("sent:{},received:{}", sent, received);
                 let _ = tokio::fs::write("/var/run/aivpn/traffic.stats", &stats).await;
                 let _ = tokio::fs::write("/tmp/aivpn-traffic.stats", &stats).await;
@@ -403,13 +404,13 @@ impl AivpnClient {
         udp: Arc<UdpSocket>,
         engine: MimicryEngine,
         upload_state: Arc<Mutex<UploadCryptoState>>,
-        bytes_sent: Arc<std::sync::atomic::AtomicU64>,
+        bytes_sent: Arc<AtomicU64>,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
             engine: MimicryEngine,
             upload_state: Arc<Mutex<UploadCryptoState>>,
-            bytes_sent: Arc<std::sync::atomic::AtomicU64>,
+            bytes_sent: Arc<AtomicU64>,
         }
 
         impl PacketEncryptor for MimicryEncryptor {
@@ -433,7 +434,7 @@ impl AivpnClient {
             }
 
             fn on_data_sent(&mut self, payload_len: usize) {
-                self.bytes_sent.fetch_add(payload_len as u64, std::sync::atomic::Ordering::Relaxed);
+                self.bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
             }
         }
 
@@ -485,7 +486,7 @@ impl AivpnClient {
                     return Err(Error::InvalidPacket("Invalid IP version in payload"));
                 }
                 self.tunnel.write_packet_async(&ip_payload).await?;
-                self.bytes_received.fetch_add(ip_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                self.bytes_received.fetch_add(ip_payload.len() as u64, Ordering::Relaxed);
                 debug!("Received {} bytes from server, wrote to TUN", ip_payload.len());
             }
             InnerType::Control => {
@@ -671,11 +672,11 @@ impl AivpnClient {
 
     /// Get traffic statistics
     pub fn bytes_sent(&self) -> u64 {
-        self.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+        self.bytes_sent.load(Ordering::Relaxed)
     }
 
     pub fn bytes_received(&self) -> u64 {
-        self.bytes_received.load(std::sync::atomic::Ordering::Relaxed)
+        self.bytes_received.load(Ordering::Relaxed)
     }
 }
 
