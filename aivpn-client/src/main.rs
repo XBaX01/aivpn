@@ -4,12 +4,14 @@ use aivpn_client::AivpnClient;
 use aivpn_client::client::ClientConfig;
 use aivpn_client::tunnel::TunnelConfig;
 use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
+use aivpn_common::network_config::{ClientNetworkConfig, DEFAULT_VPN_MTU, LEGACY_SERVER_VPN_IP};
 use clap::Parser;
 use tracing::{info, error, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use base64::Engine;
+use std::net::Ipv4Addr;
 
 /// AIVPN Client - Censorship-resistant VPN client
 #[derive(Parser, Debug)]
@@ -71,7 +73,7 @@ async fn main() {
     let args = ClientArgs::parse();
     
     // Parse connection key or individual args
-    let (server_addr, server_key_b64, psk_bytes, tun_addr) = if let Some(ref conn_key) = args.connection_key {
+    let (server_addr, server_key_b64, psk_bytes, network_config) = if let Some(ref conn_key) = args.connection_key {
         let payload = conn_key.trim().strip_prefix("aivpn://").unwrap_or(conn_key.trim());
         let json_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
@@ -95,8 +97,22 @@ async fn main() {
         let psk: Option<Vec<u8>> = json["p"].as_str().and_then(|p| {
             base64::engine::general_purpose::STANDARD.decode(p).ok()
         });
-        let ip = json["i"].as_str().map(|i| i.to_string());
-        (s, k, psk, ip.unwrap_or_else(|| args.tun_addr.clone()))
+        let network_config = json
+            .get("n")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ClientNetworkConfig>(value).ok())
+            .or_else(|| {
+                json["i"].as_str().and_then(|ip| {
+                    ip.parse::<Ipv4Addr>().ok().map(|client_ip| ClientNetworkConfig {
+                        client_ip,
+                        server_vpn_ip: LEGACY_SERVER_VPN_IP,
+                        prefix_len: 24,
+                        mtu: DEFAULT_VPN_MTU,
+                    })
+                })
+            })
+            .unwrap_or_else(|| fallback_network_config(&args.tun_addr));
+        (s, k, psk, network_config)
     } else {
         let server = args.server.clone().unwrap_or_else(|| {
             error!("Either --connection-key or --server + --server-key required");
@@ -106,7 +122,7 @@ async fn main() {
             error!("Either --connection-key or --server + --server-key required");
             std::process::exit(1);
         });
-        (server, key, None, args.tun_addr.clone())
+        (server, key, None, fallback_network_config(&args.tun_addr))
     };
     
     info!("AIVPN Client v{}", env!("CARGO_PKG_VERSION"));
@@ -140,7 +156,7 @@ async fn main() {
     
     let tun_name_fixed = args.tun_name.clone();
     let full_tunnel = args.full_tunnel;
-    let tun_addr = tun_addr;
+    let network_config = network_config;
 
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
@@ -164,13 +180,11 @@ async fn main() {
             preshared_key,
             initial_mask: webrtc_zoom_v3(),
             server_signing_pub: None,
-            tun_config: TunnelConfig {
-                tun_name: tun_name.clone(),
-                tun_addr: tun_addr.clone(),
-                tun_netmask: "255.255.255.0".to_string(),
-                mtu: 1346,
+            tun_config: TunnelConfig::from_network_config(
+                tun_name.clone(),
+                network_config,
                 full_tunnel,
-            },
+            ),
         };
 
         match AivpnClient::new(config) {
@@ -200,5 +214,19 @@ async fn main() {
 
         tokio::time::sleep(backoff).await;
         backoff = std::cmp::min(backoff * 2, max_backoff);
+    }
+}
+
+fn fallback_network_config(tun_addr: &str) -> ClientNetworkConfig {
+    let client_ip = tun_addr.parse::<Ipv4Addr>().unwrap_or_else(|_| {
+        error!("Invalid TUN address '{}': expected IPv4 address", tun_addr);
+        std::process::exit(1);
+    });
+
+    ClientNetworkConfig {
+        client_ip,
+        server_vpn_ip: LEGACY_SERVER_VPN_IP,
+        prefix_len: 24,
+        mtu: DEFAULT_VPN_MTU,
     }
 }

@@ -9,9 +9,12 @@ use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn, debug};
+use tracing::{info, debug};
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 use aivpn_common::error::{Error, Result};
+use aivpn_common::network_config::VpnNetworkConfig;
 
 const TUN_MTU: u16 = 1420;
 
@@ -21,17 +24,24 @@ pub struct NatForwarder {
     tun_name: String,
     tun_addr: String,
     tun_netmask: String,
+    network_config: VpnNetworkConfig,
     writer: Option<Arc<Mutex<tun::DeviceWriter>>>,
     writer_taken: Option<Mutex<Option<tun::DeviceWriter>>>,
     reader: Option<Mutex<Option<tun::DeviceReader>>>,
 }
 
 impl NatForwarder {
-    pub fn new(tun_name: &str, tun_addr: &str, tun_netmask: &str) -> Result<Self> {
+    pub fn new(
+        tun_name: &str,
+        tun_addr: &str,
+        tun_netmask: &str,
+        network_config: VpnNetworkConfig,
+    ) -> Result<Self> {
         Ok(Self {
             tun_name: tun_name.to_string(),
             tun_addr: tun_addr.to_string(),
             tun_netmask: tun_netmask.to_string(),
+            network_config,
             writer: None,
             writer_taken: None,
             reader: None,
@@ -64,10 +74,11 @@ impl NatForwarder {
         self.reader = Some(Mutex::new(Some(reader)));
         
         info!(
-            "Created NAT TUN device: {} ({}/{})",
+            "Created NAT TUN device: {} ({}/{}, subnet {})",
             self.tun_name,
             self.tun_addr,
-            self.tun_netmask
+            self.tun_netmask,
+            self.network_config.cidr_string(),
         );
         
         // Enable IP forwarding (Linux)
@@ -114,7 +125,7 @@ impl NatForwarder {
             .args([
                 "-t", "nat",
                 "-A", "POSTROUTING",
-                "-s", &format!("{}/24", self.tun_addr),
+                "-s", &self.network_config.cidr_string(),
                 "-j", "MASQUERADE",
             ])
             .output();
@@ -237,7 +248,7 @@ impl Drop for NatForwarder {
                 .args([
                     "-t", "nat",
                     "-D", "POSTROUTING",
-                    "-s", &format!("{}/24", self.tun_addr),
+                    "-s", &self.network_config.cidr_string(),
                     "-j", "MASQUERADE",
                 ])
                 .output();

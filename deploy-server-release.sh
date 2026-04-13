@@ -4,10 +4,12 @@ set -euo pipefail
 
 REPO_SLUG="${AIVPN_REPO_SLUG:-infosave2007/aivpn}"
 RELEASE_TAG="${AIVPN_RELEASE_TAG:-latest}"
+AIVPN_SKIP_DOWNLOAD="${AIVPN_SKIP_DOWNLOAD:-0}"
 ASSET_NAME="aivpn-server-linux-x86_64"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASES_DIR="$SCRIPT_DIR/releases"
 ARTIFACT_PATH="$RELEASES_DIR/$ASSET_NAME"
+SERVER_CONFIG_PATH="$SCRIPT_DIR/config/server.json"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -23,6 +25,35 @@ run_privileged() {
         require_command sudo
         sudo "$@"
     fi
+}
+
+detect_vpn_cidr() {
+    if [ ! -f "$SERVER_CONFIG_PATH" ]; then
+        echo "10.0.0.0/24"
+        return
+    fi
+
+    python3 - "$SERVER_CONFIG_PATH" <<'PY'
+import ipaddress
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+
+network = data.get('network_config')
+if network:
+    server_ip = network.get('server_vpn_ip', '10.0.0.1')
+    prefix_len = int(network.get('prefix_len', 24))
+else:
+    server_ip = data.get('tun_addr', '10.0.0.1')
+    netmask = data.get('tun_netmask', '255.255.255.0')
+    prefix_len = ipaddress.IPv4Network(f'0.0.0.0/{netmask}').prefixlen
+
+cidr = ipaddress.IPv4Network(f'{server_ip}/{prefix_len}', strict=False)
+print(cidr.with_prefixlen)
+PY
 }
 
 download_latest_asset() {
@@ -60,12 +91,20 @@ require_command curl
 require_command docker
 require_command python3
 
-if ! docker compose version >/dev/null 2>&1; then
-    echo "Error: docker compose plugin is required" >&2
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD=(docker-compose)
+else
+    echo "Error: docker compose plugin or docker-compose is required" >&2
     exit 1
 fi
 
 mkdir -p "$RELEASES_DIR" "$SCRIPT_DIR/config"
+
+if [ ! -f "$SERVER_CONFIG_PATH" ]; then
+    cp "$SCRIPT_DIR/config/server.json.example" "$SERVER_CONFIG_PATH"
+fi
 
 if [ ! -f "$SCRIPT_DIR/config/server.key" ]; then
     require_command openssl
@@ -75,7 +114,13 @@ if [ ! -f "$SCRIPT_DIR/config/server.key" ]; then
 fi
 
 echo "Downloading server release asset: $ASSET_NAME"
-if [ "$RELEASE_TAG" = "latest" ]; then
+if [ "$AIVPN_SKIP_DOWNLOAD" = "1" ]; then
+    if [ ! -x "$ARTIFACT_PATH" ]; then
+        echo "Error: AIVPN_SKIP_DOWNLOAD=1 requires an existing executable artifact at $ARTIFACT_PATH" >&2
+        exit 1
+    fi
+    echo "Skipping download and using local artifact at $ARTIFACT_PATH"
+elif [ "$RELEASE_TAG" = "latest" ]; then
     download_latest_asset
 else
     download_tagged_asset
@@ -86,10 +131,11 @@ echo "Enabling IPv4 forwarding"
 run_privileged sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
 DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+VPN_CIDR="$(detect_vpn_cidr)"
 if [ -n "$DEFAULT_IFACE" ]; then
-    echo "Ensuring NAT rule on interface $DEFAULT_IFACE"
-    if ! run_privileged iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE >/dev/null 2>&1; then
-        run_privileged iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+    echo "Ensuring NAT rule for $VPN_CIDR on interface $DEFAULT_IFACE"
+    if ! run_privileged iptables -t nat -C POSTROUTING -s "$VPN_CIDR" -o "$DEFAULT_IFACE" -j MASQUERADE >/dev/null 2>&1; then
+        run_privileged iptables -t nat -A POSTROUTING -s "$VPN_CIDR" -o "$DEFAULT_IFACE" -j MASQUERADE
     fi
 else
     echo "Warning: default network interface not detected; skipping NAT rule setup" >&2
@@ -102,7 +148,7 @@ fi
 
 echo "Starting server from prebuilt release binary"
 cd "$SCRIPT_DIR"
-AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt docker compose up -d aivpn-server
+AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt "${DOCKER_COMPOSE_CMD[@]}" up -d --build --force-recreate aivpn-server
 
 echo ""
 echo "Server deployed."

@@ -3,6 +3,18 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+def cargoToml = new File(rootProject.projectDir.parentFile, 'Cargo.toml')
+def cargoTomlText = cargoToml.text
+def workspaceVersionMatch = (cargoTomlText =~ /(?ms)^\[workspace\.package\].*?^version = "([^"]+)"/)
+if (!workspaceVersionMatch.find()) {
+    throw new GradleException("Unable to determine workspace version from Cargo.toml")
+}
+def workspaceVersion = workspaceVersionMatch.group(1)
+def workspaceVersionParts = workspaceVersion.tokenize('.')
+def workspaceVersionCode = (workspaceVersionParts[0] as int) * 10000 +
+    (workspaceVersionParts[1] as int) * 100 +
+    (workspaceVersionParts[2] as int)
+
 def keystorePropertiesFile = rootProject.file('keystore.properties')
 def keystoreProperties = new Properties()
 if (keystorePropertiesFile.exists()) {
@@ -28,8 +40,8 @@ android {
         applicationId = "com.aivpn.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = workspaceVersionCode
+        versionName = workspaceVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

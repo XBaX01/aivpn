@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{POLY1305_TAG_SIZE, TAG_SIZE};
 use crate::error::{Error, Result};
+use crate::network_config::ClientNetworkConfig;
 
 /// Maximum UDP packet size (optimized for VPN MTU 1420 + overhead)
 pub const MAX_PACKET_SIZE: usize = 1500;
@@ -247,6 +248,7 @@ pub enum ControlPayload {
         server_eph_pub: [u8; 32],
         #[serde(with = "serde_bytes")]
         signature: [u8; 64],
+        network_config: Option<ClientNetworkConfig>,
     },
 }
 
@@ -296,10 +298,13 @@ impl ControlPayload {
                 buf.extend_from_slice(&ack_seq.to_le_bytes());
                 buf.push(*ack_for_subtype);
             }
-            Self::ServerHello { server_eph_pub, signature } => {
+            Self::ServerHello { server_eph_pub, signature, network_config } => {
                 buf.push(ControlSubtype::ServerHello as u8);
                 buf.extend_from_slice(server_eph_pub);
                 buf.extend_from_slice(signature);
+                if let Some(network_config) = network_config {
+                    buf.extend_from_slice(&network_config.encode_wire());
+                }
             }
         }
         
@@ -389,7 +394,18 @@ impl ControlPayload {
                 server_eph_pub.copy_from_slice(&data[1..33]);
                 let mut signature = [0u8; 64];
                 signature.copy_from_slice(&data[33..97]);
-                Ok(Self::ServerHello { server_eph_pub, signature })
+                let network_config = if data.len() >= 97 + ClientNetworkConfig::WIRE_SIZE {
+                    Some(ClientNetworkConfig::decode_wire(
+                        &data[97..97 + ClientNetworkConfig::WIRE_SIZE],
+                    )?)
+                } else {
+                    None
+                };
+                Ok(Self::ServerHello {
+                    server_eph_pub,
+                    signature,
+                    network_config,
+                })
             }
         }
     }

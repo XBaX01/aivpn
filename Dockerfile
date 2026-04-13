@@ -60,4 +60,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 
 # Run as root (required for TUN device and NAT)
 ENTRYPOINT ["/usr/local/bin/aivpn-server"]
-CMD ["--listen", "0.0.0.0:443", "--key-file", "/etc/aivpn/server.key"]
+CMD ["--config", "/etc/aivpn/server.json", "--listen", "0.0.0.0:443", "--key-file", "/etc/aivpn/server.key"]

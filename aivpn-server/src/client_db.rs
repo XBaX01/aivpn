@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use aivpn_common::error::{Error, Result};
+use aivpn_common::network_config::VpnNetworkConfig;
 
 /// Client configuration and credentials
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,15 +49,20 @@ pub struct ClientStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientDbFile {
     clients: Vec<ClientConfig>,
-    /// Next VPN IP last octet to assign
-    next_octet: u8,
+    /// Next host offset within the configured VPN subnet to assign.
+    #[serde(default = "default_next_host_offset", alias = "next_octet")]
+    next_host_offset: u32,
+}
+
+fn default_next_host_offset() -> u32 {
+    2
 }
 
 impl Default for ClientDbFile {
     fn default() -> Self {
         Self {
             clients: Vec::new(),
-            next_octet: 2, // 10.0.0.1 is the server
+            next_host_offset: default_next_host_offset(),
         }
     }
 }
@@ -65,11 +71,13 @@ impl Default for ClientDbFile {
 pub struct ClientDatabase {
     data: RwLock<ClientDbFile>,
     file_path: PathBuf,
+    network_config: VpnNetworkConfig,
 }
 
 impl ClientDatabase {
     /// Load or create client database from file
-    pub fn load(file_path: &Path) -> Result<Self> {
+    pub fn load(file_path: &Path, network_config: VpnNetworkConfig) -> Result<Self> {
+        network_config.validate()?;
         let data = if file_path.exists() {
             let content = std::fs::read_to_string(file_path)
                 .map_err(|e| Error::Session(format!("Failed to read client DB: {}", e)))?;
@@ -82,6 +90,7 @@ impl ClientDatabase {
         Ok(Self {
             data: RwLock::new(data),
             file_path: file_path.to_path_buf(),
+            network_config,
         })
     }
 
@@ -111,11 +120,7 @@ impl ClientDatabase {
         }
 
         // Allocate VPN IP
-        if data.next_octet > 254 {
-            return Err(Error::Session("No more VPN IPs available".into()));
-        }
-        let vpn_ip = Ipv4Addr::new(10, 0, 0, data.next_octet);
-        data.next_octet += 1;
+        let vpn_ip = self.allocate_vpn_ip(&mut data)?;
 
         // Generate random ID and PSK
         let mut id_bytes = [0u8; 8];
@@ -140,6 +145,10 @@ impl ClientDatabase {
 
         self.save()?;
         Ok(client)
+    }
+
+    pub fn network_config(&self) -> VpnNetworkConfig {
+        self.network_config
     }
 
     /// Remove a client by ID
@@ -264,9 +273,44 @@ impl ClientDatabase {
             }
             c
         }).collect();
-        data.next_octet = new_data.next_octet;
+        data.next_host_offset = new_data.next_host_offset;
 
         Ok(true)
+    }
+
+    fn allocate_vpn_ip(&self, data: &mut ClientDbFile) -> Result<Ipv4Addr> {
+        let max_host_offset = self.network_config.max_host_offset();
+        if max_host_offset < 1 {
+            return Err(Error::Session("Configured VPN subnet has no usable host addresses".into()));
+        }
+
+        let mut candidate_offset = if data.next_host_offset == 0 {
+            default_next_host_offset()
+        } else {
+            data.next_host_offset
+        };
+
+        for _ in 0..max_host_offset {
+            if let Some(candidate_ip) = self.network_config.ip_for_host_offset(candidate_offset) {
+                let already_used = data.clients.iter().any(|client| client.vpn_ip == candidate_ip);
+                if candidate_ip != self.network_config.server_vpn_ip && !already_used {
+                    data.next_host_offset = if candidate_offset >= max_host_offset {
+                        1
+                    } else {
+                        candidate_offset + 1
+                    };
+                    return Ok(candidate_ip);
+                }
+            }
+
+            candidate_offset = if candidate_offset >= max_host_offset {
+                1
+            } else {
+                candidate_offset + 1
+            };
+        }
+
+        Err(Error::Session("No more VPN IPs available in configured subnet".into()))
     }
 }
 

@@ -787,15 +787,17 @@ fn battle_server_hello_roundtrip() {
     let hello = ControlPayload::ServerHello {
         server_eph_pub,
         signature,
+        network_config: None,
     };
     
     let encoded = hello.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
     
     match decoded {
-        ControlPayload::ServerHello { server_eph_pub: pub_key, signature: sig } => {
+        ControlPayload::ServerHello { server_eph_pub: pub_key, signature: sig, network_config } => {
             assert_eq!(pub_key, server_eph_pub);
             assert_eq!(sig, signature);
+            assert!(network_config.is_none());
         }
         _ => panic!("Expected ServerHello"),
     }

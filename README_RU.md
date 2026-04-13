@@ -234,11 +234,36 @@ sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUE
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 ```
 
+Если VPN-подсеть у вас не legacy `10.0.0.0/24`, держите её в `config/server.json` как единственный авторитетный источник:
+
+```json
+{
+    "listen_addr": "0.0.0.0:443",
+    "tun_name": "aivpn0",
+    "network_config": {
+        "server_vpn_ip": "10.150.0.1",
+        "prefix_len": 24,
+        "mtu": 1346
+    }
+}
+```
+
+И NAT-правило тоже должно соответствовать этой подсети, например:
+
+```bash
+DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
+sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+```
+
 ### 3.1 Управление клиентами
 
 AIVPN использует модель регистрации клиентов по аналогии с WireGuard/XRay: у каждого клиента — уникальный PSK, статический VPN IP и статистика трафика.
 
 Вся конфигурация упаковывается в один **ключ подключения** — одну строку, которую пользователь вставляет в приложение или CLI-клиент.
+
+Теперь ключ подключения несёт не только legacy-поле VPN IP, но и необязательный блок `network_config` для начальной сетевой конфигурации. Новый клиент берёт сетевые параметры из этого блока и затем подтверждает их через `ServerHello`. Старые ключи без `network_config` продолжают работать.
 
 #### Docker
 
@@ -258,7 +283,7 @@ $AIVPN_COMPOSE exec aivpn-server aivpn-server \
 #
 # ══ Connection Key (paste into app) ══
 #
-# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
+# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwibiI6eyJjbGllbnRfaXAiOiIxMC4wLjAuMiIsInNlcnZlcl92cG5faXAiOiIxMC4wLjAuMSIsInByZWZpeF9sZW4iOjI0LCJtdHUiOjEzNDZ9LCJwIjoiLi4uIiwicyI6IjEuMi4zLjQ6NDQzIn0
 
 # Список всех клиентов со статистикой
 docker compose exec aivpn-server aivpn-server \
@@ -314,6 +339,14 @@ aivpn-server \
 ```bash
 sudo ./target/release/aivpn-client -k "aivpn://eyJp..."
 ```
+
+Приоритет у новых клиентов такой:
+
+1. Сетевые параметры, подтверждённые сервером в `ServerHello`
+2. Bootstrap `network_config` из ключа подключения
+3. Legacy fallback `10.0.0.0/24`
+
+Важно для миграции: старые клиенты продолжают работать со старыми ключами и legacy `/24`, но если вы переносите сервер в другую подсеть или меняете префикс, клиентов нужно обновить, а ключи подключения лучше перевыпустить.
 
 Полный туннель:
 

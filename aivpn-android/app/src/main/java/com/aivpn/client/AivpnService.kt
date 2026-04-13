@@ -38,7 +38,8 @@ class AivpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
         // Match the desktop client's WAN-safe TUN MTU so encrypted outer UDP
         // datagrams stay below the path-MTU ceiling on real networks.
-        private const val TUN_MTU         = 1346
+        private const val DEFAULT_TUN_MTU = 1346
+        private const val LEGACY_PREFIX_LEN = 24
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
         private const val TAG = "AivpnService"
@@ -64,6 +65,9 @@ class AivpnService : VpnService() {
     @Volatile private var savedServerKey: String?  = null
     @Volatile private var savedPsk: String?        = null
     @Volatile private var savedVpnIp: String?      = null
+    @Volatile private var savedServerVpnIp: String? = null
+    @Volatile private var savedVpnPrefixLen: Int = LEGACY_PREFIX_LEN
+    @Volatile private var savedVpnMtu: Int = DEFAULT_TUN_MTU
 
     // Whether the current session reached the running state
     @Volatile private var sessionEstablished = false
@@ -88,7 +92,10 @@ class AivpnService : VpnService() {
                 val serverKey = intent.getStringExtra("server_key") ?: return START_NOT_STICKY
                 startVpn(server, serverKey,
                     intent.getStringExtra("psk"),
-                    intent.getStringExtra("vpn_ip"))
+                    intent.getStringExtra("vpn_ip"),
+                    intent.getStringExtra("server_vpn_ip"),
+                    intent.getIntExtra("vpn_prefix_len", LEGACY_PREFIX_LEN),
+                    intent.getIntExtra("vpn_mtu", DEFAULT_TUN_MTU))
             }
             ACTION_DISCONNECT -> stopVpn()
         }
@@ -100,14 +107,23 @@ class AivpnService : VpnService() {
         serverKeyBase64: String,
         pskBase64: String? = null,
         vpnIp: String? = null,
+        serverVpnIp: String? = null,
+        vpnPrefixLen: Int = LEGACY_PREFIX_LEN,
+        vpnMtu: Int = DEFAULT_TUN_MTU,
     ) {
         Log.d(TAG, "startVpn: server=$serverAddr")
+
+        val normalizedPrefixLen = vpnPrefixLen.coerceIn(1, 30)
+        val normalizedMtu = vpnMtu.coerceAtLeast(576)
 
         val sameTarget =
             savedServerAddr == serverAddr &&
             savedServerKey == serverKeyBase64 &&
             savedPsk == pskBase64 &&
-            savedVpnIp == vpnIp
+            savedVpnIp == vpnIp &&
+            savedServerVpnIp == serverVpnIp &&
+            savedVpnPrefixLen == normalizedPrefixLen &&
+            savedVpnMtu == normalizedMtu
         val startupInFlight = restartJob?.isActive == true
         val tunnelLoopActive = serviceJob?.isActive == true
         if (sameTarget && (startupInFlight || tunnelLoopActive)) {
@@ -119,6 +135,9 @@ class AivpnService : VpnService() {
         savedServerKey   = serverKeyBase64
         savedPsk         = pskBase64
         savedVpnIp       = vpnIp
+        savedServerVpnIp = serverVpnIp
+        savedVpnPrefixLen = normalizedPrefixLen
+        savedVpnMtu = normalizedMtu
         manualDisconnect = false
 
         restartJob?.cancel()
@@ -219,17 +238,19 @@ class AivpnService : VpnService() {
         }
 
         val tunAddress4 = savedVpnIp ?: "10.0.0.2"
+        val tunPrefixLen = savedVpnPrefixLen.coerceIn(1, 30)
+        val tunMtu = savedVpnMtu.coerceAtLeast(576)
 
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
         // IPv6 is intentionally disabled in this client.
         val builder = Builder()
             .setSession("AIVPN")
-            .addAddress(tunAddress4, 24)
+            .addAddress(tunAddress4, tunPrefixLen)
             .addRoute("0.0.0.0", 0)          // IPv4: route all through VPN
             .addDnsServer("8.8.8.8")
             .addDnsServer("1.1.1.1")
-            .setMtu(TUN_MTU)
+            .setMtu(tunMtu)
             .setBlocking(false)
 
         // Split tunneling: route only selected apps through VPN

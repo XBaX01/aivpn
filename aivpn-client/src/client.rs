@@ -29,6 +29,7 @@ use aivpn_common::protocol::{
 };
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
+use aivpn_common::network_config::ClientNetworkConfig;
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 use crate::mimicry::MimicryEngine;
@@ -180,6 +181,27 @@ impl AivpnClient {
         info!("Connected to server at {}", self.config.server_addr);
         info!("TUN device: {}", self.tunnel.name());
         
+        Ok(())
+    }
+
+    fn apply_server_network_override(&mut self, network_config: ClientNetworkConfig) -> Result<()> {
+        let current_config = self.config.tun_config.client_network_config()?;
+        if current_config == network_config {
+            return Ok(());
+        }
+
+        info!(
+            "Applying server-confirmed network override: client {} gateway {} /{} mtu {}",
+            network_config.client_ip,
+            network_config.server_vpn_ip,
+            network_config.prefix_len,
+            network_config.mtu,
+        );
+
+        let tun_name = self.config.tun_config.tun_name.clone();
+        let full_tunnel = self.config.tun_config.full_tunnel;
+        self.tunnel.apply_network_config(network_config)?;
+        self.config.tun_config = TunnelConfig::from_network_config(tun_name, network_config, full_tunnel);
         Ok(())
     }
     
@@ -513,8 +535,12 @@ impl AivpnClient {
             ControlPayload::KeyRotate { new_eph_pub: _ } => {
                 debug!("Key rotation signal received");
             }
-            ControlPayload::ServerHello { server_eph_pub, signature } => {
+            ControlPayload::ServerHello { server_eph_pub, signature, network_config } => {
                 info!("ServerHello received — completing PFS ratchet");
+
+                if let Some(network_config) = network_config {
+                    self.apply_server_network_override(network_config)?;
+                }
                 
                 // Verify Ed25519 signature if server signing key configured (HIGH-6)
                 if let Some(signing_pub) = &self.config.server_signing_pub {

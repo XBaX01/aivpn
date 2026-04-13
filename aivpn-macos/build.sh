@@ -14,6 +14,9 @@ PKG_BUILD="$BUILD_DIR/pkg"
 PKG_ROOT="$PKG_BUILD/root"
 PKG_SCRIPTS="$PKG_BUILD/scripts"
 
+APP_VERSION="$(awk -F'"' '/^\[workspace.package\]/{flag=1; next} flag && /^version = /{print $2; exit}' "$PROJECT_DIR/Cargo.toml")"
+APP_BUILD_NUMBER="${AIVPN_BUILD_NUMBER:-$(echo "$APP_VERSION" | awk -F. '{ printf "%d%02d%02d", $1, $2, $3 }')}"
+
 SWIFT_SOURCES=(
     "$SCRIPT_DIR/AivpnApp.swift"
     "$SCRIPT_DIR/ContentView.swift"
@@ -27,7 +30,7 @@ HELPER_SOURCES=(
     "$SCRIPT_DIR/aivpn-helper/main.swift"
 )
 
-echo "🔨 Building AIVPN macOS v0.3.0 (Universal Binary + PKG)..."
+echo "🔨 Building AIVPN macOS v$APP_VERSION (Universal Binary + PKG)..."
 
 # ──────────────────────────────────────────────
 # Clean
@@ -160,6 +163,8 @@ fi
 # Copy Info.plist
 # ──────────────────────────────────────────────
 cp "$SCRIPT_DIR/Info.plist" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD_NUMBER" "$CONTENTS/Info.plist"
 
 # ──────────────────────────────────────────────
 # Copy app icon
@@ -241,7 +246,7 @@ pkgbuild \
     --install-location "/" \
     --scripts "$PKG_SCRIPTS" \
     --identifier "com.aivpn.client" \
-    --version "0.3.0" \
+    --version "$APP_VERSION" \
     --ownership "recommended" \
     "$PKG_OUTPUT"
 

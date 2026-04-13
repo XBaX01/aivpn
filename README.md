@@ -244,11 +244,36 @@ sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUE
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 ```
 
+If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/server.json` as the authoritative source:
+
+```json
+{
+    "listen_addr": "0.0.0.0:443",
+    "tun_name": "aivpn0",
+    "network_config": {
+        "server_vpn_ip": "10.150.0.1",
+        "prefix_len": 24,
+        "mtu": 1346
+    }
+}
+```
+
+Then match the NAT rule to that subnet, for example:
+
+```bash
+DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
+sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+```
+
 ### 3.1 Client Management
 
 AIVPN uses a client registration model similar to WireGuard/XRay: each client gets a unique PSK, a static VPN IP, and traffic statistics.
 
 All config is packed into a single **connection key** — one string that the user pastes into the app or CLI client.
+
+The connection key now carries both the legacy top-level VPN IP field and an optional bootstrap `network_config` block. New clients use server-provided network settings from this block, then confirm them from `ServerHello`. Older keys without `network_config` still work.
 
 #### Docker
 
@@ -268,7 +293,7 @@ $AIVPN_COMPOSE exec aivpn-server aivpn-server \
 #
 # ══ Connection Key (paste into app) ══
 #
-# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwicCI6Ii4uLiIsInMiOiIxLjIuMy40OjQ0MyJ9
+# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwibiI6eyJjbGllbnRfaXAiOiIxMC4wLjAuMiIsInNlcnZlcl92cG5faXAiOiIxMC4wLjAuMSIsInByZWZpeF9sZW4iOjI0LCJtdHUiOjEzNDZ9LCJwIjoiLi4uIiwicyI6IjEuMi4zLjQ6NDQzIn0
 
 # List all clients with traffic stats
 docker compose exec aivpn-server aivpn-server \
@@ -324,6 +349,14 @@ The easiest way — paste the connection key from `--add-client`:
 ```bash
 sudo ./target/release/aivpn-client -k "aivpn://eyJp..."
 ```
+
+Priority on modern clients is:
+
+1. Network settings confirmed by `ServerHello`
+2. Bootstrap `network_config` from the connection key
+3. Legacy fallback `10.0.0.0/24`
+
+Migration note: old clients continue to work with old keys and legacy `/24` defaults, but if you move the server to a different subnet or prefix, clients must be updated and connection keys should be reissued.
 
 Full tunnel:
 

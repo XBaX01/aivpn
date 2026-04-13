@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use aivpn_common::network_config::ClientNetworkConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionKey {
     pub name: String,
@@ -13,6 +15,8 @@ pub struct ConnectionKey {
     pub server_addr: String,
     #[serde(default)]
     pub vpn_ip: String,
+    #[serde(default)]
+    pub network_config: Option<ClientNetworkConfig>,
 }
 
 impl ConnectionKey {
@@ -24,12 +28,17 @@ impl ConnectionKey {
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
         let server_addr = json["s"].as_str().unwrap_or("").to_string();
         let vpn_ip = json["i"].as_str().unwrap_or("").to_string();
+        let network_config = json
+            .get("n")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ClientNetworkConfig>(value).ok());
 
         Some(Self {
             name: name.to_string(),
             key: key.trim().to_string(),
             server_addr,
             vpn_ip,
+            network_config,
         })
     }
 }

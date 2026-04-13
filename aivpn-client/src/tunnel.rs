@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{info, debug, error};
 
 use aivpn_common::error::{Error, Result};
+use aivpn_common::network_config::{ClientNetworkConfig, LEGACY_SERVER_VPN_IP, VpnNetworkConfig};
 
 // Keep the full encrypted outer datagram within SAFE_OUTER_PACKET_BUDGET=1380.
 // Outer overhead is 34 bytes: TAG(16) + MDH(4) + pad_len(2) + Poly1305(16) -
@@ -20,7 +21,9 @@ const WAN_SAFE_TUN_MTU: u16 = 1346;
 pub struct TunnelConfig {
     pub tun_name: String,
     pub tun_addr: String,
+    pub server_vpn_ip: String,
     pub tun_netmask: String,
+    pub prefix_len: u8,
     pub mtu: u16,
     /// Route all traffic through VPN (full tunnel mode)
     pub full_tunnel: bool,
@@ -31,11 +34,68 @@ impl Default for TunnelConfig {
         use rand::Rng;
         Self {
             tun_name: format!("tun{:04x}", rand::thread_rng().gen::<u16>()),
-            tun_addr: "10.0.0.1".to_string(),
+            tun_addr: "10.0.0.2".to_string(),
+            server_vpn_ip: LEGACY_SERVER_VPN_IP.to_string(),
             tun_netmask: "255.255.255.0".to_string(),
+            prefix_len: 24,
             mtu: WAN_SAFE_TUN_MTU,
             full_tunnel: false,
         }
+    }
+}
+
+impl TunnelConfig {
+    pub fn from_network_config(
+        tun_name: String,
+        network_config: ClientNetworkConfig,
+        full_tunnel: bool,
+    ) -> Self {
+        Self {
+            tun_name,
+            tun_addr: network_config.client_ip.to_string(),
+            server_vpn_ip: network_config.server_vpn_ip.to_string(),
+            tun_netmask: network_config.netmask_string(),
+            prefix_len: network_config.prefix_len,
+            mtu: network_config.mtu,
+            full_tunnel,
+        }
+    }
+
+    pub fn client_network_config(&self) -> Result<ClientNetworkConfig> {
+        let client_ip = self.configured_client_ip()?;
+        let server_vpn_ip = self.configured_server_vpn_ip()?;
+        let network_config = ClientNetworkConfig {
+            client_ip,
+            server_vpn_ip,
+            prefix_len: self.prefix_len,
+            mtu: self.mtu,
+        };
+        network_config.validate()?;
+        Ok(network_config)
+    }
+
+    fn configured_client_ip(&self) -> Result<std::net::Ipv4Addr> {
+        self.tun_addr.parse().map_err(|e| Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid configured client IP {}: {}", self.tun_addr, e),
+        )))
+    }
+
+    fn configured_server_vpn_ip(&self) -> Result<std::net::Ipv4Addr> {
+        self.server_vpn_ip.parse().map_err(|e| Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid configured server VPN IP {}: {}", self.server_vpn_ip, e),
+        )))
+    }
+
+    fn vpn_network_config(&self) -> Result<VpnNetworkConfig> {
+        let network_config = VpnNetworkConfig {
+            server_vpn_ip: self.configured_server_vpn_ip()?,
+            prefix_len: self.prefix_len,
+            mtu: self.mtu,
+        };
+        network_config.validate()?;
+        Ok(network_config)
     }
 }
 
@@ -201,6 +261,30 @@ impl Tunnel {
         
         Ok(())
     }
+
+    pub fn apply_network_config(&mut self, network_config: ClientNetworkConfig) -> Result<()> {
+        network_config.validate()?;
+        self.config.tun_addr = network_config.client_ip.to_string();
+        self.config.server_vpn_ip = network_config.server_vpn_ip.to_string();
+        self.config.tun_netmask = network_config.netmask_string();
+        self.config.prefix_len = network_config.prefix_len;
+        self.config.mtu = network_config.mtu;
+
+        if self.reader.is_none() && self.writer.is_none() {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "macos")]
+        self.configure_macos()?;
+
+        #[cfg(target_os = "linux")]
+        self.configure_linux()?;
+
+        #[cfg(target_os = "windows")]
+        self.configure_windows()?;
+
+        Ok(())
+    }
     
     // ──────────────────── macOS ────────────────────
     
@@ -211,11 +295,14 @@ impl Tunnel {
         
         let tun_name = &self.config.tun_name;
         let tun_addr = &self.config.tun_addr;
-        let peer_addr = "10.0.0.1";
+        let peer_addr = &self.config.server_vpn_ip;
+        let vpn_network = self.config.vpn_network_config()?;
+        let vpn_network_addr = vpn_network.network_addr().to_string();
+        let tun_netmask = self.config.tun_netmask.clone();
         
         // Set point-to-point addresses with explicit netmask
         let status = Command::new("/sbin/ifconfig")
-            .args([tun_name, "inet", tun_addr, peer_addr, "netmask", "255.255.255.0", "mtu", &self.config.mtu.to_string(), "up"])
+            .args([tun_name, "inet", tun_addr, peer_addr, "netmask", &tun_netmask, "mtu", &self.config.mtu.to_string(), "up"])
             .status()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, 
                 format!("Failed to run ifconfig: {}", e))))?;
@@ -227,13 +314,13 @@ impl Tunnel {
                 format!("ifconfig failed: {}", status),
             )));
         } else {
-            info!("Configured {} with {} -> {} (netmask 255.255.255.0)", tun_name, tun_addr, peer_addr);
+            info!("Configured {} with {} -> {} (netmask {})", tun_name, tun_addr, peer_addr, tun_netmask);
         }
         
         // Delete any stale routes to prevent conflicts
         info!("Cleaning up stale routes...");
         let _ = Command::new("/sbin/route").args(["-n", "delete", "-host", peer_addr]).status();
-        let _ = Command::new("/sbin/route").args(["-n", "delete", "-net", "10.0.0.0", "-netmask", "255.255.255.0"]).status();
+        let _ = Command::new("/sbin/route").args(["-n", "delete", "-net", &vpn_network_addr, "-netmask", &tun_netmask]).status();
         
         // Small delay to ensure routes are cleaned up
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -257,19 +344,19 @@ impl Tunnel {
         }
         
         // Add subnet route for 10.0.0.0/24
-        info!("Adding subnet route 10.0.0.0/24 via {} (gateway {})", tun_name, tun_addr);
+        info!("Adding subnet route {}/{} via {} (gateway {})", vpn_network_addr, self.config.prefix_len, tun_name, tun_addr);
         let status = Command::new("/sbin/route")
-            .args(["-n", "add", "-net", "10.0.0.0/24", tun_addr])
+            .args(["-n", "add", "-net", &vpn_network_addr, "-netmask", &tun_netmask, tun_addr])
             .status()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
                 format!("Failed to add subnet route: {}", e))))?;
 
         if !status.success() {
-            error!("route add -net 10.0.0.0/24 failed with status: {}", status);
+            error!("route add -net {}/{} failed with status: {}", vpn_network_addr, self.config.prefix_len, status);
             // Don't fail completely - host route is more important
             debug!("Subnet route may already exist or not be needed");
         } else {
-            info!("✓ Added subnet route 10.0.0.0/24 via {} (gateway {})", tun_name, tun_addr);
+            info!("✓ Added subnet route {}/{} via {} (gateway {})", vpn_network_addr, self.config.prefix_len, tun_name, tun_addr);
         }
 
         // Block IPv6 to prevent traffic leaks (IPv6 bypasses the IPv4-only VPN tunnel).
@@ -312,9 +399,9 @@ impl Tunnel {
                 format!("Failed to run netstat: {}", e))))?;
 
         let routes = String::from_utf8_lossy(&output.stdout);
-        if routes.contains("10.0.0") {
+        if routes.contains(&vpn_network_addr) {
             info!("Routes verified:");
-            for line in routes.lines().filter(|l| l.contains("10.0.0")) {
+            for line in routes.lines().filter(|l| l.contains(&vpn_network_addr)) {
                 debug!("  {}", line.trim());
             }
         }
@@ -330,19 +417,32 @@ impl Tunnel {
         use std::process::Command;
         
         let tun_name = &self.config.tun_name;
-        let peer_addr = "10.0.0.1";
+        let cidr = self.config.client_network_config()?.cidr_string();
+
+        let status = Command::new("ip")
+            .args(["addr", "replace", &cidr, "dev", tun_name])
+            .status()
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
+                format!("Failed to configure tunnel address: {}", e))))?;
+
+        if !status.success() {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to configure tunnel address {} on {}", cidr, tun_name),
+            )));
+        }
         
         // Add route for the VPN subnet through our TUN device
         let status = Command::new("ip")
-            .args(["route", "replace", "10.0.0.0/24", "dev", tun_name])
+            .args(["route", "replace", &self.config.vpn_network_config()?.cidr_string(), "dev", tun_name])
             .status()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other,
                 format!("Failed to add route: {}", e))))?;
         
         if status.success() {
-            info!("Added route 10.0.0.0/24 via {}", tun_name);
+            info!("Added route {} via {}", self.config.vpn_network_config()?.cidr_string(), tun_name);
         } else {
-            debug!("ip route add 10.0.0.0/24 failed (may already exist)");
+            debug!("ip route add {} failed (may already exist)", self.config.vpn_network_config()?.cidr_string());
         }
         
         Ok(())
@@ -353,13 +453,16 @@ impl Tunnel {
     /// Configure TUN device on Windows (netsh / route add)
     #[cfg(target_os = "windows")]
     fn configure_windows(&self) -> Result<()> {
-        let peer_addr = "10.0.0.1";
+        let peer_addr = &self.config.server_vpn_ip;
+        let vpn_network = self.config.vpn_network_config()?;
+        let network_addr = vpn_network.network_addr().to_string();
+        let tun_netmask = self.config.tun_netmask.clone();
 
         self.add_windows_route_with_retry(
-            &["add", "10.0.0.0", "mask", "255.255.255.0", peer_addr],
-            &["delete", "10.0.0.0", "mask", "255.255.255.0"],
-            &format!("Added route 10.0.0.0/24 via {} (Windows)", peer_addr),
-            "VPN subnet route 10.0.0.0/24",
+            &["add", network_addr.as_str(), "mask", tun_netmask.as_str(), peer_addr],
+            &["delete", network_addr.as_str(), "mask", tun_netmask.as_str()],
+            &format!("Added route {}/{} via {} (Windows)", network_addr, self.config.prefix_len, peer_addr),
+            &format!("VPN subnet route {}/{}", network_addr, self.config.prefix_len),
         )?;
         
         Ok(())
@@ -565,7 +668,7 @@ impl Tunnel {
     pub fn enable_full_tunnel(&mut self) -> Result<()> {
         use std::process::Command;
         
-        let peer_addr = "10.0.0.1";
+        let peer_addr = self.config.server_vpn_ip.clone();
         
         // 1. Get current default gateway via powershell
         let output = Command::new("powershell")
@@ -600,7 +703,7 @@ impl Tunnel {
         // 3. Route all traffic through TUN via 0/1 + 128/1 trick
         for net in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
             let success_message = format!("Added full-tunnel route: {}/1 via {}", net.0, peer_addr);
-            let add_args = ["add", net.0, "mask", net.1, peer_addr, "metric", "5"];
+            let add_args = ["add", net.0, "mask", net.1, peer_addr.as_str(), "metric", "5"];
             let delete_args = ["delete", net.0, "mask", net.1];
             self.add_windows_route_with_retry(
                 &add_args,
@@ -753,7 +856,8 @@ mod tests {
     fn test_tunnel_config() {
         let config = TunnelConfig::default();
         assert!(config.tun_name.starts_with("tun"), "TUN name should start with 'tun'");
-        assert_eq!(config.tun_addr, "10.0.0.1");
+        assert_eq!(config.tun_addr, "10.0.0.2");
+        assert_eq!(config.server_vpn_ip, "10.0.0.1");
         assert_eq!(config.mtu, WAN_SAFE_TUN_MTU);
     }
 }

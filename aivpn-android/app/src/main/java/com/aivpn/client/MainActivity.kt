@@ -19,6 +19,8 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 import com.aivpn.client.databinding.ActivityMainBinding
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.util.UUID
 
 /**
@@ -28,6 +30,16 @@ import java.util.UUID
  * v0.3.0: Uses EncryptedSharedPreferences for secure key storage.
  */
 class MainActivity : AppCompatActivity() {
+
+    private data class ParsedConnectionKey(
+        val server: String,
+        val serverKey: String,
+        val psk: String,
+        val vpnIp: String,
+        val serverVpnIp: String,
+        val prefixLen: Int,
+        val mtu: Int,
+    )
 
     private lateinit var binding: ActivityMainBinding
     private var isConnected = false
@@ -140,7 +152,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun extractServerName(connectionKey: String): String {
         val parsed = parseConnectionKey(connectionKey) ?: return "Server"
-        val server = parsed[0]
+        val server = parsed.server
         val host = server.substringBefore(":")
         return host
     }
@@ -367,10 +379,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Parse connection key: aivpn://BASE64URL({"s":"host:port","k":"...","p":"...","i":"..."})
-     * Returns (server, serverKey, psk, vpnIp) or null on failure.
+     * Parse connection key: aivpn://BASE64URL({"s":"host:port","k":"...","p":"...","i":"...","n":{...}})
      */
-    private fun parseConnectionKey(key: String): Array<String>? {
+    private fun parseConnectionKey(key: String): ParsedConnectionKey? {
         val raw = key.trim()
         val payload = if (raw.startsWith("aivpn://")) raw.removePrefix("aivpn://") else raw
         return try {
@@ -381,10 +392,29 @@ class MainActivity : AppCompatActivity() {
             val server = json.getString("s")
             val serverKey = json.getString("k")
             val psk = json.getString("p")
-            val vpnIp = json.getString("i")
-            arrayOf(server, serverKey, psk, vpnIp)
+            val networkConfig = json.optJSONObject("n")
+            val vpnIp = networkConfig?.optString("client_ip")?.takeUnless { it.isNullOrBlank() }
+                ?: json.getString("i")
+            val serverVpnIp = networkConfig?.optString("server_vpn_ip")?.takeUnless { it.isNullOrBlank() }
+                ?: "10.0.0.1"
+            val prefixLen = networkConfig?.optInt("prefix_len", 24) ?: 24
+            val mtu = networkConfig?.optInt("mtu", 1346) ?: 1346
+
+            if (!isValidIpv4(vpnIp) || !isValidIpv4(serverVpnIp) || prefixLen !in 1..30 || mtu <= 0) {
+                return null
+            }
+
+            ParsedConnectionKey(server, serverKey, psk, vpnIp, serverVpnIp, prefixLen, mtu)
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun isValidIpv4(value: String): Boolean {
+        return try {
+            InetAddress.getByName(value) is Inet4Address
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -434,7 +464,10 @@ class MainActivity : AppCompatActivity() {
     private fun startVpnService() {
         val connectionKey = binding.editConnectionKey.text.toString().trim()
         val parsed = parseConnectionKey(connectionKey) ?: return
-        val (server, serverKey, psk, vpnIp) = parsed
+        val server = parsed.server
+        val serverKey = parsed.serverKey
+        val psk = parsed.psk
+        val vpnIp = parsed.vpnIp
 
         val intent = Intent(this, AivpnService::class.java).apply {
             action = AivpnService.ACTION_CONNECT
@@ -442,6 +475,9 @@ class MainActivity : AppCompatActivity() {
             putExtra("server_key", serverKey)
             putExtra("psk", psk)
             putExtra("vpn_ip", vpnIp)
+            putExtra("server_vpn_ip", parsed.serverVpnIp)
+            putExtra("vpn_prefix_len", parsed.prefixLen)
+            putExtra("vpn_mtu", parsed.mtu)
         }
         startForegroundService(intent)
         updateUI(true, getString(R.string.status_connecting))

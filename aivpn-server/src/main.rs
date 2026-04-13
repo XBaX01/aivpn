@@ -4,20 +4,43 @@ use aivpn_server::{AivpnServer, ServerArgs, ClientDatabase};
 use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
 use aivpn_common::crypto;
+use aivpn_common::network_config::{
+    netmask_to_prefix_len, ClientNetworkConfig, DEFAULT_VPN_MTU, VpnNetworkConfig,
+};
 use tracing::{info, error};
 use clap::Parser;
-use std::net::SocketAddr;
-use std::path::Path;
+use serde::Deserialize;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/aivpn/server.json";
+const LOCAL_SERVER_CONFIG_PATH: &str = "config/server.json";
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ServerFileConfig {
+    listen_addr: Option<String>,
+    tun_name: Option<String>,
+    tun_addr: Option<Ipv4Addr>,
+    tun_netmask: Option<Ipv4Addr>,
+    network_config: Option<VpnNetworkConfig>,
+}
 
 #[tokio::main]
 async fn main() {
     // Parse arguments first (before logging for CLI commands)
     let args = ServerArgs::parse_from(std::env::args());
 
+    let config_path = resolve_config_path(&args);
+    let file_config = load_server_file_config(config_path.as_deref());
+    let network_config = resolve_network_config(file_config.as_ref()).unwrap_or_else(|e| {
+        eprintln!("Failed to resolve VPN network config: {}", e);
+        std::process::exit(1);
+    });
+
     // Load client database
     let clients_db_path = Path::new(&args.clients_db);
-    let client_db = match ClientDatabase::load(clients_db_path) {
+    let client_db = match ClientDatabase::load(clients_db_path, network_config) {
         Ok(db) => Arc::new(db),
         Err(e) => {
             eprintln!("Failed to load client database: {}", e);
@@ -54,6 +77,12 @@ async fn main() {
     info!("Starting server...");
     info!("Listening on: {}", args.listen);
     info!("Registered clients: {}", client_db.list_clients().len());
+    info!(
+        "Authoritative VPN subnet: {} (server {}, mtu {})",
+        network_config.cidr_string(),
+        network_config.server_vpn_ip,
+        network_config.mtu,
+    );
 
     // Load server private key from file if provided (HIGH-11)
     let server_private_key = if let Some(ref key_file) = args.key_file {
@@ -79,18 +108,21 @@ async fn main() {
     };
 
     // Generate random TUN name if not specified (MED-1: avoids fingerprinting)
-    let tun_name = args.tun_name.unwrap_or_else(|| {
+    let tun_name = args.tun_name.clone().or_else(|| file_config.as_ref().and_then(|config| config.tun_name.clone())).unwrap_or_else(|| {
         use rand::Rng;
         format!("tun{:04x}", rand::thread_rng().gen::<u16>())
     });
 
+    let listen_addr = resolve_listen_addr(&args, file_config.as_ref());
+
     // Create config
     let config = GatewayConfig {
-        listen_addr: args.listen,
+        listen_addr,
         per_ip_pps_limit: args.per_ip_pps_limit,
         tun_name,
-        tun_addr: "10.0.0.1".to_string(),
-        tun_netmask: "255.255.255.0".to_string(),
+        tun_addr: network_config.server_ip_string(),
+        tun_netmask: network_config.netmask_string(),
+        network_config,
         server_private_key,
         signing_key: [0u8; 64],
         enable_nat: true,
@@ -126,15 +158,22 @@ fn load_server_public_key(args: &ServerArgs) -> Option<[u8; 32]> {
     })
 }
 
-/// Build a connection key: aivpn://BASE64({"s":"host:port","k":"...","p":"...","i":"..."})
-fn build_connection_key(args: &ServerArgs, server_ip: &str, server_pub_b64: &str, psk_b64: &str, vpn_ip: &str) -> String {
+/// Build a connection key: aivpn://BASE64({"s":"host:port","k":"...","p":"...","i":"...","n":{...}})
+fn build_connection_key(
+    args: &ServerArgs,
+    server_ip: &str,
+    server_pub_b64: &str,
+    psk_b64: &str,
+    client_network_config: ClientNetworkConfig,
+) -> String {
     use base64::Engine;
     let server_addr = build_connection_server_addr(args, server_ip);
     let json = serde_json::json!({
         "s": server_addr,
         "k": server_pub_b64,
         "p": psk_b64,
-        "i": vpn_ip
+        "i": client_network_config.client_ip,
+        "n": client_network_config
     });
     let json_bytes = serde_json::to_string(&json).unwrap();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json_bytes.as_bytes());
@@ -146,8 +185,11 @@ fn build_connection_server_addr(args: &ServerArgs, server_ip: &str) -> String {
         return server_ip.to_string();
     }
 
-    let port = args
-        .listen
+    let config_path = resolve_config_path(args);
+    let file_config = load_server_file_config(config_path.as_deref());
+    let listen_addr = resolve_listen_addr(args, file_config.as_ref());
+
+    let port = listen_addr
         .parse::<SocketAddr>()
         .map(|addr| addr.port())
         .unwrap_or(443);
@@ -161,6 +203,7 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
             use base64::Engine;
             let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
             let server_pub = load_server_public_key(args);
+            let client_network_config = db.network_config().client_config(client.vpn_ip).unwrap();
 
             println!("✅ Client '{}' created!", name);
             println!("   ID:     {}", client.id);
@@ -169,7 +212,7 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
 
             if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, &client.vpn_ip.to_string());
+                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
                 println!("══ Connection Key (paste into app) ══");
                 println!();
                 println!("{}", conn_key);
@@ -253,6 +296,7 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
             use base64::Engine;
             let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
             let server_pub = load_server_public_key(args);
+            let client_network_config = db.network_config().client_config(client.vpn_ip);
 
             println!("Client: {} ({})", client.name, client.id);
             println!("  VPN IP:      {}", client.vpn_ip);
@@ -267,13 +311,23 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
                     .unwrap_or_else(|| "never".to_string()));
 
             if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
-                let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, &client.vpn_ip.to_string());
-                println!();
-                println!("══ Connection Key ══");
-                println!();
-                println!("{}", conn_key);
-                println!();
+                match client_network_config {
+                    Ok(client_network_config) => {
+                        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
+                        let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
+                        println!();
+                        println!("══ Connection Key ══");
+                        println!();
+                        println!("{}", conn_key);
+                        println!();
+                    }
+                    Err(err) => {
+                        eprintln!("⚠  Cannot generate connection key for this client under the current VPN subnet: {}", err);
+                        eprintln!("   Client VPN IP: {}", client.vpn_ip);
+                        eprintln!("   Current server subnet: {}", db.network_config().cidr_string());
+                        eprintln!("   Reissue this client in the active subnet to get a new key.");
+                    }
+                }
             } else if args.server_ip.is_none() {
                 eprintln!("⚠  --server-ip not provided, cannot generate connection key");
             }
@@ -294,6 +348,61 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn load_server_file_config(path: Option<&str>) -> Option<ServerFileConfig> {
+    let path = path?;
+    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Failed to read config file '{}': {}", path, e);
+        std::process::exit(1);
+    });
+    Some(serde_json::from_str(&content).unwrap_or_else(|e| {
+        eprintln!("Failed to parse config file '{}': {}", path, e);
+        std::process::exit(1);
+    }))
+}
+
+fn resolve_config_path(args: &ServerArgs) -> Option<String> {
+    if let Some(path) = &args.config {
+        return Some(path.clone());
+    }
+
+    [DEFAULT_SERVER_CONFIG_PATH, LOCAL_SERVER_CONFIG_PATH]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn resolve_network_config(file_config: Option<&ServerFileConfig>) -> aivpn_common::error::Result<VpnNetworkConfig> {
+    let config = if let Some(file_config) = file_config {
+        if let Some(network_config) = file_config.network_config {
+            network_config
+        } else {
+            VpnNetworkConfig {
+                server_vpn_ip: file_config.tun_addr.unwrap_or(Ipv4Addr::new(10, 0, 0, 1)),
+                prefix_len: netmask_to_prefix_len(
+                    file_config.tun_netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
+                )?,
+                mtu: DEFAULT_VPN_MTU,
+            }
+        }
+    } else {
+        VpnNetworkConfig::default()
+    };
+
+    config.validate()?;
+    Ok(config)
+}
+
+fn resolve_listen_addr(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -> String {
+    if args.listen == "0.0.0.0:443" {
+        file_config
+            .and_then(|config| config.listen_addr.clone())
+            .unwrap_or_else(|| args.listen.clone())
+    } else {
+        args.listen.clone()
     }
 }
 
@@ -333,7 +442,18 @@ mod tests {
     #[test]
     fn build_connection_key_embeds_normalized_server_addr() {
         let args = test_args("0.0.0.0:443");
-        let key = build_connection_key(&args, "203.0.113.10:8443", "server-key", "psk", "10.0.0.2");
+        let key = build_connection_key(
+            &args,
+            "203.0.113.10:8443",
+            "server-key",
+            "psk",
+            ClientNetworkConfig {
+                client_ip: Ipv4Addr::new(10, 0, 0, 2),
+                server_vpn_ip: Ipv4Addr::new(10, 0, 0, 1),
+                prefix_len: 24,
+                mtu: 1346,
+            },
+        );
         let payload = key.strip_prefix("aivpn://").unwrap();
         let json_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
@@ -341,5 +461,25 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
         assert_eq!(json["s"], "203.0.113.10:8443");
+        assert_eq!(json["n"]["prefix_len"], 24);
+    }
+
+    #[test]
+    fn resolve_network_config_prefers_network_config_block() {
+        let file_config = ServerFileConfig {
+            listen_addr: None,
+            tun_name: None,
+            tun_addr: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            tun_netmask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+            network_config: Some(VpnNetworkConfig {
+                server_vpn_ip: Ipv4Addr::new(10, 150, 0, 1),
+                prefix_len: 24,
+                mtu: 1400,
+            }),
+        };
+
+        let resolved = resolve_network_config(Some(&file_config)).unwrap();
+        assert_eq!(resolved.server_vpn_ip, Ipv4Addr::new(10, 150, 0, 1));
+        assert_eq!(resolved.mtu, 1400);
     }
 }

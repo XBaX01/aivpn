@@ -41,6 +41,87 @@ jobs:
           files: releases/aivpn-server-linux-x86_64
           fail_on_unmatched_files: true
 
+  build-macos-release-assets:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build macOS client binaries
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --bin aivpn-client --target x86_64-apple-darwin
+          cargo build --release --bin aivpn-client --target aarch64-apple-darwin
+
+      - name: Build macOS installer artifacts
+        run: |
+          chmod +x ./aivpn-macos/build.sh
+          ./aivpn-macos/build.sh
+
+      - name: Upload macOS workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-macos-release-assets
+          path: |
+            releases/aivpn-macos.pkg
+            releases/aivpn-macos.dmg
+          if-no-files-found: error
+
+      - name: Publish macOS assets to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: |
+            releases/aivpn-macos.pkg
+            releases/aivpn-macos.dmg
+          fail_on_unmatched_files: true
+
+  build-android-release-asset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and build prerequisites
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+          cargo install cargo-ndk
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Build Android release APK
+        run: |
+          cd aivpn-android
+          chmod +x ./build-rust-android.sh
+          ./build-rust-android.sh release
+
+      - name: Upload Android workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-client-android-apk
+          path: releases/aivpn-client.apk
+          if-no-files-found: error
+
+      - name: Publish Android APK to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: releases/aivpn-client.apk
+          fail_on_unmatched_files: true
+
   build-musl-release-assets:
     runs-on: ubuntu-latest
     strategy:

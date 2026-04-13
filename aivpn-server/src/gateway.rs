@@ -27,6 +27,7 @@ use aivpn_common::protocol::{
 };
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
+use aivpn_common::network_config::VpnNetworkConfig;
 
 use crate::session::{SessionManager, Session};
 use crate::nat::NatForwarder;
@@ -47,6 +48,7 @@ pub struct GatewayConfig {
     pub tun_name: String,
     pub tun_addr: String,
     pub tun_netmask: String,
+    pub network_config: VpnNetworkConfig,
     pub server_private_key: [u8; 32],
     pub signing_key: [u8; 64],
     pub enable_nat: bool,
@@ -66,6 +68,7 @@ impl Default for GatewayConfig {
             tun_name: "aivpn0".to_string(),
             tun_addr: "10.0.0.1".to_string(),
             tun_netmask: "255.255.255.0".to_string(),
+            network_config: VpnNetworkConfig::default(),
             server_private_key: [0u8; 32],
             signing_key: [0u8; 64],
             enable_nat: true,
@@ -229,6 +232,7 @@ impl Gateway {
                 &self.config.tun_name,
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
+                self.config.network_config,
             )?;
             nat.create()?;
             self.nat_forwarder = Some(Arc::new(nat));
@@ -285,7 +289,7 @@ impl Gateway {
                 let sessions = self.session_manager.clone();
                 let socket = self.udp_socket.as_ref().unwrap().clone();
                 let mask = aivpn_common::mask::preset_masks::webrtc_zoom_v3();
-                let tun_addr = self.config.tun_addr.clone();
+                let server_vpn_ip = self.config.network_config.server_vpn_ip;
                 
                 // Channel for writing packets to TUN device (upload + ICMP replies)
                 let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>(4096);
@@ -302,7 +306,7 @@ impl Gateway {
                 }
                 
                 tokio::spawn(async move {
-                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, tun_addr).await;
+                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip).await;
                 });
                 info!("TUN read loop spawned");
             }
@@ -496,10 +500,10 @@ impl Gateway {
         sessions: Arc<SessionManager>,
         socket: Arc<UdpSocket>,
         mask: MaskProfile,
-        tun_addr: String,
+        server_vpn_ip: Ipv4Addr,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
-        let server_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(10, 0, 0, 1));
+        let server_ip = server_vpn_ip;
         
         loop {
             match tun_reader.read(&mut buf).await {
@@ -1289,15 +1293,24 @@ impl Gateway {
         session: &Arc<parking_lot::Mutex<Session>>,
         client_addr: SocketAddr,
     ) -> Result<()> {
-        let (server_eph_pub, signature) = {
+        let (server_eph_pub, signature, network_config) = {
             let sess = session.lock();
             match (sess.server_eph_pub, sess.server_hello_signature) {
-                (Some(pub_key), Some(sig)) => (pub_key, sig),
+                (Some(pub_key), Some(sig)) => {
+                    let network_config = sess
+                        .vpn_ip
+                        .and_then(|vpn_ip| self.config.network_config.client_config(vpn_ip).ok());
+                    (pub_key, sig, network_config)
+                }
                 _ => return Err(Error::Session("Missing ratchet data".into())),
             }
         };
 
-        let hello = ControlPayload::ServerHello { server_eph_pub, signature };
+        let hello = ControlPayload::ServerHello {
+            server_eph_pub,
+            signature,
+            network_config,
+        };
         let encoded = hello.encode()?;
         let inner_header = InnerHeader {
             inner_type: InnerType::Control,
