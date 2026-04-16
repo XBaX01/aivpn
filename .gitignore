@@ -100,3 +100,5 @@ deploy.py
 build-windows-package.sh
 .tmp_docker_speed_test.sh
 .tmp_multi_client_test.sh
+deploy_recording_test.sh
+test-recording-local.sh

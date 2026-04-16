@@ -174,11 +174,16 @@ impl AivpnClient {
         
         // Derive session keys (Zero-RTT)
         let dh_result = self.keypair.compute_shared(&self.config.server_public_key)?;
+        debug!("Client DH result: {}", hex::encode(&dh_result));
+        debug!("Client eph_pub: {}", hex::encode(self.keypair.public_key_bytes()));
+        debug!("Client PSK: {:?}", self.config.preshared_key.as_ref().map(hex::encode));
         self.session_keys = Some(crypto::derive_session_keys(
             &dh_result,
             self.config.preshared_key.as_ref(),
             &self.keypair.public_key_bytes(),
         ));
+        let keys = self.session_keys.as_ref().unwrap();
+        debug!("Client tag_secret: {}", hex::encode(&keys.tag_secret));
         
         self.state = ClientState::Connected;
         info!("Connected to server at {}", self.config.server_addr);
@@ -684,6 +689,8 @@ impl AivpnClient {
         
         // Include eph_pub (obfuscated) in the init packet
         let obf = obfuscate_client_eph_pub(&self.keypair, &self.config.server_public_key);
+        debug!("Client obfuscated eph_pub: {}", hex::encode(&obf));
+        debug!("Client original eph_pub: {}", hex::encode(self.keypair.public_key_bytes()));
         
         let aivpn_packet = mimicry.build_packet(
             &inner_payload,

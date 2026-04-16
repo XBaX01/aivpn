@@ -65,6 +65,8 @@ struct SelfTestResult {
     confidence: f32,
 }
 
+const MIN_ENCRYPTED_ENTROPY: f64 = 6.0;
+
 // ─── Main Pipeline ───────────────────────────────────────────────────────────
 
 /// Generate mask from recorded traffic and store it
@@ -776,7 +778,9 @@ fn self_test(profile: &MaskProfile, packets: &[PacketMetadata]) -> Result<SelfTe
     // Entropy match
     let real_entropy: f64 =
         packets.iter().map(|p| p.entropy as f64).sum::<f64>() / packets.len().max(1) as f64;
-    let entropy_match = (real_entropy - 7.0).abs().min(1.0) as f32; // Expect high entropy
+    // Encrypted traffic entropy is length-sensitive for short packets, so use a
+    // minimum floor instead of forcing an exact match to 7.0.
+    let entropy_match = entropy_penalty(real_entropy);
 
     // KS test acceptance thresholds:
     // DPI classifiers typically operate at KS > 0.5, so 0.4 gives sufficient margin.
@@ -798,6 +802,14 @@ fn self_test(profile: &MaskProfile, packets: &[PacketMetadata]) -> Result<SelfTe
         passed,
         confidence,
     })
+}
+
+fn entropy_penalty(real_entropy: f64) -> f32 {
+    if real_entropy >= MIN_ENCRYPTED_ENTROPY {
+        0.0
+    } else {
+        (MIN_ENCRYPTED_ENTROPY - real_entropy).min(1.0) as f32
+    }
 }
 
 /// Two-sample Kolmogorov-Smirnov test statistic
@@ -884,4 +896,16 @@ fn current_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entropy_penalty;
+
+    #[test]
+    fn entropy_penalty_accepts_short_encrypted_packets() {
+        assert_eq!(entropy_penalty(6.03), 0.0);
+        assert_eq!(entropy_penalty(7.8), 0.0);
+        assert!(entropy_penalty(5.2) > 0.5);
+    }
 }

@@ -82,8 +82,8 @@ pub fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
-                .add_directive("aivpn_server=info".parse().unwrap())
-                .add_directive("aivpn_common=info".parse().unwrap())
+                .add_directive("aivpn_server=debug".parse().unwrap())
+                .add_directive("aivpn_common=debug".parse().unwrap())
         )
         .init();
 }

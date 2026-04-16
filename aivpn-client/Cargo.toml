@@ -40,4 +40,5 @@ bytes.workspace = true
 chrono.workspace = true
 clap = { version = "4.4", features = ["derive"] }
 base64 = "0.22"
+hex = "0.4"
 portable-atomic = "1"

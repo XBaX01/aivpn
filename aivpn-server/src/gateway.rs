@@ -16,6 +16,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error, debug};
+use hex;
 
 use aivpn_common::crypto::{
     self, encrypt_payload, decrypt_payload,
@@ -90,18 +91,22 @@ pub struct MaskCatalog {
     masks: DashMap<String, MaskProfile>,
     /// Compromised mask IDs — never reuse
     compromised: DashMap<String, Instant>,
+    /// Primary mask used for initial handshake parsing.
+    primary_mask_id: String,
 }
 
 impl MaskCatalog {
     pub fn new() -> Self {
         use aivpn_common::mask::preset_masks;
+        let m1 = preset_masks::webrtc_zoom_v3();
+        let primary_mask_id = m1.mask_id.clone();
+        let m2 = preset_masks::quic_https_v2();
         let catalog = Self {
             masks: DashMap::new(),
             compromised: DashMap::new(),
+            primary_mask_id,
         };
         // Seed with built-in masks
-        let m1 = preset_masks::webrtc_zoom_v3();
-        let m2 = preset_masks::quic_https_v2();
         catalog.masks.insert(m1.mask_id.clone(), m1);
         catalog.masks.insert(m2.mask_id.clone(), m2);
         catalog
@@ -131,6 +136,35 @@ impl MaskCatalog {
     /// Get mask count
     pub fn available_count(&self) -> usize {
         self.masks.len()
+    }
+
+    /// Get the primary packet layout for client->server traffic.
+    /// Returns `(packet_mdh_len, handshake_mdh_len, eph_offset, eph_len)`.
+    /// Normal packets use only the protocol header, while the initial
+    /// handshake embeds `eph_pub` inside the MDH at `eph_offset`.
+    pub fn packet_layout(&self) -> (usize, usize, usize, usize) {
+        let fallback = (20usize, 52usize, 20usize, 32usize);
+        let Some(mask) = self.masks.get(&self.primary_mask_id).map(|entry| entry.value().clone())
+            .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone())) else {
+            return fallback;
+        };
+
+        let eph_offset = mask.eph_pub_offset as usize;
+        let eph_len = mask.eph_pub_length as usize;
+        let packet_mdh_len = mask.header_spec
+            .as_ref()
+            .map(|spec| spec.min_length())
+            .unwrap_or_else(|| mask.header_template.len());
+        let handshake_mdh_len = packet_mdh_len.max(eph_offset.saturating_add(eph_len));
+        (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len)
+    }
+
+    /// Get the regular MDH bytes used for server->client packets.
+    pub fn packet_mdh_bytes(&self) -> Vec<u8> {
+        self.masks.get(&self.primary_mask_id)
+            .map(|entry| entry.value().header_template.clone())
+            .or_else(|| self.masks.iter().next().map(|entry| entry.value().header_template.clone()))
+            .unwrap_or_else(|| vec![0u8; 20])
     }
 }
 
@@ -854,8 +888,15 @@ impl Gateway {
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&packet_data[0..TAG_SIZE]);
         
-        // O(1) tag validation - find session
-        let mdh_len = 4; // Default for MVP
+        // Determine handshake layout from the primary mask.
+        let (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len) = self.mask_catalog.packet_layout();
+        debug!(
+            "Server using packet layout: packet_mdh_len={}, handshake_mdh_len={}, eph_offset={}, eph_len={}",
+            packet_mdh_len,
+            handshake_mdh_len,
+            eph_offset,
+            eph_len
+        );
         let mut is_new_session = false;
         let (session, counter, is_ratcheted_tag) = if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
             // Existing session — validate tag
@@ -896,18 +937,20 @@ impl Gateway {
             }
 
             // Try to establish a new one from eph_pub in MDH
-            if packet_data.len() < TAG_SIZE + mdh_len + 32 {
+            if packet_data.len() < TAG_SIZE + handshake_mdh_len {
                 return Err(Error::InvalidPacket("Too short for session init"));
             }
-            let eph_start = TAG_SIZE + mdh_len;
-            if packet_data.len() < eph_start + 32 {
+            let eph_start = TAG_SIZE + eph_offset;
+            if packet_data.len() < eph_start + eph_len {
                 return Err(Error::InvalidPacket("Missing eph_pub for new session"));
             }
             let mut eph_pub = [0u8; 32];
-            eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + 32]);
+            eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + eph_len]);
+            debug!("Server received eph_pub (before deobfuscation): {}", hex::encode(&eph_pub));
             
             // Deobfuscate eph_pub (HIGH-9)
             crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
+            debug!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
             
             // Try to create session with each registered client's PSK.
             // If client_db is configured, iterate registered clients and try
@@ -926,12 +969,15 @@ impl Gateway {
                         Some(client_cfg.vpn_ip),
                     ) {
                         Ok(sess) => {
+                            debug!("Testing tag validation for client {} (VPN IP: {})", client_cfg.id, client_cfg.vpn_ip);
                             let validation = sess.lock().validate_tag(&tag);
                             if validation.is_some() {
+                                debug!("Tag validation SUCCESS for client {}", client_cfg.id);
                                 found = Some((sess, Some(client_cfg.id.clone())));
                                 break;
                             } else {
                                 // PSK mismatch — rollback this attempt
+                                debug!("Tag validation FAILED for client {} (tag: {})", client_cfg.id, hex::encode(&tag));
                                 let sid = sess.lock().session_id;
                                 self.session_manager.rollback_failed_session(&sid);
                             }
@@ -1026,27 +1072,22 @@ impl Gateway {
         
         // Parse packet — pad_len is inside encrypted area (CRIT-5 fix).
         // Android retransmits the initial handshake packet with the client
-        // eph_pub still embedded before ciphertext. Once a session already
-        // exists, those retries validate against the existing tag window, so
-        // we must continue skipping eph_pub before decryption until ratchet
-        // completes.
+        // eph_pub still embedded inside the MDH. Once a session already exists,
+        // those retries validate against the existing tag window, so the
+        // ciphertext still starts immediately after the full MDH.
         let is_pre_ratchet_retry = !is_new_session && !is_ratcheted_tag && {
             let sess = session.lock();
-            !sess.is_ratcheted && packet_data.len() >= TAG_SIZE + mdh_len + 32 + 16
+            !sess.is_ratcheted && packet_data.len() >= TAG_SIZE + handshake_mdh_len + 16
         };
-        let payload_offset = if is_new_session || is_pre_ratchet_retry {
-            TAG_SIZE + mdh_len + 32
+        let payload_offsets: Vec<usize> = if is_new_session {
+            vec![TAG_SIZE + handshake_mdh_len]
+        } else if is_pre_ratchet_retry && handshake_mdh_len != packet_mdh_len {
+            vec![TAG_SIZE + packet_mdh_len, TAG_SIZE + handshake_mdh_len]
         } else {
-            TAG_SIZE + mdh_len
+            vec![TAG_SIZE + packet_mdh_len]
         };
-        if packet_data.len() <= payload_offset {
-            return Err(Error::InvalidPacket("Invalid length"));
-        }
-        
-        // Decrypt with appropriate keys (initial or ratcheted)
-        let encrypted_payload = &packet_data[payload_offset..];
-        
-        let padded_plaintext = {
+
+        let (payload_offset, padded_plaintext) = {
             let sess = session.lock();
             let nonce = self.compute_nonce(counter);
             let key = if is_ratcheted_tag {
@@ -1056,8 +1097,29 @@ impl Gateway {
             } else {
                 &sess.keys.session_key
             };
-            decrypt_payload(key, &nonce, encrypted_payload)?
+
+            let mut decrypted = None;
+            let mut last_error = None;
+            for payload_offset in payload_offsets {
+                if packet_data.len() <= payload_offset {
+                    continue;
+                }
+                let encrypted_payload = &packet_data[payload_offset..];
+                match decrypt_payload(key, &nonce, encrypted_payload) {
+                    Ok(padded_plaintext) => {
+                        decrypted = Some((payload_offset, padded_plaintext));
+                        break;
+                    }
+                    Err(err) => last_error = Some(err),
+                }
+            }
+
+            match decrypted {
+                Some(result) => result,
+                None => return Err(last_error.unwrap_or_else(|| Error::InvalidPacket("Invalid length"))),
+            }
         };
+        let encrypted_payload = &packet_data[payload_offset..];
         
         // Complete PFS ratchet only when the CLIENT proves it has ratcheted
         // by sending a packet with ratcheted-key tags.
@@ -1454,8 +1516,9 @@ impl Gateway {
             time_window,
         );
         
-        // Build MDH (simple for MVP)
-        let mdh = vec![0u8; 4];
+        // Build MDH using the current packet mask so client/server agree on
+        // the ciphertext offset for ServerHello and other server packets.
+        let mdh = self.mask_catalog.packet_mdh_bytes();
         
         // Assemble packet: TAG | MDH | ciphertext (no cleartext padding)
         let mut packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());
@@ -1494,5 +1557,39 @@ impl Gateway {
     /// Get metrics reference
     pub fn metrics(&self) -> &Arc<MetricsCollector> {
         &self.metrics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MaskCatalog;
+    use aivpn_common::crypto::TAG_SIZE;
+    use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
+
+    #[test]
+    fn packet_layout_extracts_embedded_eph_pub_from_mdh() {
+        let catalog = MaskCatalog::new();
+        let (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len) = catalog.packet_layout();
+        let mask = webrtc_zoom_v3();
+
+        let mut mdh = mask.header_template.clone();
+        if mdh.len() < handshake_mdh_len {
+            mdh.resize(handshake_mdh_len, 0);
+        }
+
+        let expected_eph = [0x5au8; 32];
+        mdh[eph_offset..eph_offset + eph_len].copy_from_slice(&expected_eph);
+
+        let mut packet = vec![0u8; TAG_SIZE];
+        packet.extend_from_slice(&mdh);
+        packet.extend_from_slice(&[0xabu8; 24]);
+
+        let eph_start = TAG_SIZE + eph_offset;
+        let payload_start = TAG_SIZE + handshake_mdh_len;
+
+        assert_eq!(packet_mdh_len, 20, "regular STUN packet MDH length must stay at 20 bytes");
+        assert_eq!(handshake_mdh_len, 52, "handshake MDH length must include embedded eph_pub");
+        assert_eq!(&packet[eph_start..eph_start + eph_len], &expected_eph);
+        assert_eq!(&packet[payload_start..], &[0xabu8; 24]);
     }
 }

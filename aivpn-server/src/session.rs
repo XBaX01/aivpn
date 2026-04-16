@@ -13,7 +13,8 @@ use parking_lot::Mutex;
 use chacha20poly1305::aead::OsRng;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
-use tracing::info;
+use tracing::{info, debug};
+use hex;
 
 use aivpn_common::crypto::{
     self, SessionKeys, KeyPair, TAG_SIZE, X25519_PUBLIC_KEY_SIZE, 
@@ -460,11 +461,15 @@ impl SessionManager {
         
         // DH1: server_static * client_eph → initial keys (0-RTT)
         let dh1 = self.server_keys.compute_shared(&eph_pub)?;
+        debug!("Server DH result: {}", hex::encode(&dh1));
+        debug!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
+        debug!("Server PSK: {:?}", preshared_key.as_ref().map(hex::encode));
         let initial_keys = crypto::derive_session_keys(
             &dh1,
             preshared_key.as_ref(),
             &eph_pub,
         );
+        debug!("Server tag_secret: {}", hex::encode(&initial_keys.tag_secret));
         
         // --- CRIT-3 + HIGH-6: PFS ratchet preparation ---
         // Generate server ephemeral keypair
