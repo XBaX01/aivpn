@@ -44,6 +44,29 @@ pub struct ClientArgs {
     /// Config file path (JSON)
     #[arg(long)]
     pub config: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<ClientCommand>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ClientCommand {
+    /// Recording CLI commands
+    Record {
+        #[command(subcommand)]
+        action: RecordAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum RecordAction {
+    /// Start a new traffic recording session
+    Start {
+        #[arg(short, long)]
+        service: String,
+    },
+    /// Stop the current recording and generate a mask
+    Stop,
 }
 
 // Global shutdown flag
@@ -72,6 +95,23 @@ async fn main() {
     // Parse arguments
     let args = ClientArgs::parse();
     
+    // Handle subcommands
+    if let Some(command) = args.command {
+        match command {
+            ClientCommand::Record { action } => {
+                let msg = match action {
+                    RecordAction::Start { service } => format!("record_start:{}", service),
+                    RecordAction::Stop => "record_stop".to_string(),
+                };
+                // Send UDP to the daemon
+                let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                socket.send_to(msg.as_bytes(), "127.0.0.1:44301").unwrap();
+                println!("Command sent to client daemon.");
+                return;
+            }
+        }
+    }
+
     // Parse connection key or individual args
     let (server_addr, server_key_b64, psk_bytes, network_config) = if let Some(ref conn_key) = args.connection_key {
         let payload = conn_key.trim().strip_prefix("aivpn://").unwrap_or(conn_key.trim());

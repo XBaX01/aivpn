@@ -184,10 +184,9 @@ else
     exit 1
 fi
 
-# Generate server key
+# Optional: pre-create config/server.json or config/server.key here.
+# If they are missing, the container now bootstraps both automatically.
 mkdir -p config
-openssl rand 32 > config/server.key
-chmod 600 config/server.key
 
 # Enable NAT (required for internet access from VPN)
 DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
@@ -218,6 +217,7 @@ sudo firewall-cmd --reload
 ```
 
 > The container runs with `network_mode: "host"` and mounts `./config` → `/etc/aivpn` inside the container.
+> On first start it auto-creates `server.json` from the bundled example and generates `server.key` if either file is missing.
 
 #### Option B: Bare metal
 
@@ -339,6 +339,91 @@ aivpn-server \
     --remove-client "Alice Phone" \
     --clients-db /etc/aivpn/clients.json
 ```
+
+### 3.2 Recording Custom Masks
+
+AIVPN supports automatic traffic recording from real applications to create new mimicry profiles. This allows adapting the system to specific services that aren't blocked in your network.
+
+#### How Recording Works
+
+The recording system works through an **authenticated client connection**:
+
+1. **Create admin client**: Generate a special admin key on the server
+2. **Connect client**: Start the AIVPN client with the admin connection key
+3. **Start recording**: Send `record start <service>` command through the VPN tunnel
+4. **Use the service**: The system captures packet metadata (sizes, intervals, headers)
+5. **Stop recording**: Send `record stop` to trigger mask generation and self-testing
+
+The server-side pipeline:
+- **Record**: Intercepts UDP packets from the VPN session
+- **Analyze**: Builds size histogram, computes IAT periods, infers FSM
+- **Generate**: Creates a full `MaskProfile` with `HeaderSpec`
+- **Self-test**: Validates statistical reproduction
+- **Store**: Saves to mask storage and registers in catalog
+
+#### Step-by-Step Guide
+
+**1. Create an admin client on the server:**
+
+```bash
+# Docker
+docker compose exec aivpn-server aivpn-server \
+    --add-client "recording-admin" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip YOUR_SERVER_IP:443
+
+# Bare metal
+aivpn-server \
+    --add-client "recording-admin" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip YOUR_SERVER_IP:443
+```
+
+Save the output connection key (starts with `aivpn://`).
+
+**2. Connect the client with admin key:**
+
+```bash
+sudo ./target/release/aivpn-client -k "aivpn://..."
+```
+
+**3. Start recording for a service:**
+
+```bash
+# Send record start command through the VPN tunnel
+aivpn record start --service zoom
+```
+
+**4. Use the service normally** for 30-60 seconds to capture diverse traffic patterns.
+
+**5. Stop recording:**
+
+```bash
+aivpn record stop
+```
+
+The server will analyze the captured packets and generate a new mask. You'll see output like:
+
+```
+✅ Mask generated and tested!
+
+   Mask ID:     zoom_custom_abc123
+   Service:     zoom
+   Confidence:  0.87
+
+   Broadcasting to all clients...
+```
+
+#### Requirements for Good Masks
+
+- **At least 500 packets** for statistical significance
+- **Minimum 60 seconds** of recording (system requirement)
+- **Diverse traffic**: different operation types in the service
+- **Stable connection**: no disconnects or retransmissions
+
+Each mask is a separate JSON file named `{mask_id}.json`.
 
 ### 4. Client
 

@@ -27,6 +27,7 @@ ed25519-dalek = "2.0"
 # Utils
 rand.workspace = true
 thiserror.workspace = true
+hex = "0.4"
 bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true

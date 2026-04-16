@@ -42,14 +42,17 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/aivpn-server /usr/local/bin/aivpn-server
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Create config directory and TUN device node
 RUN mkdir -p /etc/aivpn /dev/net && \
     mknod /dev/net/tun c 10 200 2>/dev/null || true && \
-    chmod 600 /dev/net/tun
+    chmod 600 /dev/net/tun && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    mkdir -p /usr/share/aivpn
 
 # Copy example config
-COPY config/server.json.example /etc/aivpn/server.json
+COPY config/server.json.example /usr/share/aivpn/server.json.example
 
 # Expose port
 EXPOSE 443/udp
@@ -59,5 +62,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD test "$(basename "$(readlink /proc/1/exe 2>/dev/null)")" = "aivpn-server" || exit 1
 
 # Run as root (required for TUN device and NAT)
-ENTRYPOINT ["/usr/local/bin/aivpn-server"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--config", "/etc/aivpn/server.json", "--listen", "0.0.0.0:443", "--key-file", "/etc/aivpn/server.key"]

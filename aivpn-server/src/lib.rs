@@ -24,6 +24,11 @@ pub mod key_rotation;
 pub mod passive_distribution;
 pub mod metrics;
 
+// Auto Mask Recording modules
+pub mod recording;
+pub mod mask_gen;
+pub mod mask_store;
+
 pub use server::AivpnServer;
 pub use server::ServerArgs;
 pub use gateway::{Gateway, GatewayConfig};
@@ -36,3 +41,7 @@ pub use neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus, Resonance
 pub use key_rotation::{KeyRotator, KeyRotationConfig};
 pub use passive_distribution::{PassiveMaskReceiver, PassiveDistributionConfig};
 pub use metrics::MetricsCollector;
+
+// Auto Mask Recording exports
+pub use recording::RecordingManager;
+pub use mask_store::MaskStore;

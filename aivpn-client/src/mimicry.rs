@@ -127,16 +127,26 @@ impl MimicryEngine {
         self.state.packets_in_state += 1;
     }
     
-    /// Build Mask-Dependent Header
+    /// Build Mask-Dependent Header (per-packet dynamic generation)
+    ///
+    /// If header_spec is present (Issue #30 fix), generates a unique header
+    /// for each packet using the specification. Otherwise falls back to
+    /// the static header_template for legacy compatibility.
     pub fn build_mdh(&mut self, eph_pub: Option<&[u8; 32]>) -> Vec<u8> {
-        let mut mdh = self.mask.header_template.clone();
+        // Use HeaderSpec for dynamic per-packet header generation (Issue #30 fix)
+        let mut mdh = if let Some(ref spec) = self.mask.header_spec {
+            spec.generate(&mut self.rng)
+        } else {
+            // Legacy fallback: use static header_template
+            self.mask.header_template.clone()
+        };
         
         // Insert ephemeral public key if provided
         if let Some(eph) = eph_pub {
             let offset = self.mask.eph_pub_offset as usize;
             let len = self.mask.eph_pub_length as usize;
             
-            // Extend MDH if eph_pub doesn't fit within header_template
+            // Extend MDH if eph_pub doesn't fit within header
             let required = offset + len;
             if mdh.len() < required {
                 mdh.resize(required, 0);

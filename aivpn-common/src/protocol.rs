@@ -54,6 +54,11 @@ pub enum ControlSubtype {
     Shutdown = 0x07,
     ControlAck = 0x08,
     ServerHello = 0x09,
+    RecordingStart = 0x0A,
+    RecordingAck = 0x0B,
+    RecordingStop = 0x0C,
+    RecordingComplete = 0x0D,
+    RecordingFailed = 0x0E,
 }
 
 impl ControlSubtype {
@@ -68,6 +73,11 @@ impl ControlSubtype {
             0x07 => Some(Self::Shutdown),
             0x08 => Some(Self::ControlAck),
             0x09 => Some(Self::ServerHello),
+            0x0A => Some(Self::RecordingStart),
+            0x0B => Some(Self::RecordingAck),
+            0x0C => Some(Self::RecordingStop),
+            0x0D => Some(Self::RecordingComplete),
+            0x0E => Some(Self::RecordingFailed),
             _ => None,
         }
     }
@@ -250,6 +260,29 @@ pub enum ControlPayload {
         signature: [u8; 64],
         network_config: Option<ClientNetworkConfig>,
     },
+    /// Admin requests recording start for a service
+    RecordingStart {
+        service: String,
+    },
+    /// Server acknowledges recording start
+    RecordingAck {
+        session_id: [u8; 16],
+        status: String,
+    },
+    /// Admin requests recording stop
+    RecordingStop {
+        session_id: [u8; 16],
+    },
+    /// Server reports mask generation complete
+    RecordingComplete {
+        service: String,
+        mask_id: String,
+        confidence: f32,
+    },
+    /// Server reports recording/generation failure
+    RecordingFailed {
+        reason: String,
+    },
 }
 
 impl ControlPayload {
@@ -305,6 +338,39 @@ impl ControlPayload {
                 if let Some(network_config) = network_config {
                     buf.extend_from_slice(&network_config.encode_wire());
                 }
+            }
+            Self::RecordingStart { service } => {
+                buf.push(ControlSubtype::RecordingStart as u8);
+                let service_bytes = service.as_bytes();
+                buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(service_bytes);
+            }
+            Self::RecordingAck { session_id, status } => {
+                buf.push(ControlSubtype::RecordingAck as u8);
+                buf.extend_from_slice(session_id);
+                let status_bytes = status.as_bytes();
+                buf.extend_from_slice(&(status_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(status_bytes);
+            }
+            Self::RecordingStop { session_id } => {
+                buf.push(ControlSubtype::RecordingStop as u8);
+                buf.extend_from_slice(session_id);
+            }
+            Self::RecordingComplete { service, mask_id, confidence } => {
+                buf.push(ControlSubtype::RecordingComplete as u8);
+                let service_bytes = service.as_bytes();
+                buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(service_bytes);
+                let mask_id_bytes = mask_id.as_bytes();
+                buf.extend_from_slice(&(mask_id_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(mask_id_bytes);
+                buf.extend_from_slice(&confidence.to_le_bytes());
+            }
+            Self::RecordingFailed { reason } => {
+                buf.push(ControlSubtype::RecordingFailed as u8);
+                let reason_bytes = reason.as_bytes();
+                buf.extend_from_slice(&(reason_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(reason_bytes);
             }
         }
         
@@ -406,6 +472,73 @@ impl ControlPayload {
                     signature,
                     network_config,
                 })
+            }
+            ControlSubtype::RecordingStart => {
+                if data.len() < 3 {
+                    return Err(Error::InvalidPacket("RecordingStart too short"));
+                }
+                let svc_len = u16::from_le_bytes([data[1], data[2]]) as usize;
+                if data.len() < 3 + svc_len {
+                    return Err(Error::InvalidPacket("RecordingStart invalid length"));
+                }
+                let service = String::from_utf8_lossy(&data[3..3 + svc_len]).to_string();
+                Ok(Self::RecordingStart { service })
+            }
+            ControlSubtype::RecordingAck => {
+                if data.len() < 1 + 16 + 2 {
+                    return Err(Error::InvalidPacket("RecordingAck too short"));
+                }
+                let mut session_id = [0u8; 16];
+                session_id.copy_from_slice(&data[1..17]);
+                let status_len = u16::from_le_bytes([data[17], data[18]]) as usize;
+                if data.len() < 19 + status_len {
+                    return Err(Error::InvalidPacket("RecordingAck invalid length"));
+                }
+                let status = String::from_utf8_lossy(&data[19..19 + status_len]).to_string();
+                Ok(Self::RecordingAck { session_id, status })
+            }
+            ControlSubtype::RecordingStop => {
+                if data.len() < 17 {
+                    return Err(Error::InvalidPacket("RecordingStop too short"));
+                }
+                let mut session_id = [0u8; 16];
+                session_id.copy_from_slice(&data[1..17]);
+                Ok(Self::RecordingStop { session_id })
+            }
+            ControlSubtype::RecordingComplete => {
+                if data.len() < 3 {
+                    return Err(Error::InvalidPacket("RecordingComplete too short"));
+                }
+                let mut cursor = 1;
+                let svc_len = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
+                cursor += 2;
+                if data.len() < cursor + svc_len + 2 + 4 {
+                    return Err(Error::InvalidPacket("RecordingComplete invalid length"));
+                }
+                let service = String::from_utf8_lossy(&data[cursor..cursor + svc_len]).to_string();
+                cursor += svc_len;
+                let mid_len = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
+                cursor += 2;
+                if data.len() < cursor + mid_len + 4 {
+                    return Err(Error::InvalidPacket("RecordingComplete invalid mask_id"));
+                }
+                let mask_id = String::from_utf8_lossy(&data[cursor..cursor + mid_len]).to_string();
+                cursor += mid_len;
+                let confidence = f32::from_le_bytes([
+                    data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+                ]);
+                Ok(Self::RecordingComplete { service, mask_id, confidence })
+            }
+            ControlSubtype::RecordingFailed => {
+                if data.len() < 3 {
+                    return Err(Error::InvalidPacket("RecordingFailed too short"));
+                }
+                let reason_len = u16::from_le_bytes([data[1], data[2]]) as usize;
+                if data.len() < 3 + reason_len {
+                    return Err(Error::InvalidPacket("RecordingFailed invalid length"));
+                }
+                let reason = String::from_utf8_lossy(&data[3..3 + reason_len]).to_string();
+                Ok(Self::RecordingFailed { reason })
             }
         }
     }

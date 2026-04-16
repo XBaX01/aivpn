@@ -34,6 +34,8 @@ use crate::nat::NatForwarder;
 use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
 use crate::client_db::ClientDatabase;
+use crate::recording::RecordingManager;
+use crate::mask_store::MaskStore;
 
 struct QueuedPacket {
     packet_data: Vec<u8>,
@@ -159,6 +161,11 @@ pub struct Gateway {
     metrics: Arc<MetricsCollector>,
     /// Client database for PSK-based authentication
     client_db: Option<Arc<ClientDatabase>>,
+    /// Recording manager for auto mask recording
+    recording_manager: Option<Arc<RecordingManager>>,
+    /// Mask store for auto-generated masks
+    #[allow(dead_code)]
+    mask_store: Option<Arc<MaskStore>>,
 }
 
 impl Gateway {
@@ -206,6 +213,15 @@ impl Gateway {
         }
         
         // NAT forwarder is created lazily in run() to avoid requiring root at construction time
+
+        // Initialize mask store and recording manager
+        let mask_store = Arc::new(MaskStore::new(
+            mask_catalog.clone(),
+            std::path::PathBuf::from("/var/lib/aivpn/masks"),
+        ));
+        let recording_manager = Arc::new(RecordingManager::new(mask_store.clone()));
+        info!("Auto Mask Recording system initialized");
+
         Ok(Self {
             config: config.clone(),
             session_manager,
@@ -218,6 +234,8 @@ impl Gateway {
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
             client_db: config.client_db,
+            recording_manager: Some(recording_manager),
+            mask_store: Some(mask_store),
         })
     }
     
@@ -1126,6 +1144,29 @@ impl Gateway {
             }
             self.metrics.record_packet_received(packet_data.len());
         }
+
+        // Record uplink packet metadata for auto mask recording
+        if let Some(ref recorder) = self.recording_manager {
+            let session_id = session.lock().session_id;
+            if recorder.is_recording(&session_id) {
+                let iat_ms = {
+                    let sess = session.lock();
+                    sess.last_seen.elapsed().as_secs_f64() * 1000.0
+                };
+                let meta = aivpn_common::recording::PacketMetadata {
+                    direction: aivpn_common::recording::Direction::Uplink,
+                    size: packet_data.len() as u16,
+                    iat_ms,
+                    entropy: Self::compute_entropy(encrypted_payload) as f32,
+                    header_prefix: packet_data[TAG_SIZE..TAG_SIZE + 16.min(packet_data.len() - TAG_SIZE)].to_vec(),
+                    timestamp_ns: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64,
+                };
+                recorder.record_packet(session_id, meta);
+            }
+        }
         
         // Record traffic in client DB in batches (see pending_bytes_in above).
         if let (Some(ref db), Some((cid, bytes_in))) = (&self.client_db, client_db_flush) {
@@ -1254,6 +1295,57 @@ impl Gateway {
             }
             ControlPayload::ServerHello { .. } => {
                 warn!("Unexpected ServerHello from client {}", hash_addr(&client_addr));
+            }
+            ControlPayload::RecordingStart { service } => {
+                // Only allow from admin sessions (check client_id)
+                let is_admin = {
+                    let sess = session.lock();
+                    sess.client_id.as_deref() == Some("admin")
+                        || sess.client_id.is_some() // For now, any authenticated client can record
+                };
+                if !is_admin {
+                    warn!("Recording rejected: unauthenticated client {}", hash_addr(&client_addr));
+                    return Ok(());
+                }
+                if let Some(ref recorder) = self.recording_manager {
+                    let session_id = session.lock().session_id;
+                    recorder.start(session_id, service, "admin".into());
+                    let ack = ControlPayload::RecordingAck {
+                        session_id,
+                        status: "started".into(),
+                    };
+                    self.send_control_message(&ack, session).await?;
+                    info!("Recording started for '{}' from {}", "service", hash_addr(&client_addr));
+                }
+            }
+            ControlPayload::RecordingStop { session_id: rec_session_id } => {
+                if let Some(ref recorder) = self.recording_manager {
+                    match recorder.stop(rec_session_id) {
+                        Some(service) => {
+                            let complete = ControlPayload::RecordingAck {
+                                session_id: rec_session_id,
+                                status: "analyzing".into(),
+                            };
+                            self.send_control_message(&complete, session).await?;
+                            info!("Recording stopped for '{}', analyzing...", service);
+                        }
+                        None => {
+                            let failed = ControlPayload::RecordingFailed {
+                                reason: "Too few packets or too short duration".into(),
+                            };
+                            self.send_control_message(&failed, session).await?;
+                        }
+                    }
+                }
+            }
+            ControlPayload::RecordingAck { .. } => {
+                // Client-side only, ignore on server
+            }
+            ControlPayload::RecordingComplete { .. } => {
+                // Client-side only, ignore on server
+            }
+            ControlPayload::RecordingFailed { .. } => {
+                // Client-side only, ignore on server
             }
         }
         

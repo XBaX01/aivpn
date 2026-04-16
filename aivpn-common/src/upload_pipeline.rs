@@ -44,6 +44,8 @@ impl Default for UploadConfig {
 pub trait PacketEncryptor: Send {
     /// Encrypt a TUN data payload into a ready-to-send UDP datagram.
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>>;
+    /// Encrypt an arbitrary control message into a ready-to-send UDP datagram.
+    fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>>;
     /// Encrypt a keepalive control message into a ready-to-send UDP datagram.
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>>;
     /// Called after a data datagram has been successfully sent.
@@ -70,6 +72,13 @@ impl ZeroMdhEncryptor {
 impl PacketEncryptor for ZeroMdhEncryptor {
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let inner = build_inner_packet(InnerType::Data, self.seq, payload);
+        self.seq = self.seq.wrapping_add(1);
+        build_zero_mdh_packet(&self.keys, &mut self.counter, &inner, None)
+    }
+
+    fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
+        let bytes = payload.encode()?;
+        let inner = build_inner_packet(InnerType::Control, self.seq, &bytes);
         self.seq = self.seq.wrapping_add(1);
         build_zero_mdh_packet(&self.keys, &mut self.counter, &inner, None)
     }
@@ -118,6 +127,7 @@ async fn send_tolerant(udp: &UdpSocket, data: &[u8]) -> Result<()> {
 /// caller is expected to `.abort()` the task when the session ends.
 pub async fn run_upload_loop(
     rx: &mut mpsc::Receiver<Vec<u8>>,
+    mut control_rx: Option<&mut mpsc::Receiver<ControlPayload>>,
     udp: &Arc<UdpSocket>,
     enc: &mut impl PacketEncryptor,
     config: &UploadConfig,
@@ -163,6 +173,20 @@ pub async fn run_upload_loop(
             _ = ka_interval.tick() => {
                 let encrypted = enc.encrypt_keepalive()?;
                 send_tolerant(udp, &encrypted).await?;
+            }
+
+            // ── Control payloads ──
+            maybe_ctrl = async {
+                if let Some(crx) = control_rx.as_mut() {
+                    crx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(payload) = maybe_ctrl {
+                    let encrypted = enc.encrypt_control(&payload)?;
+                    send_tolerant(udp, &encrypted).await?;
+                }
             }
         }
     }

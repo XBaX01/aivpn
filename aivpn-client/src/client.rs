@@ -87,6 +87,8 @@ pub struct AivpnClient {
     // Pre-allocated buffers for zero-copy I/O (OPTIMIZATION)
     _send_buf: Vec<u8>,
     _recv_buf: Vec<u8>,
+    // Recording tracking
+    active_recording_session: Option<[u8; 16]>,
 }
 
 impl AivpnClient {
@@ -118,6 +120,7 @@ impl AivpnClient {
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
             _send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
             _recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
+            active_recording_session: None,
         })
     }
     
@@ -240,6 +243,22 @@ impl AivpnClient {
         // Create channels for TUN -> upload pipeline and UDP -> main loop
         let (tun_to_udp_tx, tun_to_udp_rx) = mpsc::channel::<Vec<u8>>(8192);
         let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(8192);
+        let (admin_tx, mut admin_rx) = mpsc::channel::<String>(16);
+        let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
+
+        // Spawn local IPC listener for CLI commands
+        tokio::spawn(async move {
+            if let Ok(socket) = tokio::net::UdpSocket::bind("127.0.0.1:44301").await {
+                let mut buf = [0u8; 1024];
+                loop {
+                    if let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
+                        if let Ok(msg) = String::from_utf8(buf[..len].to_vec()) {
+                            let _ = admin_tx.send(msg).await;
+                        }
+                    }
+                }
+            }
+        });
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
@@ -357,6 +376,7 @@ impl AivpnClient {
 
         let mut upload_task = tokio::spawn(Self::spawn_upload(
             tun_to_udp_rx,
+            control_rx,
             upload_udp,
             upload_engine,
             upload_state,
@@ -406,6 +426,31 @@ impl AivpnClient {
                         }
                     }
                 }
+
+                cmd = admin_rx.recv() => {
+                    if let Some(cmd) = cmd {
+                        if let Some(service) = cmd.strip_prefix("record_start:") {
+                            let payload = ControlPayload::RecordingStart { service: service.to_string() };
+                            if let Err(e) = control_tx.send(payload).await {
+                                error!("Failed to send RecordingStart to upload task: {}", e);
+                            } else {
+                                info!("Sent RecordingStart for {}", service);
+                            }
+                        } else if cmd == "record_stop" {
+                            if let Some(session_id) = self.active_recording_session {
+                                let payload = ControlPayload::RecordingStop { session_id };
+                                if let Err(e) = control_tx.send(payload).await {
+                                    error!("Failed to send RecordingStop to upload task: {}", e);
+                                } else {
+                                    info!("Sent RecordingStop");
+                                }
+                                self.active_recording_session = None;
+                            } else {
+                                warn!("No active recording session to stop");
+                            }
+                        }
+                    }
+                }
             }
         };
 
@@ -423,6 +468,7 @@ impl AivpnClient {
     /// Spawn the upload task using the shared pipeline.
     async fn spawn_upload(
         mut rx: mpsc::Receiver<Vec<u8>>,
+        mut control_rx: mpsc::Receiver<ControlPayload>,
         udp: Arc<UdpSocket>,
         engine: MimicryEngine,
         upload_state: Arc<Mutex<UploadCryptoState>>,
@@ -446,6 +492,15 @@ impl AivpnClient {
                 Ok(pkt)
             }
 
+            fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
+                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let bytes = payload.encode()?;
+                let inner = build_inner_packet(InnerType::Control, state.seq, &bytes);
+                state.seq = state.seq.wrapping_add(1);
+                let keys = state.keys.clone();
+                self.engine.build_packet(&inner, &keys, &mut state.counter, None)
+            }
+
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
                 let mut state = self.upload_state.lock().expect("upload state poisoned");
                 let keepalive = ControlPayload::Keepalive.encode()?;
@@ -465,7 +520,7 @@ impl AivpnClient {
             keepalive_interval: Duration::from_secs(15),
             ..Default::default()
         };
-        upload_pipeline::run_upload_loop(&mut rx, &udp, &mut enc, &config).await
+        upload_pipeline::run_upload_loop(&mut rx, Some(&mut control_rx), &udp, &mut enc, &config).await
     }
 
     /// Receive packet from server and write to TUN (using pre-computed mdh_len)
@@ -594,6 +649,18 @@ impl AivpnClient {
             ControlPayload::Shutdown { reason } => {
                 info!("Server requested shutdown (reason: {})", reason);
                 self.disconnect().await;
+            }
+            ControlPayload::RecordingAck { session_id, status } => {
+                if status == "started" {
+                    self.active_recording_session = Some(session_id);
+                }
+                crate::record_cmd::handle_recording_ack(&session_id, &status);
+            }
+            ControlPayload::RecordingComplete { service, mask_id, confidence } => {
+                crate::record_cmd::handle_recording_complete(&service, &mask_id, confidence);
+            }
+            ControlPayload::RecordingFailed { reason } => {
+                crate::record_cmd::handle_recording_failed(&reason);
             }
             _ => {}
         }

@@ -22,7 +22,7 @@ pub struct MaskProfile {
 
     /// Protocol to spoof
     pub spoof_protocol: SpoofProtocol,
-    /// Header template bytes
+    /// Header template bytes (static, for legacy compatibility)
     pub header_template: Vec<u8>,
     /// Offset for ephemeral public key in header
     pub eph_pub_offset: u16,
@@ -50,6 +50,13 @@ pub struct MaskProfile {
     /// Ed25519 signature (64 bytes)
     #[serde(with = "serde_bytes")]
     pub signature: [u8; 64],
+
+    /// Dynamic header specification (Issue #30 fix)
+    /// If present, clients should use this for per-packet header generation
+    /// instead of the static header_template.
+    /// Added in version 2, legacy clients ignore this field.
+    #[serde(default)]
+    pub header_spec: Option<HeaderSpec>,
 }
 
 /// Protocol spoofing types
@@ -211,6 +218,219 @@ impl PaddingStrategy {
     }
 }
 
+/// Header Specification for dynamic per-packet header generation
+///
+/// Instead of storing fixed header bytes, HeaderSpec declares how to generate
+/// headers dynamically. This solves Issue #30 (WireGuard detection) by ensuring
+/// each packet has a unique but protocol-valid header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum HeaderSpec {
+    /// STUN Binding Request header
+    /// Generates: type(2) + length(2) + magic_cookie(4) + transaction_id(12) = 20 bytes
+    StunBinding {
+        /// Include magic cookie 0x2112A442
+        #[serde(default = "default_true")]
+        magic_cookie: bool,
+        /// Transaction ID generation mode
+        #[serde(default)]
+        transaction_id: TransactionIdMode,
+    },
+    /// QUIC Initial Packet header
+    /// Generates: header_form(1) + version(4) + dcid_len(1) + dcid(8..20) = 14..26 bytes
+    QuicInitial {
+        /// QUIC version (default: 0x00000001 for QUIC v1)
+        #[serde(default = "default_quic_version")]
+        version: u32,
+        /// Destination Connection ID length (8-20)
+        #[serde(default = "default_dcid_len")]
+        dcid_len: u8,
+    },
+    /// DNS Query header
+    /// Generates: txid(2) + flags(2) + counts(8) = 12 bytes
+    DnsQuery {
+        /// DNS flags (default: 0x0100 for standard query)
+        #[serde(default = "default_dns_flags")]
+        flags: u16,
+    },
+    /// TLS Record Layer prefix
+    /// Generates: type(1) + version(2) + length(2) = 5 bytes
+    TlsRecord {
+        /// Content type (default: 0x17 for application data)
+        #[serde(default = "default_tls_content_type")]
+        content_type: u8,
+        /// TLS version (default: 0x0303 for TLS 1.2)
+        #[serde(default = "default_tls_version")]
+        version: u16,
+    },
+    /// Raw prefix with per-packet randomization
+    /// Uses fixed bytes with optional random positions
+    RawPrefix {
+        /// Fixed prefix bytes (hex string)
+        prefix_hex: String,
+        /// Indices of bytes to randomize on each packet (0-indexed)
+        #[serde(default)]
+        randomize_indices: Vec<usize>,
+    },
+}
+
+/// Transaction ID generation mode for STUN
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TransactionIdMode {
+    /// Fully random 96-bit transaction ID
+    Random,
+    /// Use incremental counter (for correlation analysis)
+    Counter {
+        /// Starting value
+        #[serde(default)]
+        start: u32,
+    },
+}
+
+impl Default for TransactionIdMode {
+    fn default() -> Self {
+        Self::Random
+    }
+}
+
+fn default_true() -> bool { true }
+fn default_quic_version() -> u32 { 0x00000001 }
+fn default_dcid_len() -> u8 { 8 }
+fn default_dns_flags() -> u16 { 0x0100 }
+fn default_tls_content_type() -> u8 { 0x17 }
+fn default_tls_version() -> u16 { 0x0303 }
+
+impl HeaderSpec {
+    /// Generate a header from this specification
+    /// Returns different bytes on each call for randomizable fields
+    pub fn generate<R: Rng>(&self, rng: &mut R) -> Vec<u8> {
+        match self {
+            Self::StunBinding { magic_cookie, transaction_id } => {
+                let mut header = Vec::with_capacity(20);
+                
+                // STUN message type: Binding Request = 0x0001
+                header.extend_from_slice(&[0x00, 0x01]);
+                
+                // Message length (will be filled by caller)
+                header.extend_from_slice(&[0x00, 0x00]);
+                
+                // Magic cookie
+                if *magic_cookie {
+                    header.extend_from_slice(&0x2112A442u32.to_be_bytes());
+                } else {
+                    header.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+                }
+                
+                // Transaction ID (12 bytes / 96 bits)
+                match transaction_id {
+                    TransactionIdMode::Random => {
+                        let mut txid = [0u8; 12];
+                        rng.fill_bytes(&mut txid);
+                        header.extend_from_slice(&txid);
+                    }
+                    TransactionIdMode::Counter { start } => {
+                        // Use counter in first 4 bytes, rest random
+                        header.extend_from_slice(&start.to_be_bytes());
+                        let mut rest = [0u8; 8];
+                        rng.fill_bytes(&mut rest);
+                        header.extend_from_slice(&rest);
+                    }
+                }
+                
+                header
+            }
+            Self::QuicInitial { version, dcid_len } => {
+                let dcid_len = (*dcid_len).clamp(8, 20);
+                let mut header = Vec::with_capacity(14 + dcid_len as usize);
+                
+                // Header form byte: long packet (1) + fixed bit (0) + spin bit (0) + reserved (00) + key phase (0) + packet number length (00)
+                header.push(0xC0);
+                
+                // Version
+                header.extend_from_slice(&version.to_be_bytes());
+                
+                // DCID length
+                header.push(dcid_len);
+                
+                // DCID (random bytes)
+                let mut dcid = vec![0u8; dcid_len as usize];
+                rng.fill_bytes(&mut dcid);
+                header.extend_from_slice(&dcid);
+                
+                header
+            }
+            Self::DnsQuery { flags } => {
+                let mut header = Vec::with_capacity(12);
+                
+                // Transaction ID (random)
+                header.extend_from_slice(&rng.gen::<u16>().to_be_bytes());
+                
+                // Flags
+                header.extend_from_slice(&flags.to_be_bytes());
+                
+                // Counts: QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+                header.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+                
+                header
+            }
+            Self::TlsRecord { content_type, version } => {
+                let mut header = Vec::with_capacity(5);
+                
+                // Content type
+                header.push(*content_type);
+                
+                // Version
+                header.extend_from_slice(&version.to_be_bytes());
+                
+                // Length (will be filled by caller)
+                header.extend_from_slice(&[0x00, 0x00]);
+                
+                header
+            }
+            Self::RawPrefix { prefix_hex, randomize_indices } => {
+                let mut bytes = hex::decode(prefix_hex)
+                    .unwrap_or_else(|_| vec![0x00, 0x01, 0x02, 0x03]);
+                
+                // Randomize specified indices
+                for &idx in randomize_indices {
+                    if idx < bytes.len() {
+                        bytes[idx] = rng.gen();
+                    }
+                }
+                
+                bytes
+            }
+        }
+    }
+    
+    /// Get the minimum header length for this spec
+    pub fn min_length(&self) -> usize {
+        match self {
+            Self::StunBinding { magic_cookie, .. } => {
+                if *magic_cookie { 20 } else { 16 }
+            }
+            Self::QuicInitial { dcid_len, .. } => {
+                // header_form(1) + version(4) + dcid_len(1) + dcid(dcid_len)
+                6 + (*dcid_len).clamp(8, 20) as usize
+            }
+            Self::DnsQuery { .. } => 12,
+            Self::TlsRecord { .. } => 5,
+            Self::RawPrefix { prefix_hex, .. } => {
+                hex::decode(prefix_hex).map(|b| b.len()).unwrap_or(4)
+            }
+        }
+    }
+    
+    /// Generate a static header template for legacy compatibility
+    /// Uses a seeded RNG for deterministic output
+    pub fn generate_static(&self) -> Vec<u8> {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        self.generate(&mut rng)
+    }
+}
+
 /// FSM state for behavioral mimicry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FSMState {
@@ -298,16 +518,23 @@ impl MaskProfile {
 pub mod preset_masks {
     use super::*;
 
-    /// WebRTC Zoom-like profile
+    /// WebRTC Zoom-like profile (v3 - with HeaderSpec for Issue #30 fix)
     pub fn webrtc_zoom_v3() -> MaskProfile {
+        // Generate static header template for legacy compatibility
+        let header_spec = HeaderSpec::StunBinding {
+            magic_cookie: true,
+            transaction_id: TransactionIdMode::Random,
+        };
+        let header_template = header_spec.generate_static();
+        
         MaskProfile {
             mask_id: "webrtc_zoom_v3".to_string(),
-            version: 1,
+            version: 2,  // Version 2 for HeaderSpec support
             created_at: 0,
             expires_at: u64::MAX,
             spoof_protocol: SpoofProtocol::WebRTC_STUN,
-            header_template: vec![0x00, 0x01, 0x02, 0x03], // STUN-like
-            eph_pub_offset: 4,
+            header_template,
+            eph_pub_offset: 20,  // After STUN header (20 bytes)
             eph_pub_length: 32,
             size_distribution: SizeDistribution {
                 dist_type: SizeDistType::Parametric,
@@ -343,19 +570,27 @@ pub mod preset_masks {
             signature_vector: vec![0.0; 64],
             reverse_profile: None,
             signature: [0u8; 64],
+            header_spec: Some(header_spec),
         }
     }
 
-    /// QUIC/HTTP3-like profile
+    /// QUIC/HTTP3-like profile (v2 - with HeaderSpec for Issue #30 fix)
     pub fn quic_https_v2() -> MaskProfile {
+        // Generate static header template for legacy compatibility
+        let header_spec = HeaderSpec::QuicInitial {
+            version: 0x00000001,  // QUIC v1
+            dcid_len: 8,
+        };
+        let header_template = header_spec.generate_static();
+        
         MaskProfile {
             mask_id: "quic_https_v2".to_string(),
-            version: 1,
+            version: 2,  // Version 2 for HeaderSpec support
             created_at: 0,
             expires_at: u64::MAX,
             spoof_protocol: SpoofProtocol::QUIC,
-            header_template: vec![0xC0, 0xFF, 0xEE, 0x00], // QUIC-like
-            eph_pub_offset: 4,
+            header_template,
+            eph_pub_offset: 14,  // After QUIC short header (14 bytes with 8-byte DCID)
             eph_pub_length: 32,
             size_distribution: SizeDistribution {
                 dist_type: SizeDistType::Histogram,
@@ -383,6 +618,179 @@ pub mod preset_masks {
             signature_vector: vec![0.0; 64],
             reverse_profile: None,
             signature: [0u8; 64],
+            header_spec: Some(header_spec),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn test_stun_binding_generation() {
+        let spec = HeaderSpec::StunBinding {
+            magic_cookie: true,
+            transaction_id: TransactionIdMode::Random,
+        };
+        
+        // Generate two headers - they should differ in transaction_id
+        let mut rng = StdRng::seed_from_u64(42);
+        let header1 = spec.generate(&mut rng);
+        let header2 = spec.generate(&mut rng);
+        
+        assert_eq!(header1.len(), 20);
+        assert_eq!(header2.len(), 20);
+        
+        // First 8 bytes should be the same (type + length + magic cookie)
+        assert_eq!(&header1[0..2], &[0x00, 0x01]); // Binding Request
+        assert_eq!(&header1[4..8], &[0x21, 0x12, 0xA4, 0x42]); // Magic cookie
+        
+        // Transaction IDs should differ
+        assert_ne!(&header1[8..], &header2[8..]);
+    }
+
+    #[test]
+    fn test_quic_initial_generation() {
+        let spec = HeaderSpec::QuicInitial {
+            version: 0x00000001,
+            dcid_len: 8,
+        };
+        
+        let mut rng = StdRng::seed_from_u64(42);
+        let header1 = spec.generate(&mut rng);
+        let header2 = spec.generate(&mut rng);
+        
+        assert_eq!(header1.len(), 14); // 1 + 4 + 1 + 8
+        assert_eq!(header2.len(), 14);
+        
+        // First byte should be 0xC0 (long packet)
+        assert_eq!(header1[0], 0xC0);
+        
+        // Version bytes
+        assert_eq!(&header1[1..5], &0x00000001u32.to_be_bytes());
+        
+        // DCID length
+        assert_eq!(header1[5], 8);
+        
+        // DCID should differ between generations
+        assert_ne!(&header1[6..], &header2[6..]);
+    }
+
+    #[test]
+    fn test_dns_query_generation() {
+        let spec = HeaderSpec::DnsQuery {
+            flags: 0x0100,
+        };
+        
+        let mut rng = StdRng::seed_from_u64(42);
+        let header1 = spec.generate(&mut rng);
+        let header2 = spec.generate(&mut rng);
+        
+        assert_eq!(header1.len(), 12);
+        assert_eq!(header2.len(), 12);
+        
+        // Flags should be consistent
+        assert_eq!(&header1[2..4], &[0x01, 0x00]);
+        assert_eq!(&header2[2..4], &[0x01, 0x00]);
+        
+        // Transaction ID should differ
+        assert_ne!(&header1[0..2], &header2[0..2]);
+        
+        // Counts should be standard DNS query
+        assert_eq!(&header1[4..], &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_tls_record_generation() {
+        let spec = HeaderSpec::TlsRecord {
+            content_type: 0x17,
+            version: 0x0303,
+        };
+        
+        let mut rng = StdRng::seed_from_u64(42);
+        let header = spec.generate(&mut rng);
+        
+        assert_eq!(header.len(), 5);
+        assert_eq!(header[0], 0x17); // Application data
+        assert_eq!(&header[1..3], &[0x03, 0x03]); // TLS 1.2
+        assert_eq!(&header[3..5], &[0x00, 0x00]); // Length (to be filled)
+    }
+
+    #[test]
+    fn test_raw_prefix_generation() {
+        let spec = HeaderSpec::RawPrefix {
+            prefix_hex: "010203040506".to_string(),
+            randomize_indices: vec![2, 4],
+        };
+        
+        let mut rng = StdRng::seed_from_u64(42);
+        let header1 = spec.generate(&mut rng);
+        let header2 = spec.generate(&mut rng);
+        
+        assert_eq!(header1.len(), 6);
+        assert_eq!(header2.len(), 6);
+        
+        // Fixed bytes should be the same
+        assert_eq!(header1[0], header2[0]); // 0x01
+        assert_eq!(header1[1], header2[1]); // 0x02
+        assert_eq!(header1[3], header2[3]); // 0x04
+        assert_eq!(header1[5], header2[5]); // 0x06
+        
+        // Randomized bytes should differ
+        assert_ne!(header1[2], header2[2]);
+        assert_ne!(header1[4], header2[4]);
+    }
+
+    #[test]
+    fn test_header_spec_min_length() {
+        let stun = HeaderSpec::StunBinding {
+            magic_cookie: true,
+            transaction_id: TransactionIdMode::Random,
+        };
+        assert_eq!(stun.min_length(), 20);
+        
+        let quic = HeaderSpec::QuicInitial {
+            version: 0x00000001,
+            dcid_len: 8,
+        };
+        // 1 (header_form) + 4 (version) + 1 (dcid_len) + 8 (dcid) = 14
+        assert_eq!(quic.min_length(), 14);
+        
+        let dns = HeaderSpec::DnsQuery { flags: 0x0100 };
+        assert_eq!(dns.min_length(), 12);
+        
+        let tls = HeaderSpec::TlsRecord {
+            content_type: 0x17,
+            version: 0x0303,
+        };
+        assert_eq!(tls.min_length(), 5);
+    }
+
+    #[test]
+    fn test_static_generation_deterministic() {
+        let spec = HeaderSpec::StunBinding {
+            magic_cookie: true,
+            transaction_id: TransactionIdMode::Random,
+        };
+        
+        let static1 = spec.generate_static();
+        let static2 = spec.generate_static();
+        
+        // Static generation should be deterministic
+        assert_eq!(static1, static2);
+    }
+
+    #[test]
+    fn test_preset_masks_have_header_spec() {
+        let mask = preset_masks::webrtc_zoom_v3();
+        assert!(mask.header_spec.is_some());
+        assert_eq!(mask.version, 2);
+        
+        let mask2 = preset_masks::quic_https_v2();
+        assert!(mask2.header_spec.is_some());
+        assert_eq!(mask2.version, 2);
     }
 }

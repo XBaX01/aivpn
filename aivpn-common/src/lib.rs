@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod mask;
 pub mod network_config;
 pub mod error;
+pub mod recording;
 
 #[cfg(feature = "client-upload")]
 pub mod upload_pipeline;
@@ -19,3 +20,4 @@ pub use protocol::*;
 pub use mask::*;
 pub use network_config::*;
 pub use error::*;
+pub use recording::*;
