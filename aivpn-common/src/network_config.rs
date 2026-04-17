@@ -111,6 +111,7 @@ impl VpnNetworkConfig {
             server_vpn_ip: self.server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
+            mdh_len: default_mdh_len(),
         })
     }
 
@@ -134,7 +135,14 @@ pub struct ClientNetworkConfig {
     pub prefix_len: u8,
     #[serde(default = "default_mtu")]
     pub mtu: u16,
+    /// Mask-dependent header length in bytes.
+    /// Clients MUST use this value for MDH generation and parsing.
+    /// Defaults to 20 (STUN/WebRTC mask) for backward compatibility.
+    #[serde(default = "default_mdh_len")]
+    pub mdh_len: u16,
 }
+
+fn default_mdh_len() -> u16 { 20 }
 
 impl ClientNetworkConfig {
     pub const WIRE_SIZE: usize = 12;
@@ -185,6 +193,7 @@ impl ClientNetworkConfig {
             mtu: u16::from_le_bytes([data[2], data[3]]),
             server_vpn_ip: Ipv4Addr::new(data[4], data[5], data[6], data[7]),
             client_ip: Ipv4Addr::new(data[8], data[9], data[10], data[11]),
+            mdh_len: default_mdh_len(),
         };
         config.validate()?;
         Ok(config)
@@ -228,6 +237,7 @@ mod tests {
             server_vpn_ip: Ipv4Addr::new(10, 150, 0, 1),
             prefix_len: 24,
             mtu: 1346,
+            mdh_len: 20,
         };
 
         let decoded = ClientNetworkConfig::decode_wire(&config.encode_wire()).unwrap();

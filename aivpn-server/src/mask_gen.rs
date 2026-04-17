@@ -41,6 +41,10 @@ struct DirectionalAnalysis {
     iat_std_ms: f32,
     periods: Vec<Period>,
     packet_count: usize,
+    /// Raw sorted sizes for empirical quantile-based distribution building
+    raw_sizes_sorted: Vec<u16>,
+    /// Raw sorted IATs for empirical distribution building
+    raw_iats_sorted: Vec<f64>,
 }
 
 #[allow(dead_code)]
@@ -90,32 +94,18 @@ fn self_test_passes(
     entropy_penalty: f32,
     downlink_required: bool,
 ) -> bool {
-    let ks_threshold = 0.4;
-    let strict_pass = ks_uplink_size < ks_threshold
-        && ks_uplink_iat < ks_threshold
-        && (!downlink_required || (ks_downlink_size < 0.45 && ks_downlink_iat < 0.45))
-        && header_match >= 0.65
-        && fsm_score >= 0.45
+    // With a correct KS implementation and empirical distributions, KS values
+    // should be small (0.02-0.15).  Use generous thresholds to avoid rejecting
+    // valid recordings while still catching bad profiles.
+    let ks_ok = ks_uplink_size < 0.45
+        && ks_uplink_iat < 0.45
+        && (!downlink_required || (ks_downlink_size < 0.45 && ks_downlink_iat < 0.45));
+
+    let structural_ok = header_match >= 0.55
+        && fsm_score >= 0.40
         && entropy_penalty < 0.5;
 
-    if strict_pass {
-        return true;
-    }
-
-    // Real-time media and bandwidth-like traffic often have a single bursty IAT
-    // dimension that inflates KS despite a strong overall profile match.
-    let aggregate_ks = if downlink_required {
-        (ks_uplink_size + ks_uplink_iat + ks_downlink_size + ks_downlink_iat) / 4.0
-    } else {
-        (ks_uplink_size + ks_uplink_iat) / 2.0
-    };
-    let structural_match = header_match >= 0.95 && fsm_score >= 0.95 && entropy_penalty < 0.1;
-
-    structural_match
-        && ks_uplink_size < 0.25
-        && ks_uplink_iat < 0.80
-        && (!downlink_required || (ks_downlink_size < 0.55 && ks_downlink_iat < 0.50))
-        && aggregate_ks < 0.50
+    ks_ok && structural_ok
 }
 
 const MIN_ENCRYPTED_ENTROPY: f64 = 6.0;
@@ -259,6 +249,12 @@ fn analyze_traffic(_service: &str, packets: &[PacketMetadata]) -> Result<Analysi
 fn analyze_direction(packets: &[&PacketMetadata]) -> DirectionalAnalysis {
     let sizes: Vec<u16> = packets.iter().map(|p| p.size).collect();
     let iats: Vec<f64> = packets.iter().map(|p| p.iat_ms).collect();
+
+    let mut raw_sizes_sorted = sizes.clone();
+    raw_sizes_sorted.sort();
+    let mut raw_iats_sorted = iats.clone();
+    raw_iats_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     DirectionalAnalysis {
         size_modes: find_modes_histogram(&sizes, 32),
         size_mean: mean_u16(&sizes),
@@ -267,6 +263,8 @@ fn analyze_direction(packets: &[&PacketMetadata]) -> DirectionalAnalysis {
         iat_std_ms: std_dev_f64(&iats) as f32,
         periods: find_periods(&iats),
         packet_count: packets.len(),
+        raw_sizes_sorted,
+        raw_iats_sorted,
     }
 }
 
@@ -853,85 +851,75 @@ fn build_reverse_profile(mask_id: &str, analysis: &AnalysisResult) -> Option<Box
 }
 
 fn build_size_distribution(direction: &DirectionalAnalysis) -> SizeDistribution {
-    let bins: Vec<(u16, u16, f32)> = direction
-        .size_modes
-        .iter()
-        .map(|mode| {
-            let min = (mode.center - mode.std_dev).max(1.0) as u16;
-            let max = (mode.center + mode.std_dev).max(min as f32 + 1.0) as u16;
-            (min, max, mode.weight)
-        })
-        .collect();
-
-    if bins.is_empty() {
-        SizeDistribution {
-            dist_type: SizeDistType::Parametric,
-            bins: vec![],
-            parametric_type: Some(ParametricType::LogNormal),
-            parametric_params: Some(vec![
-                (direction.size_mean.max(1.0)).ln() as f64,
-                (direction.size_std / direction.size_mean.max(1.0)).max(0.1) as f64,
-            ]),
-        }
-    } else {
-        SizeDistribution {
+    // Frequency-weighted point bins: one bin per unique size value with
+    // weight = frequency / total.  Sampling picks a bin by weight and returns
+    // exactly that size value (min == max), perfectly reproducing the real CDF.
+    // This avoids the uniform-within-range artefact of quantile range bins
+    // that fills gaps between discrete packet sizes (MTU, ack, etc.).
+    let sorted = &direction.raw_sizes_sorted;
+    if sorted.is_empty() {
+        return SizeDistribution {
             dist_type: SizeDistType::Histogram,
-            bins,
+            bins: vec![(64, 512, 1.0)],
             parametric_type: None,
             parametric_params: None,
+        };
+    }
+
+    let total = sorted.len() as f32;
+    let mut bins: Vec<(u16, u16, f32)> = Vec::new();
+
+    // Count frequencies via run-length on sorted data
+    let mut i = 0;
+    while i < sorted.len() {
+        let val = sorted[i];
+        let mut count = 0usize;
+        while i < sorted.len() && sorted[i] == val {
+            count += 1;
+            i += 1;
         }
+        bins.push((val, val, count as f32 / total));
+    }
+
+    SizeDistribution {
+        dist_type: SizeDistType::Histogram,
+        bins,
+        parametric_type: None,
+        parametric_params: None,
     }
 }
 
 fn build_iat_distribution(direction: &DirectionalAnalysis) -> IATDistribution {
-    if !direction.periods.is_empty() {
-        if direction.periods.len() >= 2 {
-            let params: Vec<f64> = direction
-                .periods
-                .iter()
-                .flat_map(|period| {
-                    let samples = (period.weight * 20.0).round().clamp(1.0, 32.0) as usize;
-                    let center = period.period_ms.max(0.1) as f64;
-                    let spread = period.jitter_ms.max(1.0) as f64;
-                    let support = [
-                        (center - spread).max(0.0),
-                        (center - spread * 0.5).max(0.0),
-                        center,
-                        center + spread * 0.5,
-                        center + spread,
-                    ];
-                    support
-                        .into_iter()
-                        .cycle()
-                        .take(samples)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            IATDistribution {
-                dist_type: IATDistType::Empirical,
-                params,
-                jitter_range_ms: symmetric_jitter_range(direction.iat_std_ms.max(1.0) as f64 * 0.05),
-            }
-        } else {
-            let main_period = &direction.periods[0];
-            IATDistribution {
-                dist_type: IATDistType::LogNormal,
-                params: vec![
-                    (main_period.period_ms.max(1.0)).ln() as f64,
-                    (main_period.jitter_ms / main_period.period_ms.max(1.0)).max(0.1) as f64,
-                ],
-                jitter_range_ms: symmetric_jitter_range(direction.iat_std_ms.max(1.0) as f64 * 0.1),
-            }
-        }
-    } else {
-        IATDistribution {
+    // Empirical quantile-based distribution: sample N evenly-spaced quantile
+    // values from the sorted real IATs.  The Empirical sampler picks uniformly
+    // among these stored values, faithfully reproducing the recorded CDF.
+    let sorted = &direction.raw_iats_sorted;
+    if sorted.is_empty() || sorted.len() < 10 {
+        return IATDistribution {
             dist_type: IATDistType::LogNormal,
             params: vec![
                 (direction.iat_mean_ms.max(1.0)).ln() as f64,
                 (direction.iat_std_ms / direction.iat_mean_ms.max(1.0)).max(0.1) as f64,
             ],
             jitter_range_ms: symmetric_jitter_range(10.0),
-        }
+        };
+    }
+
+    let num_quantiles = 200usize.min(sorted.len());
+    let mut quantile_values: Vec<f64> = Vec::with_capacity(num_quantiles);
+    for i in 0..num_quantiles {
+        let idx = (i as f64 / (num_quantiles - 1).max(1) as f64 * (sorted.len() - 1) as f64)
+            .round() as usize;
+        quantile_values.push(sorted[idx.min(sorted.len() - 1)]);
+    }
+
+    // Tiny jitter around quantile values to avoid exact duplicates
+    let jitter = (direction.iat_std_ms.max(0.1) as f64) * 0.02;
+
+    IATDistribution {
+        dist_type: IATDistType::Empirical,
+        params: quantile_values,
+        jitter_range_ms: symmetric_jitter_range(jitter),
     }
 }
 
@@ -1226,12 +1214,14 @@ fn entropy_penalty(real_entropy: f64) -> f32 {
 }
 
 /// Two-sample Kolmogorov-Smirnov test statistic
+///
+/// Correct merge-walk that handles tied values: at each unique value,
+/// advance BOTH pointers past all duplicates before comparing CDFs.
 fn ks_test(sample1: &[f64], sample2: &[f64]) -> f32 {
     if sample1.is_empty() || sample2.is_empty() {
         return 1.0;
     }
 
-    // Sort both samples
     let mut s1 = sample1.to_vec();
     let mut s2 = sample2.to_vec();
     s1.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1244,30 +1234,22 @@ fn ks_test(sample1: &[f64], sample2: &[f64]) -> f32 {
     let mut i = 0usize;
     let mut j = 0usize;
 
-    // Merge-walk both sorted samples for O(n log n) KS statistic
-    while i < s1.len() && j < s2.len() {
-        let cdf1 = (i + 1) as f64 / n1;
-        let cdf2 = (j + 1) as f64 / n2;
+    while i < s1.len() || j < s2.len() {
+        let v1 = if i < s1.len() { s1[i] } else { f64::INFINITY };
+        let v2 = if j < s2.len() { s2[j] } else { f64::INFINITY };
+        let current = v1.min(v2);
 
-        if s1[i] <= s2[j] {
-            max_diff = max_diff.max((cdf1 - (j as f64 / n2)).abs());
+        // Advance both pointers past all elements <= current
+        while i < s1.len() && s1[i] <= current {
             i += 1;
-        } else {
-            max_diff = max_diff.max(((i as f64 / n1) - cdf2).abs());
+        }
+        while j < s2.len() && s2[j] <= current {
             j += 1;
         }
-    }
 
-    // Handle remaining elements
-    while i < s1.len() {
-        let cdf1 = (i + 1) as f64 / n1;
-        max_diff = max_diff.max((cdf1 - 1.0).abs());
-        i += 1;
-    }
-    while j < s2.len() {
-        let cdf2 = (j + 1) as f64 / n2;
-        max_diff = max_diff.max((1.0 - cdf2).abs());
-        j += 1;
+        let cdf1 = i as f64 / n1;
+        let cdf2 = j as f64 / n2;
+        max_diff = max_diff.max((cdf1 - cdf2).abs());
     }
 
     max_diff as f32
@@ -1313,7 +1295,7 @@ fn current_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_iat_distribution, entropy_penalty, header_consensus, header_match_rate, infer_header_spec, self_test_passes, DirectionalAnalysis, Period};
+    use super::{build_iat_distribution, entropy_penalty, header_consensus, header_match_rate, infer_header_spec, ks_test, self_test_passes, DirectionalAnalysis, Period};
     use aivpn_common::mask::{HeaderSpec, IATDistType};
 
     #[test]
@@ -1325,6 +1307,18 @@ mod tests {
 
     #[test]
     fn multi_period_iat_distribution_preserves_spread_without_positive_bias() {
+        // Generate synthetic IATs from two periods to test empirical quantile builder
+        let mut raw_iats: Vec<f64> = Vec::new();
+        // 60% near 20ms
+        for i in 0..240 {
+            raw_iats.push(15.0 + (i as f64 % 10.0));
+        }
+        // 40% near 100ms
+        for i in 0..160 {
+            raw_iats.push(70.0 + (i as f64 % 60.0));
+        }
+        raw_iats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
         let direction = DirectionalAnalysis {
             size_modes: vec![],
             size_mean: 900.0,
@@ -1336,6 +1330,8 @@ mod tests {
                 Period { period_ms: 100.0, jitter_ms: 30.0, weight: 0.4 },
             ],
             packet_count: 400,
+            raw_sizes_sorted: vec![],
+            raw_iats_sorted: raw_iats,
         };
 
         let dist = build_iat_distribution(&direction);
@@ -1347,30 +1343,33 @@ mod tests {
     }
 
     #[test]
-    fn self_test_accepts_strong_recording_with_single_bursty_iat_tail() {
+    fn self_test_accepts_good_empirical_profile() {
+        // With correct KS + empirical distributions, values should be small
         assert!(self_test_passes(
-            0.140,
-            0.725,
-            0.459,
-            0.434,
-            1.000,
-            1.000,
-            0.000,
-            true,
+            0.05, 0.12, 0.08, 0.10, 1.000, 1.000, 0.000, true,
         ));
     }
 
     #[test]
-    fn self_test_accepts_speedtest2_like_profile() {
+    fn self_test_accepts_moderate_ks_with_good_structure() {
+        // Some noise in IAT but still within bounds
         assert!(self_test_passes(
-            0.180,
-            0.725,
-            0.522,
-            0.428,
-            1.000,
-            1.000,
-            0.000,
-            true,
+            0.15, 0.35, 0.20, 0.30, 0.80, 0.90, 0.000, true,
+        ));
+    }
+
+    #[test]
+    fn self_test_accepts_weak_header_above_threshold() {
+        assert!(self_test_passes(
+            0.10, 0.20, 0.15, 0.25, 0.60, 0.80, 0.000, true,
+        ));
+    }
+
+    #[test]
+    fn self_test_rejects_high_ks() {
+        // KS > 0.45 should be rejected
+        assert!(!self_test_passes(
+            0.50, 0.60, 0.70, 0.80, 1.000, 1.000, 0.000, true,
         ));
     }
 
@@ -1386,6 +1385,27 @@ mod tests {
             0.000,
             true,
         ));
+    }
+
+    #[test]
+    fn ks_test_identical_samples_returns_zero() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(ks_test(&data, &data), 0.0);
+    }
+
+    #[test]
+    fn ks_test_identical_constant_returns_zero() {
+        // This was the critical bug: all-same values caused KS ≈ 1.0
+        let data: Vec<f64> = vec![1346.0; 5000];
+        assert_eq!(ks_test(&data, &data), 0.0);
+    }
+
+    #[test]
+    fn ks_test_similar_distributions_small() {
+        let s1: Vec<f64> = (0..1000).map(|i| (i as f64) * 1.5).collect();
+        let s2: Vec<f64> = (0..1000).map(|i| (i as f64) * 1.5 + 0.1).collect();
+        let ks = ks_test(&s1, &s2);
+        assert!(ks < 0.05, "KS for near-identical distributions should be small, got {}", ks);
     }
 
     #[test]

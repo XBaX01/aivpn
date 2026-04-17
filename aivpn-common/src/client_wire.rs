@@ -8,6 +8,10 @@ use crate::crypto::{
 use crate::error::{Error, Result};
 use crate::protocol::{ControlPayload, InnerHeader, InnerType};
 
+/// Default MDH length matching the primary mask (STUN/WebRTC = 20 bytes).
+pub const DEFAULT_MDH_LEN: usize = 20;
+
+/// Legacy constant kept for backward compatibility references.
 pub const DEFAULT_ZERO_MDH: [u8; 4] = [0u8; 4];
 
 pub struct DecodedPacket {
@@ -182,11 +186,14 @@ pub fn build_inner_packet(inner_type: InnerType, seq_num: u16, payload: &[u8]) -
     inner
 }
 
-pub fn build_zero_mdh_packet(
+/// Build a packet with random MDH of given length (Issue #30 fix).
+/// Each call generates fresh random MDH bytes, eliminating static fingerprints.
+pub fn build_random_mdh_packet(
     keys: &SessionKeys,
     counter: &mut u64,
     inner: &[u8],
     obfuscated_eph_pub: Option<&[u8; 32]>,
+    mdh_len: usize,
 ) -> Result<Vec<u8>> {
     let pad_len: u16 = 8 + rand::thread_rng().next_u32() as u16 % 16;
     let mut plaintext = Vec::with_capacity(2 + inner.len() + pad_len as usize);
@@ -203,16 +210,30 @@ pub fn build_zero_mdh_packet(
     let time_window = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let tag = generate_resonance_tag(&keys.tag_secret, current_counter, time_window);
 
+    // Generate random MDH bytes — no static fingerprint
+    let mut mdh = vec![0u8; mdh_len];
+    rand::thread_rng().fill_bytes(&mut mdh);
+
     let eph_len = if obfuscated_eph_pub.is_some() { 32 } else { 0 };
-    let mut packet = Vec::with_capacity(TAG_SIZE + DEFAULT_ZERO_MDH.len() + eph_len + ciphertext.len());
+    let mut packet = Vec::with_capacity(TAG_SIZE + mdh_len + eph_len + ciphertext.len());
     packet.extend_from_slice(&tag);
-    packet.extend_from_slice(&DEFAULT_ZERO_MDH);
+    packet.extend_from_slice(&mdh);
     if let Some(eph) = obfuscated_eph_pub {
         packet.extend_from_slice(eph);
     }
     packet.extend_from_slice(&ciphertext);
 
     Ok(packet)
+}
+
+/// Legacy: build packet with 4-byte zero MDH (kept for backward compatibility).
+pub fn build_zero_mdh_packet(
+    keys: &SessionKeys,
+    counter: &mut u64,
+    inner: &[u8],
+    obfuscated_eph_pub: Option<&[u8; 32]>,
+) -> Result<Vec<u8>> {
+    build_random_mdh_packet(keys, counter, inner, obfuscated_eph_pub, DEFAULT_ZERO_MDH.len())
 }
 
 pub fn decode_packet_with_mdh_len(

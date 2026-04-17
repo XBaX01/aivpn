@@ -57,6 +57,11 @@ pub struct ServerArgs {
     /// Per-IP packet rate limit for incoming UDP traffic.
     #[arg(long, env = "AIVPN_PER_IP_PPS_LIMIT", default_value_t = 50000)]
     pub per_ip_pps_limit: u64,
+
+    /// Directory for mask file storage.
+    /// Resolved in order: CLI flag → env AIVPN_MASK_DIR → server.json "mask_dir" → default.
+    #[arg(long, env = "AIVPN_MASK_DIR")]
+    pub mask_dir: Option<String>,
 }
 
 /// AIVPN Server instance
@@ -94,7 +99,16 @@ mod tests {
 
     #[test]
     fn test_server_creation() {
-        let config = GatewayConfig::default();
+        // Create temp mask dir with a preset mask for the test
+        let mask_dir = std::path::PathBuf::from("/tmp/aivpn-test-server-masks");
+        let _ = std::fs::create_dir_all(&mask_dir);
+        let mask = aivpn_common::mask::preset_masks::webrtc_zoom_v3();
+        let json = serde_json::to_string_pretty(&mask).unwrap();
+        std::fs::write(mask_dir.join(format!("{}.json", mask.mask_id)), &json).unwrap();
+        std::fs::write(mask_dir.join(format!("{}.stats", mask.mask_id)), "{}").unwrap();
+
+        let mut config = GatewayConfig::default();
+        config.mask_dir = mask_dir;
         let server = AivpnServer::new(config);
         assert!(server.is_ok());
     }

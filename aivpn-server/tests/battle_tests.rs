@@ -1068,21 +1068,27 @@ fn test_neural_cleanup_stats() {
 #[test]
 fn test_mask_catalog_init() {
     let catalog = MaskCatalog::new();
-    assert_eq!(catalog.available_count(), 2, "Catalog must have 2 built-in masks");
+    assert_eq!(catalog.available_count(), 0, "Catalog must start empty (masks loaded from disk)");
 }
 
 #[test]
 fn test_mask_catalog_register() {
     let catalog = MaskCatalog::new();
+    let mask1 = webrtc_zoom_v3();
+    catalog.register_mask(mask1);
     let mut custom_mask = webrtc_zoom_v3();
     custom_mask.mask_id = "custom_dns_tunnel_v1".to_string();
     catalog.register_mask(custom_mask);
-    assert_eq!(catalog.available_count(), 3, "Catalog must have 3 masks after registration");
+    assert_eq!(catalog.available_count(), 2, "Catalog must have 2 masks after registration");
 }
 
 #[test]
 fn test_mask_catalog_compromised() {
     let catalog = MaskCatalog::new();
+    let mask1 = webrtc_zoom_v3();
+    catalog.register_mask(mask1);
+    let mask2 = aivpn_common::mask::preset_masks::quic_https_v2();
+    catalog.register_mask(mask2);
     catalog.mark_compromised("webrtc_zoom_v3");
     assert_eq!(catalog.available_count(), 1, "One mask left after compromise");
     // Compromised mask should not be re-registered
@@ -1094,6 +1100,10 @@ fn test_mask_catalog_compromised() {
 #[test]
 fn test_mask_catalog_select_fallback() {
     let catalog = MaskCatalog::new();
+    let mask1 = webrtc_zoom_v3();
+    catalog.register_mask(mask1);
+    let mask2 = aivpn_common::mask::preset_masks::quic_https_v2();
+    catalog.register_mask(mask2);
     let fallback = catalog.select_fallback("webrtc_zoom_v3");
     assert!(fallback.is_some(), "Must have a fallback mask");
     assert_eq!(fallback.unwrap().mask_id, "quic_https_v2", "Fallback must be the other mask");
@@ -1102,6 +1112,10 @@ fn test_mask_catalog_select_fallback() {
 #[test]
 fn test_mask_catalog_no_fallback_when_all_compromised() {
     let catalog = MaskCatalog::new();
+    let mask1 = webrtc_zoom_v3();
+    catalog.register_mask(mask1);
+    let mask2 = aivpn_common::mask::preset_masks::quic_https_v2();
+    catalog.register_mask(mask2);
     catalog.mark_compromised("webrtc_zoom_v3");
     catalog.mark_compromised("quic_https_v2");
     let fallback = catalog.select_fallback("anything");
@@ -1233,7 +1247,15 @@ fn test_gateway_config_default_has_neural() {
 #[test]
 fn test_gateway_creation_with_neural() {
     use aivpn_server::Gateway;
-    let config = GatewayConfig::default();
+    // Create temp mask dir with a mask file
+    let mask_dir = std::path::PathBuf::from("/tmp/aivpn-test-gateway-masks");
+    let _ = std::fs::create_dir_all(&mask_dir);
+    let mask = webrtc_zoom_v3();
+    let json = serde_json::to_string_pretty(&mask).unwrap();
+    std::fs::write(mask_dir.join(format!("{}.json", mask.mask_id)), &json).unwrap();
+    std::fs::write(mask_dir.join(format!("{}.stats", mask.mask_id)), "{}").unwrap();
+    let mut config = GatewayConfig::default();
+    config.mask_dir = mask_dir;
     let gateway = Gateway::new(config);
     assert!(gateway.is_ok(), "Gateway must create successfully with neural module");
 }

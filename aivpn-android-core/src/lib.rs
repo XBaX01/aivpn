@@ -12,6 +12,7 @@ mod android_tunnel;
 use android_tunnel::{
     get_active_download_bytes, get_active_upload_bytes, run_tunnel_android, stop_active_tunnel,
 };
+use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jint, jlong, jstring};
@@ -103,6 +104,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         server_port as u16,
         key_bytes,
         psk,
+        DEFAULT_MDH_LEN,
     ));
 
     match result {

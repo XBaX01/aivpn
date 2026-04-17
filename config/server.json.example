@@ -6,6 +6,7 @@
     "prefix_len": 24,
     "mtu": 1346
   },
+  "mask_dir": "/var/lib/aivpn/masks",
   "max_sessions": 500,
   "session_timeout_secs": 86400,
   "idle_timeout_secs": 300,

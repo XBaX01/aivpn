@@ -795,6 +795,23 @@ fn battle_time_window_rotation() {
 }
 
 #[test]
+fn battle_tag_avoids_wireguard_first_byte() {
+    // Issue #30: TAG first byte must NOT be 1–4 (WireGuard message types)
+    // to prevent DPI/Wireshark from misidentifying packets as WireGuard.
+    let secret = [0x42u8; 32];
+    let tw = 1000u64;
+    for counter in 0u64..50_000 {
+        let tag = generate_resonance_tag(&secret, counter, tw);
+        assert!(
+            tag[0] < 1 || tag[0] > 4,
+            "Tag first byte {} is in WireGuard range [1..4] at counter={}",
+            tag[0],
+            counter,
+        );
+    }
+}
+
+#[test]
 fn battle_empty_payload_encrypt_decrypt() {
     let key = [1u8; CHACHA20_KEY_SIZE];
     let nonce = [0u8; NONCE_SIZE];

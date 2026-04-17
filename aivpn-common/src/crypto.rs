@@ -177,7 +177,9 @@ pub fn decrypt_payload(
 /// Generate Resonance Tag using HMAC-BLAKE3
 /// 
 /// Tag = HMAC-BLAKE3(tag_secret, counter_bytes || time_window_bytes)
-/// truncated to first 8 bytes
+/// truncated to first 8 bytes.
+/// The first byte is guaranteed NOT to be 1–4 (WireGuard message types),
+/// preventing heuristic WireGuard detection by Wireshark / DPI (Issue #30).
 pub fn generate_resonance_tag(
     tag_secret: &[u8; 32],
     counter: u64,
@@ -190,6 +192,13 @@ pub fn generate_resonance_tag(
     let hash = hasher.finalize();
     let mut tag = [0u8; TAG_SIZE];
     tag.copy_from_slice(&hash.as_bytes()[..TAG_SIZE]);
+    // Avoid WireGuard message type signatures: 0x01 (Initiation), 0x02 (Response),
+    // 0x03 (Cookie), 0x04 (Transport).  DPI/Wireshark checks byte[0] ∈ {1..4}
+    // followed by three zero bytes.  Shifting byte[0] out of that range eliminates
+    // the heuristic match without reducing tag entropy (the secret is still 256-bit).
+    if tag[0] >= 1 && tag[0] <= 4 {
+        tag[0] = tag[0].wrapping_add(5); // 1→6, 2→7, 3→8, 4→9
+    }
     tag
 }
 

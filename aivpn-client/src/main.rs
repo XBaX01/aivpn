@@ -181,6 +181,7 @@ async fn main() {
                         server_vpn_ip: LEGACY_SERVER_VPN_IP,
                         prefix_len: 24,
                         mtu: DEFAULT_VPN_MTU,
+                        mdh_len: 20,
                     })
                 })
             })
@@ -302,5 +303,6 @@ fn fallback_network_config(tun_addr: &str) -> ClientNetworkConfig {
         server_vpn_ip: LEGACY_SERVER_VPN_IP,
         prefix_len: 24,
         mtu: DEFAULT_VPN_MTU,
+        mdh_len: 20,
     }
 }

@@ -63,6 +63,8 @@ pub struct GatewayConfig {
     pub neural_config: NeuralConfig,
     /// Client database for PSK-based authentication
     pub client_db: Option<Arc<ClientDatabase>>,
+    /// Directory for mask storage (default: /var/lib/aivpn/masks)
+    pub mask_dir: std::path::PathBuf,
 }
 
 impl Default for GatewayConfig {
@@ -80,6 +82,7 @@ impl Default for GatewayConfig {
             enable_neural: true,
             neural_config: NeuralConfig::default(),
             client_db: None,
+            mask_dir: std::path::PathBuf::from("/var/lib/aivpn/masks"),
         }
     }
 }
@@ -94,24 +97,21 @@ pub struct MaskCatalog {
     /// Compromised mask IDs — never reuse
     compromised: DashMap<String, Instant>,
     /// Primary mask used for initial handshake parsing.
-    primary_mask_id: String,
+    primary_mask_id: parking_lot::Mutex<String>,
 }
 
 impl MaskCatalog {
     pub fn new() -> Self {
-        use aivpn_common::mask::preset_masks;
-        let m1 = preset_masks::webrtc_zoom_v3();
-        let primary_mask_id = m1.mask_id.clone();
-        let catalog = Self {
+        Self {
             masks: DashMap::new(),
             compromised: DashMap::new(),
-            primary_mask_id,
-        };
-        // Seed with file-backed built-in masks
-        for mask in preset_masks::all() {
-            catalog.masks.insert(mask.mask_id.clone(), mask);
+            primary_mask_id: parking_lot::Mutex::new(String::new()),
         }
-        catalog
+    }
+
+    /// Set the primary mask ID (first mask loaded from disk)
+    pub fn set_primary_mask_id(&self, mask_id: String) {
+        *self.primary_mask_id.lock() = mask_id;
     }
 
     /// Register a new mask (e.g., received via passive distribution or neural unpack)
@@ -151,7 +151,8 @@ impl MaskCatalog {
     /// handshake embeds `eph_pub` inside the MDH at `eph_offset`.
     pub fn packet_layout(&self) -> (usize, usize, usize, usize) {
         let fallback = (20usize, 52usize, 20usize, 32usize);
-        let Some(mask) = self.masks.get(&self.primary_mask_id).map(|entry| entry.value().clone())
+        let primary_id = self.primary_mask_id.lock().clone();
+        let Some(mask) = self.masks.get(&primary_id).map(|entry| entry.value().clone())
             .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone())) else {
             return fallback;
         };
@@ -167,11 +168,23 @@ impl MaskCatalog {
     }
 
     /// Get the regular MDH bytes used for server->client packets.
+    /// Uses HeaderSpec for dynamic per-packet generation when available (Issue #30 fix).
     pub fn packet_mdh_bytes(&self) -> Vec<u8> {
-        self.masks.get(&self.primary_mask_id)
-            .map(|entry| entry.value().header_template.clone())
-            .or_else(|| self.masks.iter().next().map(|entry| entry.value().header_template.clone()))
-            .unwrap_or_else(|| vec![0u8; 20])
+        let primary_id = self.primary_mask_id.lock().clone();
+        let mask = self.masks.get(&primary_id)
+            .map(|entry| entry.value().clone())
+            .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone()));
+        match mask {
+            Some(m) => {
+                if let Some(ref spec) = m.header_spec {
+                    let mut rng = rand::thread_rng();
+                    spec.generate(&mut rng)
+                } else {
+                    m.header_template.clone()
+                }
+            }
+            None => vec![0u8; 20],
+        }
     }
 }
 
@@ -315,7 +328,6 @@ impl Gateway {
     }
 
     pub fn new(config: GatewayConfig) -> Result<Self> {
-        use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
         use rand::rngs::OsRng;
         use rand::RngCore;
         
@@ -331,17 +343,47 @@ impl Gateway {
         OsRng.fill_bytes(&mut key_bytes);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
         
-        // Create default mask
-        let default_mask = webrtc_zoom_v3();
+        // Initialize mask catalog (empty — populated from disk only)
+        let mask_catalog = Arc::new(MaskCatalog::new());
+        
+        // Initialize mask store — loads masks from disk into catalog
+        let mask_store = Arc::new(MaskStore::new(
+            mask_catalog.clone(),
+            config.mask_dir.clone(),
+        ));
+        
+        // Set primary mask — must match what clients use for handshake.
+        // Prefer "webrtc_zoom_v3" (hardcoded in client), fall back to first available.
+        const DEFAULT_PRIMARY_MASK: &str = "webrtc_zoom_v3";
+        let primary_id = if mask_catalog.masks.contains_key(DEFAULT_PRIMARY_MASK) {
+            DEFAULT_PRIMARY_MASK.to_string()
+        } else if let Some(first) = mask_catalog.masks.iter().next() {
+            let id = first.key().clone();
+            warn!("Primary mask '{}' not found on disk, falling back to '{}'", DEFAULT_PRIMARY_MASK, id);
+            id
+        } else {
+            String::new()
+        };
+        if !primary_id.is_empty() {
+            info!("Primary mask set to '{}' (loaded from disk)", primary_id);
+            mask_catalog.set_primary_mask_id(primary_id);
+        } else {
+            warn!("No masks found in {:?} — server will not accept connections until masks are recorded", config.mask_dir);
+        }
+        
+        // Get default mask from catalog (required — at least one mask must exist on disk)
+        let default_mask = mask_catalog.masks.get(DEFAULT_PRIMARY_MASK)
+            .map(|e| e.value().clone())
+            .or_else(|| mask_catalog.masks.iter().next().map(|e| e.value().clone()))
+            .ok_or_else(|| Error::Session(
+                format!("No masks found in {:?} — place mask JSON files there before starting the server", config.mask_dir)
+            ))?;
         
         let session_manager = Arc::new(SessionManager::new(
             server_keys,
             signing_key,
             default_mask,
         ));
-        
-        // Initialize mask catalog (Patent 3 — fallback pool)
-        let mask_catalog = Arc::new(MaskCatalog::new());
         
         // Initialize neural resonance module (Patent 1)
         let mut neural = NeuralResonanceModule::new(config.neural_config.clone())
@@ -357,15 +399,8 @@ impl Gateway {
             info!("Neural Resonance Module initialized (Patent 1)");
         }
         
-        // NAT forwarder is created lazily in run() to avoid requiring root at construction time
-
-        // Initialize mask store and recording manager
-        let mask_store = Arc::new(MaskStore::new(
-            mask_catalog.clone(),
-            std::path::PathBuf::from("/var/lib/aivpn/masks"),
-        ));
         let recording_manager = Arc::new(RecordingManager::new(mask_store.clone()));
-        info!("Auto Mask Recording system initialized");
+        info!("Auto Mask Recording system initialized ({} masks loaded from disk)", mask_catalog.available_count());
 
         Ok(Self {
             config: config.clone(),
@@ -451,7 +486,9 @@ impl Gateway {
             if let Some(tun_reader) = nat.take_reader().await {
                 let sessions = self.session_manager.clone();
                 let socket = self.udp_socket.as_ref().unwrap().clone();
-                let mask = aivpn_common::mask::preset_masks::webrtc_zoom_v3();
+                let mask = self.mask_catalog.masks.iter().next()
+                    .map(|e| e.value().clone())
+                    .expect("at least one mask must be loaded");
                 let server_vpn_ip = self.config.network_config.server_vpn_ip;
                 let recorder = self.recording_manager.clone();
                 
@@ -567,7 +604,7 @@ impl Gateway {
                 .filter_map(|entry| {
                     let sess = entry.value().lock();
                     let mask_id = sess.mask.as_ref().map(|m| m.mask_id.clone())
-                        .unwrap_or_else(|| "webrtc_zoom_v3".to_string());
+                        .unwrap_or_else(|| "unknown".to_string());
                     Some((sess.session_id, mask_id))
                 })
                 .collect();
@@ -1798,8 +1835,10 @@ mod tests {
     #[test]
     fn packet_layout_extracts_embedded_eph_pub_from_mdh() {
         let catalog = MaskCatalog::new();
-        let (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len) = catalog.packet_layout();
         let mask = webrtc_zoom_v3();
+        catalog.register_mask(mask.clone());
+        catalog.set_primary_mask_id(mask.mask_id.clone());
+        let (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len) = catalog.packet_layout();
 
         let mut mdh = mask.header_template.clone();
         if mdh.len() < handshake_mdh_len {

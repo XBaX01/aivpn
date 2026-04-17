@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time;
-use crate::client_wire::{build_inner_packet, build_zero_mdh_packet};
+use crate::client_wire::{build_inner_packet, build_random_mdh_packet, DEFAULT_MDH_LEN};
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
 use crate::protocol::{ControlPayload, InnerType};
@@ -55,17 +55,23 @@ pub trait PacketEncryptor: Send {
 
 // ──────────── Ready-made encryptor: zero MDH ────────────
 
-/// Encryptor using `build_zero_mdh_packet` — suitable for Android and any
+/// Encryptor using random MDH — suitable for Android and any
 /// client that does not require Mimicry traffic shaping.
+/// Each packet gets fresh random MDH bytes (Issue #30 fix).
 pub struct ZeroMdhEncryptor {
     keys: SessionKeys,
     counter: u64,
     seq: u16,
+    mdh_len: usize,
 }
 
 impl ZeroMdhEncryptor {
     pub fn new(keys: SessionKeys, counter: u64, seq: u16) -> Self {
-        Self { keys, counter, seq }
+        Self { keys, counter, seq, mdh_len: DEFAULT_MDH_LEN }
+    }
+
+    pub fn with_mdh_len(keys: SessionKeys, counter: u64, seq: u16, mdh_len: usize) -> Self {
+        Self { keys, counter, seq, mdh_len }
     }
 }
 
@@ -73,21 +79,21 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let inner = build_inner_packet(InnerType::Data, self.seq, payload);
         self.seq = self.seq.wrapping_add(1);
-        build_zero_mdh_packet(&self.keys, &mut self.counter, &inner, None)
+        build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
     }
 
     fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
         let bytes = payload.encode()?;
         let inner = build_inner_packet(InnerType::Control, self.seq, &bytes);
         self.seq = self.seq.wrapping_add(1);
-        build_zero_mdh_packet(&self.keys, &mut self.counter, &inner, None)
+        build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
     }
 
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
         let keepalive = ControlPayload::Keepalive.encode()?;
         let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
         self.seq = self.seq.wrapping_add(1);
-        build_zero_mdh_packet(&self.keys, &mut self.counter, &inner, None)
+        build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
     }
 
     fn on_data_sent(&mut self, _payload_len: usize) {}

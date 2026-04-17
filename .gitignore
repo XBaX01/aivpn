@@ -111,3 +111,5 @@ remote-speed-server.sh
 deploy-server-update.sh
 .tmp_update_remote_clients.py
 MACOS_RECORDING_TEST.md
+deploy-server-release.sh
+docker-entrypoint.sh

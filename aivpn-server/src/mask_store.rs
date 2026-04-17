@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
 
-use aivpn_common::mask::{MaskProfile, preset_masks};
+use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::Result;
 
 use crate::gateway::MaskCatalog;
@@ -60,8 +60,7 @@ impl MaskStore {
             catalog,
             storage_dir,
         };
-        store.bootstrap_builtin_masks();
-        // Load existing masks from disk
+        // Load masks only from disk — no hardcoded presets
         store.load_from_disk();
         store
     }
@@ -177,33 +176,6 @@ impl MaskStore {
                 }
             }
             Err(e) => error!("Failed to serialize mask stats {}: {}", mask_id, e),
-        }
-    }
-
-    fn bootstrap_builtin_masks(&self) {
-        let _ = std::fs::create_dir_all(&self.storage_dir);
-        for profile in preset_masks::all() {
-            let mask_id = profile.mask_id.clone();
-            let json_path = self.storage_dir.join(format!("{}.json", mask_id));
-            let stats_path = self.storage_dir.join(format!("{}.stats", mask_id));
-            if json_path.exists() && stats_path.exists() {
-                continue;
-            }
-            let entry = MaskEntry {
-                profile,
-                stats: MaskStats {
-                    mask_id: mask_id.clone(),
-                    times_used: 0,
-                    times_failed: 0,
-                    success_rate: 1.0,
-                    confidence: 1.0,
-                    is_active: true,
-                    created_by: "builtin".into(),
-                    created_at: current_unix_secs(),
-                    last_used: None,
-                },
-            };
-            self.save_to_disk(&mask_id, &entry);
         }
     }
 

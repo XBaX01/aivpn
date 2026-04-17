@@ -100,7 +100,19 @@ else
     exit 1
 fi
 
-mkdir -p "$RELEASES_DIR" "$SCRIPT_DIR/config"
+mkdir -p "$RELEASES_DIR" "$SCRIPT_DIR/config" "$SCRIPT_DIR/masks"
+
+# Seed masks directory with bundled presets (won't overwrite existing files)
+if [ -d "$SCRIPT_DIR/mask-assets" ]; then
+    for f in "$SCRIPT_DIR/mask-assets"/*.json; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ ! -f "$SCRIPT_DIR/masks/$base" ]; then
+            cp "$f" "$SCRIPT_DIR/masks/$base"
+            echo "Seeded mask: $base"
+        fi
+    done
+fi
 
 if [ ! -f "$SERVER_CONFIG_PATH" ]; then
     cp "$SCRIPT_DIR/config/server.json.example" "$SERVER_CONFIG_PATH"

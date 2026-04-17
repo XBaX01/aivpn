@@ -24,6 +24,7 @@ struct ServerFileConfig {
     tun_addr: Option<Ipv4Addr>,
     tun_netmask: Option<Ipv4Addr>,
     network_config: Option<VpnNetworkConfig>,
+    mask_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -131,6 +132,7 @@ async fn main() {
         enable_neural: true,
         neural_config: NeuralConfig::default(),
         client_db: Some(client_db),
+        mask_dir: resolve_mask_dir(&args, file_config.as_ref()),
     };
 
     // Create and run server
@@ -408,6 +410,21 @@ fn resolve_listen_addr(args: &ServerArgs, file_config: Option<&ServerFileConfig>
     }
 }
 
+/// Resolve mask directory: CLI --mask-dir / env AIVPN_MASK_DIR → server.json "mask_dir" → default
+const DEFAULT_MASK_DIR: &str = "/var/lib/aivpn/masks";
+
+fn resolve_mask_dir(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -> PathBuf {
+    // CLI/env already handled by clap (env = "AIVPN_MASK_DIR")
+    if let Some(ref dir) = args.mask_dir {
+        return PathBuf::from(dir);
+    }
+    // server.json
+    if let Some(ref dir) = file_config.and_then(|c| c.mask_dir.clone()) {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(DEFAULT_MASK_DIR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +443,7 @@ mod tests {
             show_client: None,
             server_ip: None,
             per_ip_pps_limit: 1000,
+            mask_dir: None,
         }
     }
 
@@ -454,6 +472,7 @@ mod tests {
                 server_vpn_ip: Ipv4Addr::new(10, 0, 0, 1),
                 prefix_len: 24,
                 mtu: 1346,
+                mdh_len: 20,
             },
         );
         let payload = key.strip_prefix("aivpn://").unwrap();
@@ -478,6 +497,7 @@ mod tests {
                 prefix_len: 24,
                 mtu: 1400,
             }),
+            mask_dir: None,
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();

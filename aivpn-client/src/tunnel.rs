@@ -69,6 +69,7 @@ impl TunnelConfig {
             server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
+            mdh_len: 20,
         };
         network_config.validate()?;
         Ok(network_config)

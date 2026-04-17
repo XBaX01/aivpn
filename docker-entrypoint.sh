@@ -6,7 +6,7 @@ CONFIG_PATH="$CONFIG_DIR/server.json"
 CONFIG_TEMPLATE="/usr/share/aivpn/server.json.example"
 KEY_PATH="$CONFIG_DIR/server.key"
 
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$CONFIG_DIR" /var/lib/aivpn/masks
 
 if [ ! -f "$CONFIG_PATH" ]; then
     cp "$CONFIG_TEMPLATE" "$CONFIG_PATH"
