@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
 
-use aivpn_common::mask::MaskProfile;
+use aivpn_common::mask::{MaskProfile, preset_masks};
 use aivpn_common::error::Result;
 
 use crate::gateway::MaskCatalog;
@@ -60,6 +60,7 @@ impl MaskStore {
             catalog,
             storage_dir,
         };
+        store.bootstrap_builtin_masks();
         // Load existing masks from disk
         store.load_from_disk();
         store
@@ -99,6 +100,7 @@ impl MaskStore {
                 1.0
             };
             entry.stats.last_used = Some(current_unix_secs());
+            self.save_stats_to_disk(mask_id, &entry.stats);
         }
     }
 
@@ -118,6 +120,7 @@ impl MaskStore {
                 && entry.stats.times_used > MIN_USAGES_FOR_DEACTIVATION
             {
                 entry.stats.is_active = false;
+                self.catalog.remove_mask(mask_id);
                 warn!(
                     "Mask '{}' deactivated: success={:.1}% ({}/{} failures)",
                     mask_id,
@@ -126,6 +129,7 @@ impl MaskStore {
                     entry.stats.times_used
                 );
             }
+            self.save_stats_to_disk(mask_id, &entry.stats);
         }
     }
 
@@ -142,6 +146,7 @@ impl MaskStore {
     /// Delete a mask
     pub fn delete_mask(&self, mask_id: &str) {
         self.masks.remove(mask_id);
+        self.catalog.remove_mask(mask_id);
         // Remove disk files
         let json_path = self.storage_dir.join(format!("{}.json", mask_id));
         let stats_path = self.storage_dir.join(format!("{}.stats", mask_id));
@@ -162,6 +167,46 @@ impl MaskStore {
         Ok(())
     }
 
+    fn save_stats_to_disk(&self, mask_id: &str, stats: &MaskStats) {
+        let _ = std::fs::create_dir_all(&self.storage_dir);
+        let stats_path = self.storage_dir.join(format!("{}.stats", mask_id));
+        match serde_json::to_string_pretty(stats) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&stats_path, json) {
+                    error!("Failed to save mask stats {}: {}", mask_id, e);
+                }
+            }
+            Err(e) => error!("Failed to serialize mask stats {}: {}", mask_id, e),
+        }
+    }
+
+    fn bootstrap_builtin_masks(&self) {
+        let _ = std::fs::create_dir_all(&self.storage_dir);
+        for profile in preset_masks::all() {
+            let mask_id = profile.mask_id.clone();
+            let json_path = self.storage_dir.join(format!("{}.json", mask_id));
+            let stats_path = self.storage_dir.join(format!("{}.stats", mask_id));
+            if json_path.exists() && stats_path.exists() {
+                continue;
+            }
+            let entry = MaskEntry {
+                profile,
+                stats: MaskStats {
+                    mask_id: mask_id.clone(),
+                    times_used: 0,
+                    times_failed: 0,
+                    success_rate: 1.0,
+                    confidence: 1.0,
+                    is_active: true,
+                    created_by: "builtin".into(),
+                    created_at: current_unix_secs(),
+                    last_used: None,
+                },
+            };
+            self.save_to_disk(&mask_id, &entry);
+        }
+    }
+
     /// Save mask entry to disk
     fn save_to_disk(&self, mask_id: &str, entry: &MaskEntry) {
         let _ = std::fs::create_dir_all(&self.storage_dir);
@@ -176,15 +221,7 @@ impl MaskStore {
             Err(e) => error!("Failed to serialize mask profile {}: {}", mask_id, e),
         }
 
-        let stats_path = self.storage_dir.join(format!("{}.stats", mask_id));
-        match serde_json::to_string_pretty(&entry.stats) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&stats_path, json) {
-                    error!("Failed to save mask stats {}: {}", mask_id, e);
-                }
-            }
-            Err(e) => error!("Failed to serialize mask stats {}: {}", mask_id, e),
-        }
+        self.save_stats_to_disk(mask_id, &entry.stats);
     }
 
     /// Load masks from disk on startup
@@ -240,8 +277,10 @@ impl MaskStore {
 
                 info!("Loaded mask '{}' from disk (success: {:.1}%)", mask_id, stats.success_rate * 100.0);
 
-                // Register in catalog
-                self.catalog.register_mask(profile.clone());
+                // Register only active masks in the live catalog
+                if stats.is_active {
+                    self.catalog.register_mask(profile.clone());
+                }
 
                 self.masks.insert(mask_id, MaskEntry { profile, stats });
             }

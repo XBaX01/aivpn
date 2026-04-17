@@ -62,6 +62,8 @@ pub struct Session {
     pub last_seen: Instant,
     /// Created timestamp
     pub created_at: Instant,
+    /// Last server-to-client packet timestamp (for downlink recording IAT)
+    pub last_server_send: Instant,
     
     /// Current mask profile
     pub mask: Option<MaskProfile>,
@@ -171,6 +173,7 @@ impl Session {
             counter: 0,
             last_seen: now,
             created_at: now,
+            last_server_send: now,
             mask: None,
             fsm_state: 0,
             fsm_packets: 0,
@@ -552,11 +555,12 @@ impl SessionManager {
 
     /// Remove all sessions for a given IP except the specified one.
     /// Called after a new handshake is validated to clean up stale sessions.
+    /// Returns list of removed session IDs (for stopping recordings).
     pub fn cleanup_old_sessions_for_ip(
         &self,
         ip: &std::net::IpAddr,
         keep_session_id: &[u8; 16],
-    ) {
+    ) -> Vec<[u8; 16]> {
         let to_remove: Vec<[u8; 16]> = self.sessions.iter()
             .filter_map(|entry| {
                 let session = entry.value().lock();
@@ -568,20 +572,25 @@ impl SessionManager {
             })
             .collect();
 
+        let mut removed = Vec::new();
         for session_id in to_remove {
             info!("Removing stale session for IP {} after successful re-handshake", ip);
-            self.remove_session(&session_id);
+            if self.remove_session(&session_id).is_some() {
+                removed.push(session_id);
+            }
         }
+        removed
     }
 
     /// Remove old sessions for the same VPN IP (same client) except the
     /// specified one. Unlike `cleanup_old_sessions_for_ip`, this does NOT
     /// affect sessions belonging to other clients behind the same NAT.
+    /// Returns list of removed session IDs (for stopping recordings).
     pub fn cleanup_old_sessions_for_vpn_ip(
         &self,
         vpn_ip: &Ipv4Addr,
         keep_session_id: &[u8; 16],
-    ) {
+    ) -> Vec<[u8; 16]> {
         let to_remove: Vec<[u8; 16]> = self.sessions.iter()
             .filter_map(|entry| {
                 let session = entry.value().lock();
@@ -593,10 +602,14 @@ impl SessionManager {
             })
             .collect();
 
+        let mut removed = Vec::new();
         for session_id in to_remove {
             info!("Removing stale session for VPN IP {} after successful re-handshake", vpn_ip);
-            self.remove_session(&session_id);
+            if self.remove_session(&session_id).is_some() {
+                removed.push(session_id);
+            }
         }
+        removed
     }
 
     /// Rollback a session that was created but failed tag validation.
@@ -761,8 +774,9 @@ impl SessionManager {
         }
     }
     
-    /// Remove session
-    pub fn remove_session(&self, session_id: &[u8; 16]) {
+    /// Remove session and return its ID if it existed.
+    /// The returned session_id can be used to stop active recording.
+    pub fn remove_session(&self, session_id: &[u8; 16]) -> Option<[u8; 16]> {
         if let Some((_, session)) = self.sessions.remove(session_id) {
             let sess = session.lock();
             // Remove all tags from tag map (initial + ratcheted)
@@ -777,6 +791,9 @@ impl SessionManager {
             if let Some(vpn_ip) = sess.vpn_ip {
                 self.vpn_ip_map.remove_if(&vpn_ip, |_, sid| sid == session_id);
             }
+            Some(*session_id)
+        } else {
+            None
         }
     }
     
@@ -813,17 +830,22 @@ impl SessionManager {
         }
     }
     
-    /// Cleanup expired sessions
-    pub fn cleanup_expired(&self) {
+    /// Cleanup expired sessions and return list of removed session IDs.
+    /// The returned IDs can be used to stop active recordings.
+    pub fn cleanup_expired(&self) -> Vec<[u8; 16]> {
         let expired: Vec<[u8; 16]> = self.sessions
             .iter()
             .filter(|e| e.value().lock().is_expired() || e.value().lock().is_idle())
             .map(|e| *e.key())
             .collect();
         
+        let mut removed = Vec::new();
         for session_id in expired {
-            self.remove_session(&session_id);
+            if self.remove_session(&session_id).is_some() {
+                removed.push(session_id);
+            }
         }
+        removed
     }
     
     /// Get active session count

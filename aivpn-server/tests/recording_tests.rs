@@ -9,7 +9,7 @@ use aivpn_common::recording::*;
 use aivpn_common::protocol::ControlPayload;
 use aivpn_server::gateway::MaskCatalog;
 use aivpn_server::mask_store::{MaskStore, MaskEntry, MaskStats};
-use aivpn_server::recording::RecordingManager;
+use aivpn_server::recording::{RecordingManager, RecordingStopOutcome};
 
 /// Generate realistic packet metadata that simulates a video call
 fn generate_video_call_packets(count: usize) -> Vec<PacketMetadata> {
@@ -247,7 +247,7 @@ fn test_recording_manager_lifecycle() {
 
     // Stop (will fail has_enough_data since duration < 60s and packets < 500)
     let result = manager.stop(session_id);
-    assert!(result.is_none()); // Not enough data
+    assert!(matches!(result, RecordingStopOutcome::Incomplete(_))); // Not enough data
 
     // No longer recording
     assert!(!manager.is_recording(&session_id));
@@ -436,10 +436,10 @@ async fn test_end_to_end_recording() {
     let stopped = manager.stop(session_id);
     assert!(!manager.is_recording(&session_id));
 
-    // Since duration is < 60s, stop returns None
+    // Since duration is < 60s, stop returns Incomplete
     println!(
-        "   Stop result: {} (expected None due to short duration)",
-        if stopped.is_some() { "Some" } else { "None" }
+        "   Stop result: {} (expected Incomplete due to short duration)",
+        if matches!(stopped, RecordingStopOutcome::Incomplete(_)) { "Incomplete" } else { "Other" }
     );
 
     // 4. Test direct pipeline instead (bypassing duration check)

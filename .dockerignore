@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+*.md
+releases/
+docs/
+monitoring/
+.qoder/
+.venv/
+*.log
+.DS_Store
+config/*.json
+!config/*.example

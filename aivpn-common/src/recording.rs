@@ -89,6 +89,8 @@ pub struct RecordingSession {
     pub admin_key_id: String,
     /// When recording started
     pub started_at: Instant,
+    /// When the most recent packet was captured
+    pub last_packet_at: Instant,
     /// Collected packet metadata (capped at MAX_RECORDING_PACKETS)
     pub packets: Vec<PacketMetadata>,
     /// Total packets observed (may exceed stored packets)
@@ -106,6 +108,9 @@ pub const MIN_RECORDING_PACKETS: u64 = 500;
 /// Minimum recording duration in seconds
 pub const MIN_RECORDING_DURATION_SECS: u64 = 60;
 
+/// Idle timeout after which an inactive recording is auto-finished
+pub const RECORDING_IDLE_TIMEOUT_SECS: u64 = 15;
+
 impl RecordingSession {
     /// Create a new recording session
     pub fn new(session_id: [u8; 16], service: String, admin_key_id: String) -> Self {
@@ -114,6 +119,7 @@ impl RecordingSession {
             service,
             admin_key_id,
             started_at: Instant::now(),
+            last_packet_at: Instant::now(),
             packets: Vec::with_capacity(50_000),
             total_packets: 0,
             running_stats: RunningStats::default(),
@@ -126,6 +132,7 @@ impl RecordingSession {
             self.packets.push(meta.clone());
         }
         self.total_packets += 1;
+        self.last_packet_at = Instant::now();
         self.running_stats.update(&meta);
     }
 
@@ -138,5 +145,10 @@ impl RecordingSession {
     /// Get recording duration in seconds
     pub fn duration_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()
+    }
+
+    /// Check whether the session has been idle long enough to auto-finish.
+    pub fn is_idle_timed_out(&self, idle_timeout_secs: u64) -> bool {
+        self.last_packet_at.elapsed().as_secs() >= idle_timeout_secs
     }
 }

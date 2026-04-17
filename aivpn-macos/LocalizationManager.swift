@@ -131,6 +131,66 @@ class LocalizationManager: ObservableObject {
             "en": "Save",
             "ru": "Сохранить"
         ],
+        "record_new_mask": [
+            "en": "Record New Mask",
+            "ru": "Записать новую маску"
+        ],
+        "stop_recording": [
+            "en": "Stop Recording",
+            "ru": "Остановить запись"
+        ],
+        "record_service_name": [
+            "en": "Mask Service Name",
+            "ru": "Имя сервиса для маски"
+        ],
+        "recording_ready": [
+            "en": "Recording availability is checked by the server when you start",
+            "ru": "Доступ к записи проверяется сервером при запуске"
+        ],
+        "recording_connect_required": [
+            "en": "Connect before starting mask recording",
+            "ru": "Сначала подключитесь перед записью маски"
+        ],
+        "recording_starting": [
+            "en": "Starting recording...",
+            "ru": "Запуск записи..."
+        ],
+        "recording_active": [
+            "en": "Recording in progress. Use the service normally.",
+            "ru": "Запись идёт. Используйте сервис как обычно."
+        ],
+        "recording_stopping": [
+            "en": "Stopping recording...",
+            "ru": "Останавливаем запись..."
+        ],
+        "recording_analyzing": [
+            "en": "Recording finished. Server is analyzing traffic.",
+            "ru": "Запись завершена. Сервер анализирует трафик."
+        ],
+        "recording_success": [
+            "en": "Mask recorded successfully",
+            "ru": "Маска успешно записана"
+        ],
+        "recording_failed": [
+            "en": "Mask recording failed",
+            "ru": "Запись маски не удалась"
+        ],
+        "recording_self_test_failed": [
+            "en": "Mask did not pass verification",
+            "ru": "Маска не прошла проверку"
+        ],
+        "recording_result_success_title": [
+            "en": "Last recording result: saved",
+            "ru": "Последний результат записи: маска сохранена"
+        ],
+        "recording_result_failed_title": [
+            "en": "Last recording result: not saved",
+            "ru": "Последний результат записи: маска не сохранена"
+        ],
+        "dismiss": [
+            "en": "Dismiss",
+            "ru": "Скрыть"
+        ],
     ]
 
     init() {

@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     iptables \
     iproute2 \
     netcat-openbsd \
+    python3 \
     bc \
     && rm -rf /var/lib/apt/lists/*
 

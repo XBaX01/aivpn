@@ -67,6 +67,8 @@ pub enum RecordAction {
     },
     /// Stop the current recording and generate a mask
     Stop,
+    /// Show the last known recording capability/state from the running client daemon
+    Status,
 }
 
 // Global shutdown flag
@@ -99,14 +101,45 @@ async fn main() {
     if let Some(command) = args.command {
         match command {
             ClientCommand::Record { action } => {
-                let msg = match action {
-                    RecordAction::Start { service } => format!("record_start:{}", service),
-                    RecordAction::Stop => "record_stop".to_string(),
-                };
-                // Send UDP to the daemon
-                let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                socket.send_to(msg.as_bytes(), "127.0.0.1:44301").unwrap();
-                println!("Command sent to client daemon.");
+                match action {
+                    RecordAction::Start { service } => {
+                        aivpn_client::record_cmd::handle_recording_status(true, Some(&service));
+                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                        socket.send_to(format!("record_start:{}", service).as_bytes(), "127.0.0.1:44301").unwrap();
+                        println!("Recording start requested for '{}'.", service);
+                        println!("Run 'aivpn-client record status' to inspect progress.");
+                    }
+                    RecordAction::Stop => {
+                        let prior = aivpn_client::record_cmd::read_local_status();
+                        aivpn_client::record_cmd::mark_recording_stop_requested(prior.as_ref().and_then(|status| status.service.as_deref()));
+                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                        socket.send_to(b"record_stop", "127.0.0.1:44301").unwrap();
+                        println!("Recording stop requested.");
+                        println!("Run 'aivpn-client record status' to inspect progress.");
+                    }
+                    RecordAction::Status => {
+                        let before = aivpn_client::record_cmd::read_local_status().map(|status| status.updated_at_ms).unwrap_or(0);
+                        if let Ok(socket) = std::net::UdpSocket::bind("127.0.0.1:0") {
+                            let _ = socket.send_to(b"record_status", "127.0.0.1:44301");
+                        }
+                        let start = std::time::Instant::now();
+                        let mut latest = None;
+                        while start.elapsed() < std::time::Duration::from_secs(2) {
+                            if let Some(status) = aivpn_client::record_cmd::read_local_status() {
+                                if status.updated_at_ms >= before {
+                                    latest = Some(status);
+                                    break;
+                                }
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        if let Some(status) = latest.or_else(aivpn_client::record_cmd::read_local_status) {
+                            aivpn_client::record_cmd::print_local_status(&status);
+                        } else {
+                            println!("No recording status is available yet.");
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -234,6 +267,7 @@ async fn main() {
                 // Write initial stats file
                 let _ = std::fs::write("/var/run/aivpn/traffic.stats", "sent:0,received:0");
                 let _ = std::fs::write("/tmp/aivpn-traffic.stats", "sent:0,received:0");
+                aivpn_client::record_cmd::reset_local_status();
 
                 match client.run(shutdown.clone()).await {
                     Ok(()) => break,

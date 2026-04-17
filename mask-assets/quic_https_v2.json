@@ -1,0 +1,44 @@
+{
+  "mask_id": "quic_https_v2",
+  "version": 2,
+  "created_at": 0,
+  "expires_at": 18446744073709551615,
+  "spoof_protocol": "QUIC",
+  "header_template": [192, 0, 0, 0, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0],
+  "eph_pub_offset": 14,
+  "eph_pub_length": 32,
+  "size_distribution": {
+    "dist_type": "Histogram",
+    "bins": [
+      [64, 128, 0.3],
+      [256, 512, 0.4],
+      [768, 1200, 0.3]
+    ],
+    "parametric_type": null,
+    "parametric_params": null
+  },
+  "iat_distribution": {
+    "dist_type": "Exponential",
+    "params": [0.1],
+    "jitter_range_ms": [0.0, 10.0]
+  },
+  "padding_strategy": "MatchDistribution",
+  "fsm_states": [
+    {
+      "state_id": 0,
+      "transitions": []
+    }
+  ],
+  "fsm_initial_state": 0,
+  "signature_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  "reverse_profile": null,
+  "header_spec": {
+    "type": "Structured",
+    "fields": [
+      { "kind": "Fixed", "bytes": [192] },
+      { "kind": "Fixed", "bytes": [0, 0, 0, 1] },
+      { "kind": "Fixed", "bytes": [8] },
+      { "kind": "Id", "len": 8, "mode": "Random" }
+    ]
+  }
+}

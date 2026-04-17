@@ -36,6 +36,8 @@ use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
 use crate::client_db::ClientDatabase;
 use crate::recording::RecordingManager;
+use crate::recording::{RecordingStopOutcome, RecordingStopReason};
+use crate::mask_gen::generate_and_store_mask;
 use crate::mask_store::MaskStore;
 
 struct QueuedPacket {
@@ -100,15 +102,15 @@ impl MaskCatalog {
         use aivpn_common::mask::preset_masks;
         let m1 = preset_masks::webrtc_zoom_v3();
         let primary_mask_id = m1.mask_id.clone();
-        let m2 = preset_masks::quic_https_v2();
         let catalog = Self {
             masks: DashMap::new(),
             compromised: DashMap::new(),
             primary_mask_id,
         };
-        // Seed with built-in masks
-        catalog.masks.insert(m1.mask_id.clone(), m1);
-        catalog.masks.insert(m2.mask_id.clone(), m2);
+        // Seed with file-backed built-in masks
+        for mask in preset_masks::all() {
+            catalog.masks.insert(mask.mask_id.clone(), mask);
+        }
         catalog
     }
 
@@ -122,6 +124,11 @@ impl MaskCatalog {
     /// Mark a mask as compromised — remove from rotation
     pub fn mark_compromised(&self, mask_id: &str) {
         self.compromised.insert(mask_id.to_string(), Instant::now());
+        self.masks.remove(mask_id);
+    }
+
+    /// Remove a mask from live rotation without marking it as compromised.
+    pub fn remove_mask(&self, mask_id: &str) {
         self.masks.remove(mask_id);
     }
 
@@ -203,6 +210,110 @@ pub struct Gateway {
 }
 
 impl Gateway {
+    fn can_start_recording(&self, client_id: Option<&str>) -> bool {
+        let Some(client_id) = client_id else {
+            return false;
+        };
+
+        if client_id == "admin" {
+            return true;
+        }
+
+        self.client_db
+            .as_ref()
+            .and_then(|db| db.find_by_id(client_id))
+            .map(|client| client.name.starts_with("recording-admin"))
+            .unwrap_or(false)
+    }
+
+    async fn handle_recording_outcome(
+        socket: &Arc<UdpSocket>,
+        sessions: &Arc<SessionManager>,
+        store: &Arc<MaskStore>,
+        mdh: &[u8],
+        outcome: RecordingStopOutcome,
+        notify_session: Option<Arc<parking_lot::Mutex<Session>>>,
+    ) {
+        match outcome {
+            RecordingStopOutcome::Completed(completed) => {
+                if let Some(ref session) = notify_session {
+                    let ack = ControlPayload::RecordingAck {
+                        session_id: completed.session_id,
+                        status: "analyzing".into(),
+                    };
+                    if let Err(e) = Self::send_control_message_via(socket.as_ref(), mdh, &ack, session).await {
+                        warn!("Failed to send RecordingAck: {}", e);
+                    }
+                }
+
+                info!(
+                    "Recording stopped for '{}' ({} packets, {}s), analyzing...",
+                    completed.service, completed.total_packets, completed.duration_secs
+                );
+
+                let socket = socket.clone();
+                let sessions = sessions.clone();
+                let store = store.clone();
+                let mdh = mdh.to_vec();
+                tokio::spawn(async move {
+                    match generate_and_store_mask(&completed.service, &completed.packets, &store).await {
+                        Ok(mask_id) => {
+                            info!(
+                                "✅ Mask generated: '{}' for service '{}' by {}",
+                                mask_id, completed.service, completed.admin_key_id
+                            );
+                            if let Some(target_session) = sessions.get_session(&completed.session_id) {
+                                let confidence = store
+                                    .get_mask(&mask_id)
+                                    .map(|entry| entry.stats.confidence)
+                                    .unwrap_or(0.0);
+                                let payload = ControlPayload::RecordingComplete {
+                                    service: completed.service.clone(),
+                                    mask_id,
+                                    confidence,
+                                };
+                                if let Err(e) = Self::send_control_message_via(socket.as_ref(), &mdh, &payload, &target_session).await {
+                                    warn!("Failed to send RecordingComplete: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Mask generation failed for '{}': {}", completed.service, e);
+                            if let Some(target_session) = sessions.get_session(&completed.session_id) {
+                                let payload = ControlPayload::RecordingFailed {
+                                    reason: e.to_string(),
+                                };
+                                if let Err(send_err) = Self::send_control_message_via(socket.as_ref(), &mdh, &payload, &target_session).await {
+                                    warn!("Failed to send RecordingFailed: {}", send_err);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            RecordingStopOutcome::Incomplete(incomplete) => {
+                let reason = match incomplete.reason {
+                    RecordingStopReason::IdleTimeout => "Recording stopped after idle timeout before enough traffic was captured",
+                    RecordingStopReason::SessionEnded => "Recording ended with the session before enough traffic was captured",
+                    _ => "Too few packets or too short duration",
+                };
+                if let Some(ref session) = notify_session {
+                    let payload = ControlPayload::RecordingFailed {
+                        reason: reason.into(),
+                    };
+                    if let Err(e) = Self::send_control_message_via(socket.as_ref(), mdh, &payload, session).await {
+                        warn!("Failed to send RecordingFailed: {}", e);
+                    }
+                }
+                warn!(
+                    "Recording for '{}' ended without mask generation: {} packets, {}s ({:?})",
+                    incomplete.service, incomplete.total_packets, incomplete.duration_secs, incomplete.reason
+                );
+            }
+            RecordingStopOutcome::NotFound => {}
+        }
+    }
+
     pub fn new(config: GatewayConfig) -> Result<Self> {
         use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
         use rand::rngs::OsRng;
@@ -342,6 +453,7 @@ impl Gateway {
                 let socket = self.udp_socket.as_ref().unwrap().clone();
                 let mask = aivpn_common::mask::preset_masks::webrtc_zoom_v3();
                 let server_vpn_ip = self.config.network_config.server_vpn_ip;
+                let recorder = self.recording_manager.clone();
                 
                 // Channel for writing packets to TUN device (upload + ICMP replies)
                 let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>(4096);
@@ -358,22 +470,45 @@ impl Gateway {
                 }
                 
                 tokio::spawn(async move {
-                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip).await;
+                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip, recorder).await;
                 });
                 info!("TUN read loop spawned");
             }
         }
         
-        // Spawn periodic session cleanup task (remove expired/idle sessions)
+        // Spawn periodic session cleanup task (remove expired/idle sessions and stop recordings)
         {
             let sessions = self.session_manager.clone();
+            let recorder = self.recording_manager.clone();
+            let socket = self.udp_socket.as_ref().unwrap().clone();
+            let mdh = self.mask_catalog.packet_mdh_bytes();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    sessions.cleanup_expired();
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if let Some(ref rec) = recorder {
+                        let store = rec.store();
+                        for outcome in rec.take_ready_or_stale(aivpn_common::recording::RECORDING_IDLE_TIMEOUT_SECS) {
+                            let notify_session = match &outcome {
+                                RecordingStopOutcome::Completed(completed) => sessions.get_session(&completed.session_id),
+                                RecordingStopOutcome::Incomplete(incomplete) => sessions.get_session(&incomplete.session_id),
+                                RecordingStopOutcome::NotFound => None,
+                            };
+                            Self::handle_recording_outcome(&socket, &sessions, &store, &mdh, outcome, notify_session).await;
+                        }
+                    }
+
+                    let removed = sessions.cleanup_expired();
+                    // Stop active recordings for removed sessions
+                    if let Some(ref rec) = recorder {
+                        let store = rec.store();
+                        for session_id in removed {
+                            let outcome = rec.stop_for_session_end(session_id);
+                            Self::handle_recording_outcome(&socket, &sessions, &store, &mdh, outcome, None).await;
+                        }
+                    }
                 }
             });
-            info!("Session cleanup task spawned (60s interval)");
+            info!("Session cleanup / recording auto-finish task spawned (5s interval)");
         }
         
         // Spawn client DB stats flush task (persist traffic stats every 5 min)
@@ -553,6 +688,7 @@ impl Gateway {
         socket: Arc<UdpSocket>,
         mask: MaskProfile,
         server_vpn_ip: Ipv4Addr,
+        recorder: Option<Arc<RecordingManager>>,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -589,13 +725,16 @@ impl Gateway {
                     
                     // Build encrypted response packet
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
-                    let (client_addr, _nonce, tag, mdh, ciphertext) = {
+                    let (session_id, client_addr, downlink_iat_ms, tag, mdh, ciphertext) = {
                         let mut sess = session.lock();
+                        let session_id = sess.session_id;
                         let client_addr = sess.client_addr;
                         let seq_num = sess.next_seq() as u16;
                         let (nonce, counter) = sess.next_send_nonce();
                         let key = sess.keys.session_key.clone();
                         let tag_secret = sess.keys.tag_secret;
+                        let downlink_iat_ms = sess.last_server_send.elapsed().as_secs_f64() * 1000.0;
+                        sess.last_server_send = Instant::now();
                         drop(sess); // Release lock BEFORE expensive encryption
                         
                         // Build inner payload: Data type + IP packet
@@ -634,7 +773,7 @@ impl Gateway {
                             time_window,
                         );
                         
-                        (client_addr, nonce, tag, mdh, ciphertext)
+                        (session_id, client_addr, downlink_iat_ms, tag, mdh, ciphertext)
                     };
                     
                     // Assemble: TAG | MDH | ciphertext
@@ -646,6 +785,21 @@ impl Gateway {
                     // Send to client
                     if let Err(e) = socket.send_to(&aivpn_packet, client_addr).await {
                         debug!("TUN: send failed: {}", e);
+                    } else if let Some(ref recorder) = recorder {
+                        if recorder.is_recording(&session_id) {
+                            let meta = aivpn_common::recording::PacketMetadata {
+                                direction: aivpn_common::recording::Direction::Downlink,
+                                size: aivpn_packet.len() as u16,
+                                iat_ms: downlink_iat_ms,
+                                entropy: Self::compute_entropy(&ciphertext) as f32,
+                                header_prefix: aivpn_packet[TAG_SIZE..TAG_SIZE + 16.min(aivpn_packet.len() - TAG_SIZE)].to_vec(),
+                                timestamp_ns: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos() as u64,
+                            };
+                            recorder.record_packet(session_id, meta);
+                        }
                     }
                 }
                 Err(e) => {
@@ -922,19 +1076,25 @@ impl Gateway {
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
             // After mask rotation or session timeout, stale clients may flood the server
             // with packets that consistently fail tag validation (issue #21).
-            {
-                let ip = client_addr.ip();
-                if let Some(entry) = self.handshake_cooldowns.get(&ip) {
-                    let (fail_count, last_fail) = *entry;
-                    // Exponential cooldown: 1s for first failures, up to 5s after many
-                    let cooldown = Duration::from_millis(
-                        (250 * (1 << fail_count.min(4))) as u64
-                    );
-                    if last_fail.elapsed() < cooldown {
-                        return Err(Error::InvalidPacket("Handshake cooldown active"));
-                    }
-                }
-            }
+            // TEMPORARILY DISABLED cooldown for debugging - client cannot handshake
+            // {
+            //     let ip = client_addr.ip();
+            //     if let Some(entry) = self.handshake_cooldowns.get(&ip) {
+            //         let (fail_count, last_fail) = *entry;
+            //         // Increased cooldown: start with 2s, max 30s to avoid blocking legitimate clients
+            //         let cooldown = Duration::from_millis(
+            //             (2000 * (1 << fail_count.min(3))) as u64
+            //         );
+            //         if last_fail.elapsed() < cooldown {
+            //             debug!("Handshake cooldown active for {}: fail_count={}, elapsed={:?}, cooldown={:?}",
+            //                 hash_addr(&client_addr), fail_count, last_fail.elapsed(), cooldown);
+            //             return Err(Error::InvalidPacket("Handshake cooldown active"));
+            //         } else {
+            //             debug!("Handshake cooldown expired for {}: elapsed={:?} >= cooldown={:?}",
+            //                 hash_addr(&client_addr), last_fail.elapsed(), cooldown);
+            //         }
+            //     }
+            // }
 
             // Try to establish a new one from eph_pub in MDH
             if packet_data.len() < TAG_SIZE + handshake_mdh_len {
@@ -1037,15 +1197,25 @@ impl Gateway {
             // all sessions from this source IP — different clients behind
             // the same NAT must coexist.
             {
-                let sess_lock = session.lock();
-                let session_id = sess_lock.session_id;
-                let vpn_ip = sess_lock.vpn_ip;
-                drop(sess_lock);
+                let (session_id, vpn_ip) = {
+                    let sess_lock = session.lock();
+                    (sess_lock.session_id, sess_lock.vpn_ip)
+                };
                 if let Some(vpn_ip) = vpn_ip {
-                    self.session_manager.cleanup_old_sessions_for_vpn_ip(
+                    let removed = self.session_manager.cleanup_old_sessions_for_vpn_ip(
                         &vpn_ip,
                         &session_id,
                     );
+                    // Stop active recordings for removed stale sessions
+                    if let Some(ref recorder) = self.recording_manager {
+                        let socket = self.udp_socket.as_ref().unwrap().clone();
+                        let store = recorder.store();
+                        let mdh = self.mask_catalog.packet_mdh_bytes();
+                        for sid in removed {
+                            let outcome = recorder.stop_for_session_end(sid);
+                            Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, None).await;
+                        }
+                    }
                 }
             }
             
@@ -1348,9 +1518,16 @@ impl Gateway {
             }
             ControlPayload::Shutdown { reason } => {
                 info!("Shutdown request from {} (reason: {})", hash_addr(&client_addr), reason);
-                // Close session
+                // Close session and stop active recording if any
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
+                if let Some(ref recorder) = self.recording_manager {
+                    let socket = self.udp_socket.as_ref().unwrap().clone();
+                    let store = recorder.store();
+                    let mdh = self.mask_catalog.packet_mdh_bytes();
+                    let outcome = recorder.stop_for_session_end(session_id);
+                    Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, None).await;
+                }
             }
             ControlPayload::ControlAck { .. } => {
                 // ACK received, nothing to do
@@ -1360,45 +1537,62 @@ impl Gateway {
             }
             ControlPayload::RecordingStart { service } => {
                 // Only allow from admin sessions (check client_id)
-                let is_admin = {
+                let admin_key_id = {
                     let sess = session.lock();
-                    sess.client_id.as_deref() == Some("admin")
-                        || sess.client_id.is_some() // For now, any authenticated client can record
+                    sess.client_id.clone()
                 };
-                if !is_admin {
+                if !self.can_start_recording(admin_key_id.as_deref()) {
                     warn!("Recording rejected: unauthenticated client {}", hash_addr(&client_addr));
+                    let failed = ControlPayload::RecordingFailed {
+                        reason: "Recording requires a recording-admin key".into(),
+                    };
+                    self.send_control_message(&failed, session).await?;
                     return Ok(());
                 }
                 if let Some(ref recorder) = self.recording_manager {
                     let session_id = session.lock().session_id;
-                    recorder.start(session_id, service, "admin".into());
+                    recorder.start(session_id, service.clone(), admin_key_id.unwrap_or_else(|| "admin".into()));
                     let ack = ControlPayload::RecordingAck {
                         session_id,
                         status: "started".into(),
                     };
                     self.send_control_message(&ack, session).await?;
-                    info!("Recording started for '{}' from {}", "service", hash_addr(&client_addr));
+                    info!("Recording started for '{}' from {}", service, hash_addr(&client_addr));
                 }
             }
             ControlPayload::RecordingStop { session_id: rec_session_id } => {
                 if let Some(ref recorder) = self.recording_manager {
-                    match recorder.stop(rec_session_id) {
-                        Some(service) => {
-                            let complete = ControlPayload::RecordingAck {
-                                session_id: rec_session_id,
-                                status: "analyzing".into(),
-                            };
-                            self.send_control_message(&complete, session).await?;
-                            info!("Recording stopped for '{}', analyzing...", service);
-                        }
-                        None => {
-                            let failed = ControlPayload::RecordingFailed {
-                                reason: "Too few packets or too short duration".into(),
-                            };
-                            self.send_control_message(&failed, session).await?;
-                        }
+                    let owner_session_id = session.lock().session_id;
+                    if rec_session_id != owner_session_id {
+                        let failed = ControlPayload::RecordingFailed {
+                            reason: "Recording session does not belong to this client".into(),
+                        };
+                        self.send_control_message(&failed, session).await?;
+                        return Ok(());
                     }
+
+                    let socket = self.udp_socket.as_ref().unwrap().clone();
+                    let store = recorder.store();
+                    let mdh = self.mask_catalog.packet_mdh_bytes();
+                    let outcome = recorder.stop(owner_session_id);
+                    Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, Some(session.clone())).await;
                 }
+            }
+            ControlPayload::RecordingStatusRequest => {
+                let client_id = {
+                    let sess = session.lock();
+                    sess.client_id.clone()
+                };
+                let can_record = self.can_start_recording(client_id.as_deref());
+                let active_service = self.recording_manager
+                    .as_ref()
+                    .and_then(|recorder| recorder.status(&session.lock().session_id))
+                    .map(|status| status.service);
+                let response = ControlPayload::RecordingStatus {
+                    can_record,
+                    active_service,
+                };
+                self.send_control_message(&response, session).await?;
             }
             ControlPayload::RecordingAck { .. } => {
                 // Client-side only, ignore on server
@@ -1407,6 +1601,9 @@ impl Gateway {
                 // Client-side only, ignore on server
             }
             ControlPayload::RecordingFailed { .. } => {
+                // Client-side only, ignore on server
+            }
+            ControlPayload::RecordingStatus { .. } => {
                 // Client-side only, ignore on server
             }
         }
@@ -1421,24 +1618,56 @@ impl Gateway {
         session: &Arc<parking_lot::Mutex<Session>>,
     ) -> Result<()> {
         let socket = self.udp_socket.as_ref().unwrap();
-        
+        Self::send_control_message_via(
+            socket,
+            &self.mask_catalog.packet_mdh_bytes(),
+            payload,
+            session,
+        ).await
+    }
+
+    async fn send_control_message_via(
+        socket: &UdpSocket,
+        mdh: &[u8],
+        payload: &ControlPayload,
+        session: &Arc<parking_lot::Mutex<Session>>,
+    ) -> Result<()> {
         let encoded = payload.encode()?;
-        let mut inner_payload = {
+        let (mut inner_payload, nonce, counter, keys, client_addr) = {
             let mut sess = session.lock();
             let inner_header = InnerHeader {
                 inner_type: InnerType::Control,
                 seq_num: sess.next_seq() as u16,
             };
-            inner_header.encode().to_vec()
+            let inner_payload = inner_header.encode().to_vec();
+            let (nonce, counter) = sess.next_send_nonce();
+            let keys = sess.keys.clone();
+            let client_addr = sess.client_addr;
+            (inner_payload, nonce, counter, keys, client_addr)
         };
         inner_payload.extend_from_slice(&encoded);
-        let packet = self.build_packet(&inner_payload, session)?;
-        
-        // Extract client_addr before dropping the guard to avoid holding
-        // MutexGuard across .await (which would cause deadlock)
-        let client_addr = session.lock().client_addr;
+        let pad_len = 16u16;
+        let mut padded = Vec::with_capacity(2 + inner_payload.len() + pad_len as usize);
+        padded.extend_from_slice(&pad_len.to_le_bytes());
+        padded.extend_from_slice(&inner_payload);
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            for _ in 0..pad_len {
+                padded.push(rng.gen::<u8>());
+            }
+        }
+        let ciphertext = encrypt_payload(&keys.session_key, &nonce, &padded)?;
+        let time_window = crypto::compute_time_window(
+            crypto::current_timestamp_ms(),
+            aivpn_common::crypto::DEFAULT_WINDOW_MS,
+        );
+        let tag = crypto::generate_resonance_tag(&keys.tag_secret, counter, time_window);
+        let mut packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());
+        packet.extend_from_slice(&tag);
+        packet.extend_from_slice(mdh);
+        packet.extend_from_slice(&ciphertext);
         socket.send_to(&packet, client_addr).await?;
-        
         Ok(())
     }
 

@@ -59,6 +59,8 @@ pub enum ControlSubtype {
     RecordingStop = 0x0C,
     RecordingComplete = 0x0D,
     RecordingFailed = 0x0E,
+    RecordingStatusRequest = 0x0F,
+    RecordingStatus = 0x10,
 }
 
 impl ControlSubtype {
@@ -78,6 +80,8 @@ impl ControlSubtype {
             0x0C => Some(Self::RecordingStop),
             0x0D => Some(Self::RecordingComplete),
             0x0E => Some(Self::RecordingFailed),
+            0x0F => Some(Self::RecordingStatusRequest),
+            0x10 => Some(Self::RecordingStatus),
             _ => None,
         }
     }
@@ -283,6 +287,13 @@ pub enum ControlPayload {
     RecordingFailed {
         reason: String,
     },
+    /// Client asks whether the current authenticated session may record masks.
+    RecordingStatusRequest,
+    /// Server reports recording capability and current active recording state.
+    RecordingStatus {
+        can_record: bool,
+        active_service: Option<String>,
+    },
 }
 
 impl ControlPayload {
@@ -371,6 +382,25 @@ impl ControlPayload {
                 let reason_bytes = reason.as_bytes();
                 buf.extend_from_slice(&(reason_bytes.len() as u16).to_le_bytes());
                 buf.extend_from_slice(reason_bytes);
+            }
+            Self::RecordingStatusRequest => {
+                buf.push(ControlSubtype::RecordingStatusRequest as u8);
+            }
+            Self::RecordingStatus { can_record, active_service } => {
+                buf.push(ControlSubtype::RecordingStatus as u8);
+                let mut flags = 0u8;
+                if *can_record {
+                    flags |= 0x01;
+                }
+                if active_service.is_some() {
+                    flags |= 0x02;
+                }
+                buf.push(flags);
+                if let Some(service) = active_service {
+                    let service_bytes = service.as_bytes();
+                    buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(service_bytes);
+                }
             }
         }
         
@@ -539,6 +569,28 @@ impl ControlPayload {
                 }
                 let reason = String::from_utf8_lossy(&data[3..3 + reason_len]).to_string();
                 Ok(Self::RecordingFailed { reason })
+            }
+            ControlSubtype::RecordingStatusRequest => Ok(Self::RecordingStatusRequest),
+            ControlSubtype::RecordingStatus => {
+                if data.len() < 2 {
+                    return Err(Error::InvalidPacket("RecordingStatus too short"));
+                }
+                let flags = data[1];
+                let can_record = (flags & 0x01) != 0;
+                let has_service = (flags & 0x02) != 0;
+                let active_service = if has_service {
+                    if data.len() < 4 {
+                        return Err(Error::InvalidPacket("RecordingStatus missing service length"));
+                    }
+                    let service_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+                    if data.len() < 4 + service_len {
+                        return Err(Error::InvalidPacket("RecordingStatus invalid service length"));
+                    }
+                    Some(String::from_utf8_lossy(&data[4..4 + service_len]).to_string())
+                } else {
+                    None
+                };
+                Ok(Self::RecordingStatus { can_record, active_service })
             }
         }
     }

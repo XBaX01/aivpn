@@ -1,0 +1,59 @@
+{
+  "mask_id": "webrtc_yandex_telemost_v1",
+  "version": 2,
+  "created_at": 0,
+  "expires_at": 18446744073709551615,
+  "spoof_protocol": "WebRTC_STUN",
+  "header_template": [0, 1, 0, 0, 33, 18, 164, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "eph_pub_offset": 20,
+  "eph_pub_length": 32,
+  "size_distribution": {
+    "dist_type": "Parametric",
+    "bins": [],
+    "parametric_type": "Bimodal",
+    "parametric_params": [4.5, 0.45]
+  },
+  "iat_distribution": {
+    "dist_type": "LogNormal",
+    "params": [2.3, 0.25],
+    "jitter_range_ms": [3.0, 15.0]
+  },
+  "padding_strategy": {
+    "RandomUniform": {
+      "min": 0,
+      "max": 48
+    }
+  },
+  "fsm_states": [
+    {
+      "state_id": 0,
+      "transitions": [
+        {
+          "condition": {
+            "AfterDuration": 4000
+          },
+          "next_state": 1,
+          "size_override": null,
+          "iat_override": null,
+          "padding_override": null
+        }
+      ]
+    },
+    {
+      "state_id": 1,
+      "transitions": []
+    }
+  ],
+  "fsm_initial_state": 0,
+  "signature_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  "reverse_profile": null,
+  "header_spec": {
+    "type": "Structured",
+    "fields": [
+      { "kind": "Fixed", "bytes": [0, 1] },
+      { "kind": "Length", "len": 2, "endian": "Big" },
+      { "kind": "Fixed", "bytes": [33, 18, 164, 66] },
+      { "kind": "Id", "len": 12, "mode": "Random" }
+    ]
+  }
+}

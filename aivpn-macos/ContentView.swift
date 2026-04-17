@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
     @State private var keyToDelete: ConnectionKey?
+    @State private var recordingServiceName: String = ""
+    private let recordingDarkGreen = Color(red: 0.0, green: 0.35, blue: 0.16)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -246,6 +248,83 @@ struct ContentView: View {
 
             Divider()
 
+            if let result = vpn.lastRecordingResult {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(result.succeeded ? loc.t("recording_result_success_title") : loc.t("recording_result_failed_title"))
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(result.succeeded ? recordingDarkGreen : .red)
+
+                            Text(result.details)
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer()
+
+                        Button(loc.t("dismiss")) {
+                            vpn.clearRecordingResult()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
+                Divider()
+            }
+
+            if vpn.isConnected && vpn.recordingCapabilityKnown && vpn.canRecordMasks {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(loc.t("record_new_mask"))
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+
+                    TextField(loc.t("record_service_name"), text: $recordingServiceName)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+
+                    Button(action: {
+                        switch vpn.recordingState {
+                        case .recording, .starting:
+                            vpn.stopMaskRecording()
+                        default:
+                            let trimmed = recordingServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let service = trimmed.isEmpty ? "mask_\(Int(Date().timeIntervalSince1970))" : trimmed
+                            recordingServiceName = service
+                            vpn.startMaskRecording(serviceName: service)
+                        }
+                    }) {
+                        HStack {
+                            Spacer()
+                            Image(systemName: recordingButtonIcon)
+                            Text(recordingButtonTitle)
+                            Spacer()
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(recordingButtonDisabled)
+
+                    Text(recordingStatusText)
+                        .font(.caption)
+                        .foregroundColor(recordingStatusColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
+                Divider()
+            }
+
             // Connect / Disconnect button
             Button(action: {
                 if vpn.isConnected {
@@ -382,6 +461,72 @@ struct ContentView: View {
     private var connectButtonBorderColor: Color {
         Color(nsColor: .separatorColor)
     }
+
+    private var recordingStatusText: String {
+        switch vpn.recordingState {
+        case .idle:
+            return loc.t("recording_ready")
+        case .starting:
+            return loc.t("recording_starting")
+        case .recording:
+            return loc.t("recording_active")
+        case .stopping:
+            return loc.t("recording_stopping")
+        case .analyzing:
+            return loc.t("recording_analyzing")
+        case .success(_, let maskId):
+            if let maskId, !maskId.isEmpty {
+                return "\(loc.t("recording_success")): \(maskId)"
+            }
+            return loc.t("recording_success")
+        case .failed(_, let reason):
+            let lowerReason = reason.lowercased()
+            if lowerReason.contains("self-test") || lowerReason.contains("verification") || lowerReason.contains("провер") {
+                return loc.t("recording_self_test_failed") + ": " + reason
+            }
+            return loc.t("recording_failed") + ": " + reason
+        }
+    }
+
+    private var recordingStatusColor: Color {
+        switch vpn.recordingState {
+        case .idle:
+            return recordingDarkGreen
+        case .starting, .recording, .stopping, .analyzing:
+            return recordingDarkGreen
+        case .success:
+            return recordingDarkGreen
+        case .failed:
+            return .red
+        }
+    }
+
+    private var recordingButtonTitle: String {
+        switch vpn.recordingState {
+        case .recording, .starting:
+            return loc.t("stop_recording")
+        default:
+            return loc.t("record_new_mask")
+        }
+    }
+
+    private var recordingButtonIcon: String {
+        switch vpn.recordingState {
+        case .recording, .starting:
+            return "stop.circle.fill"
+        default:
+            return "waveform.badge.magnifyingglass"
+        }
+    }
+
+    private var recordingButtonDisabled: Bool {
+        switch vpn.recordingState {
+        case .stopping, .analyzing:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - Key Row View
@@ -412,6 +557,12 @@ struct KeyRowView: View {
                 Text(key.name)
                     .font(.system(size: 12))
                     .fontWeight(isSelected ? .semibold : .regular)
+
+                if key.isRecordingAdminKey {
+                    Text("recording-admin")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.orange)
+                }
                 
                 if let server = key.serverAddress {
                     HStack(spacing: 4) {

@@ -10,10 +10,13 @@ RUN apt-get update && apt-get install -y \
 
 # Copy entire workspace (needed for Cargo.toml workspace resolution)
 COPY Cargo.toml ./
+COPY Cargo.lock* ./
 COPY aivpn-common aivpn-common/
 COPY aivpn-client aivpn-client/
 COPY aivpn-server aivpn-server/
 COPY aivpn-android-core aivpn-android-core/
+COPY aivpn-windows aivpn-windows/
+COPY mask-assets mask-assets/
 
 RUN cargo build --release --bin aivpn-client
 

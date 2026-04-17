@@ -102,3 +102,12 @@ build-windows-package.sh
 .tmp_multi_client_test.sh
 deploy_recording_test.sh
 test-recording-local.sh
+test-speed-final.sh
+test_recording.sh
+test_record_youtube.sh
+test_connect_remote.sh
+run_macos_record_test.sh
+remote-speed-server.sh
+deploy-server-update.sh
+.tmp_update_remote_clients.py
+MACOS_RECORDING_TEST.md

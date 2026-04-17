@@ -16,6 +16,8 @@ let SOCKET_PATH = "/var/run/aivpn/helper.sock"
 let DEFAULT_CLIENT_PATH = "/Library/Application Support/AIVPN/aivpn-client"
 let LOG_PATH = "/var/run/aivpn/client.log"
 let PID_PATH = "/var/run/aivpn/client.pid"
+let RECORDING_STATUS_PATH = "/var/run/aivpn/recording.status"
+let RECORDING_STATUS_FALLBACK_PATH = "/tmp/aivpn-recording.status"
 let HELPER_VERSION = "1.1.0"
 
 // MARK: - Protocol Types
@@ -25,6 +27,7 @@ struct HelperRequest: Codable {
     let key: String?         // connection key (for connect)
     let fullTunnel: Bool?    // full tunnel mode (for connect)
     let binaryPath: String?  // custom binary path (for connect/dev)
+    let service: String?     // service name (for record_start)
 }
 
 struct HelperResponse: Codable {
@@ -188,7 +191,7 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperRe
     var envp: [UnsafeMutablePointer<CChar>?] = []
     
     // Copy current environment first
-    var currentEnv = ProcessInfo.processInfo.environment
+    let currentEnv = ProcessInfo.processInfo.environment
     for (key, value) in currentEnv {
         envp.append(strdup("\(key)=\(value)"))
     }
@@ -229,6 +232,38 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperRe
     try? "\(pid)".write(toFile: PID_PATH, atomically: true, encoding: .utf8)
     log("Started aivpn-client (PID: \(pid))")
     return HelperResponse(status: "ok", message: "Client started", pid: Int(pid))
+}
+
+func runClientCommand(args: [String], binaryPath: String?) -> HelperResponse {
+    let clientPath = binaryPath ?? DEFAULT_CLIENT_PATH
+
+    guard FileManager.default.isExecutableFile(atPath: clientPath) else {
+        return HelperResponse(status: "error", message: "aivpn-client binary not found at \(clientPath)")
+    }
+
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: clientPath)
+    task.arguments = args
+
+    let outputPipe = Pipe()
+    task.standardOutput = outputPipe
+    task.standardError = outputPipe
+
+    do {
+        try task.run()
+        task.waitUntilExit()
+    } catch {
+        return HelperResponse(status: "error", message: "Failed to run client command: \(error.localizedDescription)")
+    }
+
+    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    if task.terminationStatus == 0 {
+        return HelperResponse(status: "ok", message: output.isEmpty ? "Command sent to client daemon." : output)
+    }
+
+    return HelperResponse(status: "error", message: output.isEmpty ? "Client command failed" : output)
 }
 
 /// Stop the managed aivpn-client process
@@ -384,6 +419,18 @@ func getTrafficStats() -> HelperResponse {
     return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)")
 }
 
+func getRecordingInfo() -> HelperResponse {
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: RECORDING_STATUS_PATH)),
+       let json = String(data: data, encoding: .utf8) {
+        return HelperResponse(status: "ok", message: json)
+    }
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: RECORDING_STATUS_FALLBACK_PATH)),
+       let json = String(data: data, encoding: .utf8) {
+        return HelperResponse(status: "ok", message: json)
+    }
+    return HelperResponse(status: "ok", message: "{\"can_record\":null,\"state\":\"idle\",\"service\":null,\"message\":\"Recording access not checked yet\",\"mask_id\":null,\"confidence\":null,\"updated_at_ms\":0}")
+}
+
 // MARK: - Socket Helpers
 
 /// Build a raw sockaddr_un buffer for the given path
@@ -495,6 +542,19 @@ func handleConnection(_ clientFD: Int32) {
 
     case "traffic":
         response = getTrafficStats()
+
+    case "record_start":
+        guard let service = request.service, !service.isEmpty else {
+            response = HelperResponse(status: "error", message: "Missing recording service name")
+            break
+        }
+        response = runClientCommand(args: ["record", "start", "--service", service], binaryPath: request.binaryPath)
+
+    case "record_stop":
+        response = runClientCommand(args: ["record", "stop"], binaryPath: request.binaryPath)
+
+    case "record_info":
+        response = getRecordingInfo()
 
     default:
         response = HelperResponse(status: "error",

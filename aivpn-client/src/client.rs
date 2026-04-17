@@ -253,14 +253,19 @@ impl AivpnClient {
 
         // Spawn local IPC listener for CLI commands
         tokio::spawn(async move {
-            if let Ok(socket) = tokio::net::UdpSocket::bind("127.0.0.1:44301").await {
-                let mut buf = [0u8; 1024];
-                loop {
-                    if let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
-                        if let Ok(msg) = String::from_utf8(buf[..len].to_vec()) {
-                            let _ = admin_tx.send(msg).await;
+            match tokio::net::UdpSocket::bind("127.0.0.1:44301").await {
+                Ok(socket) => {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        if let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
+                            if let Ok(msg) = String::from_utf8(buf[..len].to_vec()) {
+                                let _ = admin_tx.send(msg).await;
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    error!("Failed to bind local admin UDP socket 127.0.0.1:44301: {}", e);
                 }
             }
         });
@@ -394,8 +399,6 @@ impl AivpnClient {
 
         let run_res: Result<()> = loop {
             tokio::select! {
-                biased;
-
                 // Allow fast shutdown.
                 _ = shutdown_tick.tick() => {
                     if shutdown.load(Ordering::SeqCst) {
@@ -414,6 +417,39 @@ impl AivpnClient {
                     };
                 }
 
+                cmd = admin_rx.recv() => {
+                    if let Some(cmd) = cmd {
+                        if let Some(service) = cmd.strip_prefix("record_start:") {
+                            crate::record_cmd::handle_recording_status(true, Some(service));
+                            let payload = ControlPayload::RecordingStart { service: service.to_string() };
+                            if let Err(e) = control_tx.send(payload).await {
+                                error!("Failed to send RecordingStart to upload task: {}", e);
+                            } else {
+                                info!("Sent RecordingStart for {}", service);
+                            }
+                        } else if cmd == "record_stop" {
+                            if let Some(session_id) = self.active_recording_session {
+                                let current_service = crate::record_cmd::read_local_status().and_then(|status| status.service);
+                                crate::record_cmd::mark_recording_stop_requested(current_service.as_deref());
+                                let payload = ControlPayload::RecordingStop { session_id };
+                                if let Err(e) = control_tx.send(payload).await {
+                                    error!("Failed to send RecordingStop to upload task: {}", e);
+                                } else {
+                                    info!("Sent RecordingStop");
+                                }
+                            } else {
+                                warn!("No active recording session to stop");
+                                crate::record_cmd::handle_recording_failed("No active recording session to stop");
+                            }
+                        } else if cmd == "record_status" {
+                            let payload = ControlPayload::RecordingStatusRequest;
+                            if let Err(e) = control_tx.send(payload).await {
+                                error!("Failed to send RecordingStatusRequest to upload task: {}", e);
+                            }
+                        }
+                    }
+                }
+
                 // UDP -> TUN (inbound traffic)
                 res = udp_to_tun_rx.recv() => {
                     let packet = match res {
@@ -427,31 +463,6 @@ impl AivpnClient {
                             _ => {
                                 warn!("Receive error: {}", e);
                                 break Err(e);
-                            }
-                        }
-                    }
-                }
-
-                cmd = admin_rx.recv() => {
-                    if let Some(cmd) = cmd {
-                        if let Some(service) = cmd.strip_prefix("record_start:") {
-                            let payload = ControlPayload::RecordingStart { service: service.to_string() };
-                            if let Err(e) = control_tx.send(payload).await {
-                                error!("Failed to send RecordingStart to upload task: {}", e);
-                            } else {
-                                info!("Sent RecordingStart for {}", service);
-                            }
-                        } else if cmd == "record_stop" {
-                            if let Some(session_id) = self.active_recording_session {
-                                let payload = ControlPayload::RecordingStop { session_id };
-                                if let Err(e) = control_tx.send(payload).await {
-                                    error!("Failed to send RecordingStop to upload task: {}", e);
-                                } else {
-                                    info!("Sent RecordingStop");
-                                }
-                                self.active_recording_session = None;
-                            } else {
-                                warn!("No active recording session to stop");
                             }
                         }
                     }
@@ -644,6 +655,7 @@ impl AivpnClient {
                     info!("Outbound ratchet activated — upload switched to new keys");
                 }
                 info!("PFS ratchet complete — forward secrecy established");
+                let _ = self.send_control(&ControlPayload::RecordingStatusRequest).await;
             }
             ControlPayload::Keepalive => {
                 debug!("Keepalive from server");
@@ -658,14 +670,21 @@ impl AivpnClient {
             ControlPayload::RecordingAck { session_id, status } => {
                 if status == "started" {
                     self.active_recording_session = Some(session_id);
+                } else if status == "analyzing" {
+                    self.active_recording_session = None;
                 }
                 crate::record_cmd::handle_recording_ack(&session_id, &status);
             }
             ControlPayload::RecordingComplete { service, mask_id, confidence } => {
+                self.active_recording_session = None;
                 crate::record_cmd::handle_recording_complete(&service, &mask_id, confidence);
             }
             ControlPayload::RecordingFailed { reason } => {
+                self.active_recording_session = None;
                 crate::record_cmd::handle_recording_failed(&reason);
+            }
+            ControlPayload::RecordingStatus { can_record, active_service } => {
+                crate::record_cmd::handle_recording_status(can_record, active_service.as_deref());
             }
             _ => {}
         }

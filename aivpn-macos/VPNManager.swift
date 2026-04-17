@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UserNotifications
 
 // MARK: - Helper Protocol Types
 
@@ -8,6 +9,7 @@ struct HelperRequest: Codable {
     let key: String?
     let fullTunnel: Bool?
     let binaryPath: String?
+    let service: String?
 }
 
 struct HelperResponse: Codable {
@@ -17,6 +19,42 @@ struct HelperResponse: Codable {
     let pid: Int?
     let version: String?
     let log: String?
+}
+
+struct RecordingInfoSnapshot: Codable {
+    let can_record: Bool?
+    let state: String
+    let service: String?
+    let message: String?
+    let mask_id: String?
+    let confidence: Float?
+    let updated_at_ms: UInt64
+}
+
+private let recordingStatusPaths = [
+    "/var/run/aivpn/recording.status",
+    "/tmp/aivpn-recording.status",
+]
+
+private func currentTimestampMs() -> UInt64 {
+    UInt64(Date().timeIntervalSince1970 * 1000)
+}
+
+enum MaskRecordingState: Equatable {
+    case idle
+    case starting(service: String)
+    case recording(service: String)
+    case stopping(service: String)
+    case analyzing(service: String)
+    case success(service: String, maskId: String?)
+    case failed(service: String, reason: String)
+}
+
+struct RecordingResultSummary: Equatable {
+    let succeeded: Bool
+    let title: String
+    let details: String
+    let updatedAtMs: UInt64
 }
 
 // MARK: - VPNManager
@@ -33,6 +71,10 @@ class VPNManager: ObservableObject {
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
     @Published var helperVersion: String = ""
+    @Published var recordingState: MaskRecordingState = .idle
+    @Published var canRecordMasks: Bool = false
+    @Published var recordingCapabilityKnown: Bool = false
+    @Published var lastRecordingResult: RecordingResultSummary?
     
     // Поддержка списка ключей
     @Published var selectedKeyId: String?
@@ -42,6 +84,8 @@ class VPNManager: ObservableObject {
 
     private var statusPollTimer: Timer?
     private var trafficTimer: Timer?
+    private var minimumRecordingStatusTimestamp: UInt64 = 0
+    private var lastRecordingNotificationTimestamp: UInt64 = 0
 
     private let socketPath = "/var/run/aivpn/helper.sock"
 
@@ -59,7 +103,7 @@ class VPNManager: ObservableObject {
             let keyValue = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 .replacingOccurrences(of: "aivpn://", with: "")
             if KeychainStorage.shared.keys.isEmpty {
-                KeychainStorage.shared.addKey(name: "Default", keyValue: keyValue)
+                _ = KeychainStorage.shared.addKey(name: "Default", keyValue: keyValue)
                 selectedKeyId = KeychainStorage.shared.selectedKeyId
             }
             savedKey = keyValue
@@ -69,6 +113,83 @@ class VPNManager: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.checkHelperAvailable()
         }
+    }
+
+    private func helperClientBinaryPath() -> String? {
+        let bundledBinary = Bundle.main.bundlePath + "/Contents/Resources/aivpn-client"
+        return FileManager.default.isExecutableFile(atPath: bundledBinary) ? bundledBinary : nil
+    }
+
+    private func runBundledClientCommand(_ args: [String], completion: ((Bool, String) -> Void)? = nil) {
+        guard let binaryPath = helperClientBinaryPath() else {
+            completion?(false, "Bundled aivpn-client not found")
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: binaryPath)
+            task.arguments = args
+
+            let outputPipe = Pipe()
+            task.standardOutput = outputPipe
+            task.standardError = outputPipe
+
+            do {
+                try task.run()
+                task.waitUntilExit()
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                DispatchQueue.main.async {
+                    completion?(task.terminationStatus == 0, output)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion?(false, error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func loadRecordingInfoFromDisk() -> RecordingInfoSnapshot? {
+        for path in recordingStatusPaths {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+                continue
+            }
+            if let snapshot = try? JSONDecoder().decode(RecordingInfoSnapshot.self, from: data) {
+                return snapshot
+            }
+        }
+        return nil
+    }
+
+    private func requestRecordingStatusRefresh() {
+        runBundledClientCommand(["record", "status"], completion: nil)
+    }
+
+    func clearRecordingResult() {
+        lastRecordingResult = nil
+    }
+
+    private func postRecordingResultNotification(title: String, body: String, updatedAtMs: UInt64) {
+        guard updatedAtMs > lastRecordingNotificationTimestamp else {
+            return
+        }
+
+        lastRecordingNotificationTimestamp = updatedAtMs
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "aivpn.recording.\(updatedAtMs)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - Key Storage (UserDefaults — no keychain prompts)
@@ -138,7 +259,7 @@ class VPNManager: ObservableObject {
     private func sendToHelper(_ request: HelperRequest, timeoutSeconds: Double = 3.0,
                               completion: @escaping (HelperResponse?) -> Void) {
         let sockPath = self.socketPath
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async {
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else {
                 DispatchQueue.main.async {
@@ -212,7 +333,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil),
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
                      timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
@@ -249,16 +370,21 @@ class VPNManager: ObservableObject {
         lastError = nil
         bytesSent = 0
         bytesReceived = 0
+        recordingState = .idle
+        canRecordMasks = false
+        recordingCapabilityKnown = false
+        lastRecordingResult = nil
+        minimumRecordingStatusTimestamp = currentTimestampMs()
 
         // Determine binary path — prefer the one bundled in the app
-        let bundledBinary = Bundle.main.bundlePath + "/Contents/Resources/aivpn-client"
-        let binaryPath = FileManager.default.isExecutableFile(atPath: bundledBinary) ? bundledBinary : nil
+        let binaryPath = helperClientBinaryPath()
 
         let request = HelperRequest(
             action: "connect",
             key: normalizedKey,
             fullTunnel: fullTunnel,
-            binaryPath: binaryPath
+            binaryPath: binaryPath,
+            service: nil
         )
 
         sendToHelper(request) { [weak self] response in
@@ -267,6 +393,7 @@ class VPNManager: ObservableObject {
             if let response = response, response.status == "ok" {
                 // Start polling for status changes
                 self.startStatusPolling()
+                self.requestRecordingStatusRefresh()
             } else {
                 self.isConnecting = false
                 if let response = response {
@@ -280,17 +407,73 @@ class VPNManager: ObservableObject {
     }
 
     func disconnect() {
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil)
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil)
 
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
             self.stopStatusPolling()
             self.trafficTimer?.invalidate()
             self.trafficTimer = nil
+            self.recordingState = .idle
+            self.canRecordMasks = false
+            self.recordingCapabilityKnown = false
+            self.lastRecordingResult = nil
+            self.minimumRecordingStatusTimestamp = 0
 
             DispatchQueue.main.async {
                 self.isConnecting = false
                 self.isConnected = false
+            }
+        }
+    }
+
+    func startMaskRecording(serviceName: String) {
+        let trimmedService = serviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedService.isEmpty else {
+            lastError = "Mask service name is required"
+            return
+        }
+        guard isConnected else {
+            lastError = "Connect before recording a mask"
+            return
+        }
+        guard selectedKey != nil else {
+            lastError = "No connection key selected"
+            return
+        }
+        guard canRecordMasks else {
+            lastError = "Server did not grant recording access for this key"
+            return
+        }
+
+        minimumRecordingStatusTimestamp = currentTimestampMs()
+        lastRecordingResult = nil
+        recordingState = .starting(service: trimmedService)
+
+        runBundledClientCommand(["record", "start", "--service", trimmedService]) { [weak self] ok, output in
+            guard let self = self else { return }
+            if !ok {
+                self.recordingState = .failed(service: trimmedService, reason: output.isEmpty ? "Failed to start recording" : output)
+            }
+        }
+    }
+
+    func stopMaskRecording() {
+        let currentService: String
+        switch recordingState {
+        case .recording(let service), .starting(let service):
+            currentService = service
+        default:
+            lastError = "No active recording to stop"
+            return
+        }
+
+        minimumRecordingStatusTimestamp = currentTimestampMs()
+        recordingState = .stopping(service: currentService)
+        runBundledClientCommand(["record", "stop"]) { [weak self] ok, output in
+            guard let self = self else { return }
+            if !ok {
+                self.recordingState = .failed(service: currentService, reason: output.isEmpty ? "Failed to stop recording" : output)
             }
         }
     }
@@ -311,7 +494,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil),
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
                      timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
@@ -361,7 +544,75 @@ class VPNManager: ObservableObject {
                     }
                 }
             }
+
+            if connected || self.isConnected {
+                self.refreshRecordingInfo()
+            }
         }
+    }
+
+    private func refreshRecordingInfo() {
+        if let snapshot = loadRecordingInfoFromDisk() {
+            let applied = applyRecordingInfo(snapshot)
+            if !applied || snapshot.can_record == nil {
+                requestRecordingStatusRefresh()
+            }
+        } else {
+            requestRecordingStatusRefresh()
+        }
+    }
+
+    @discardableResult
+    private func applyRecordingInfo(_ snapshot: RecordingInfoSnapshot) -> Bool {
+        if snapshot.updated_at_ms < minimumRecordingStatusTimestamp {
+            return false
+        }
+
+        minimumRecordingStatusTimestamp = snapshot.updated_at_ms
+        recordingCapabilityKnown = snapshot.can_record != nil
+        canRecordMasks = snapshot.can_record ?? false
+
+        let service = snapshot.service ?? selectedKey?.name ?? "mask"
+        switch snapshot.state {
+        case "recording":
+            recordingState = .recording(service: service)
+        case "stopping":
+            recordingState = .stopping(service: service)
+        case "analyzing":
+            recordingState = .analyzing(service: service)
+        case "success":
+            recordingState = .success(service: service, maskId: snapshot.mask_id)
+            let title = "Mask recorded successfully"
+            let details: String
+            if let maskId = snapshot.mask_id, !maskId.isEmpty {
+                details = "Mask was saved. ID: \(maskId)"
+            } else {
+                details = "Mask was saved successfully."
+            }
+            lastRecordingResult = RecordingResultSummary(
+                succeeded: true,
+                title: title,
+                details: details,
+                updatedAtMs: snapshot.updated_at_ms
+            )
+            postRecordingResultNotification(title: title, body: details, updatedAtMs: snapshot.updated_at_ms)
+        case "failed":
+            recordingState = .failed(service: service, reason: snapshot.message ?? "Recording failed")
+            let reason = snapshot.message ?? "Recording failed"
+            let title = "Mask recording failed"
+            let details = "Mask was not saved. \(reason)"
+            lastRecordingResult = RecordingResultSummary(
+                succeeded: false,
+                title: title,
+                details: details,
+                updatedAtMs: snapshot.updated_at_ms
+            )
+            postRecordingResultNotification(title: title, body: details, updatedAtMs: snapshot.updated_at_ms)
+        default:
+            recordingState = .idle
+        }
+
+        return true
     }
 
     // MARK: - Traffic Monitor
@@ -376,7 +627,7 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil),
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
                      timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,

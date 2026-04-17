@@ -50,6 +50,11 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
         }
         return name
     }
+
+    var isRecordingAdminKey: Bool {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedName.hasPrefix("recording-admin") || normalizedName == "admin"
+    }
 }
 
 /// Менеджер хранения ключей
