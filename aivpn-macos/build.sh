@@ -134,7 +134,7 @@ chmod 644 "$PKG_ROOT/Library/LaunchDaemons/com.aivpn.helper.plist"
 echo "📦 Bundling aivpn-client binary..."
 CLIENT_BIN_MACOS_UNIVERSAL="$PROJECT_DIR/releases/aivpn-client-macos-universal"
 CLIENT_BIN_UNIVERSAL_LEGACY="$PROJECT_DIR/releases/aivpn-client-universal"
-CLIENT_BIN_X86="$PROJECT_DIR/target/release/aivpn-client"
+CLIENT_BIN_X86="$PROJECT_DIR/target/x86_64-apple-darwin/release/aivpn-client"
 CLIENT_BIN_ARM="$PROJECT_DIR/target/aarch64-apple-darwin/release/aivpn-client"
 
 if [ -f "$CLIENT_BIN_X86" ] && [ -f "$CLIENT_BIN_ARM" ]; then
