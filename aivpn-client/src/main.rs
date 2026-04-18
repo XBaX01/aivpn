@@ -8,6 +8,7 @@ use aivpn_client::tunnel::TunnelConfig;
 use aivpn_common::mask::BootstrapDescriptor;
 #[cfg(not(feature = "production-secure"))]
 use aivpn_common::mask::preset_masks::bootstrap_default;
+use aivpn_common::mask::preset_masks;
 use aivpn_common::network_config::{ClientNetworkConfig, DEFAULT_VPN_MTU, LEGACY_SERVER_VPN_IP};
 use clap::Parser;
 use serde::Deserialize;
@@ -143,6 +144,15 @@ fn decode_base64_key(label: &str, encoded: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&decoded);
     out
+}
+
+// In development mode, derive a deterministic bootstrap mask from the PSK when no cached descriptors are available.
+fn bootstrap_mask_for_psk(psk: &[u8; 32]) -> aivpn_common::mask::MaskProfile {
+    use blake3;
+    let presets = preset_masks::all();
+    let hash = blake3::derive_key("aivpn-bootstrap-mask-v1", psk);
+    let idx = hash[0] as usize % presets.len();
+    presets[idx].clone()
 }
 
 #[tokio::main]
@@ -420,7 +430,16 @@ async fn main() {
             }
             #[cfg(not(feature = "production-secure"))]
             {
-                initial_mask.unwrap_or_else(bootstrap_default)
+            // psk-based fallback provides a stable development experience without requiring descriptor management, while still allowing testing of the full mask selection and rotation logic.
+                match initial_mask {
+                    Some(mask) => mask,
+                    None => {
+                        match &preshared_key {
+                            Some(psk_bytes) => bootstrap_mask_for_psk(psk_bytes),
+                            None => bootstrap_default(),
+                        }
+                    }
+                }
             }
         };
 
