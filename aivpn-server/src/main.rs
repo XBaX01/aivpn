@@ -25,6 +25,8 @@ struct ServerFileConfig {
     tun_netmask: Option<Ipv4Addr>,
     network_config: Option<VpnNetworkConfig>,
     mask_dir: Option<String>,
+    session_timeout_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -133,6 +135,8 @@ async fn main() {
         neural_config: NeuralConfig::default(),
         client_db: Some(client_db),
         mask_dir: resolve_mask_dir(&args, file_config.as_ref()),
+        session_timeout_secs: file_config.as_ref().and_then(|c| c.session_timeout_secs),
+        idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
     };
 
     // Create and run server

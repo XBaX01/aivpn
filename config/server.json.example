@@ -8,7 +8,7 @@
   },
   "mask_dir": "/var/lib/aivpn/masks",
   "max_sessions": 500,
-  "session_timeout_secs": 86400,
+  "session_timeout_secs": 0,
   "idle_timeout_secs": 300,
   "default_mask": "webrtc_zoom_v3"
 }

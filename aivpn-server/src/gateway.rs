@@ -65,6 +65,10 @@ pub struct GatewayConfig {
     pub client_db: Option<Arc<ClientDatabase>>,
     /// Directory for mask storage (default: /var/lib/aivpn/masks)
     pub mask_dir: std::path::PathBuf,
+    /// Session hard timeout in seconds (default: 7 days). `None` uses the default.
+    pub session_timeout_secs: Option<u64>,
+    /// Session idle timeout in seconds (default: 300). `None` uses the default.
+    pub idle_timeout_secs: Option<u64>,
 }
 
 impl Default for GatewayConfig {
@@ -83,6 +87,8 @@ impl Default for GatewayConfig {
             neural_config: NeuralConfig::default(),
             client_db: None,
             mask_dir: std::path::PathBuf::from("/var/lib/aivpn/masks"),
+            session_timeout_secs: None,
+            idle_timeout_secs: None,
         }
     }
 }
@@ -379,10 +385,12 @@ impl Gateway {
                 format!("No masks found in {:?} — place mask JSON files there before starting the server", config.mask_dir)
             ))?;
         
-        let session_manager = Arc::new(SessionManager::new(
+        let session_manager = Arc::new(SessionManager::with_timeouts(
             server_keys,
             signing_key,
             default_mask,
+            config.session_timeout_secs,
+            config.idle_timeout_secs,
         ));
         
         // Initialize neural resonance module (Patent 1)

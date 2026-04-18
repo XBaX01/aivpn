@@ -27,11 +27,14 @@ use aivpn_common::error::{Error, Result};
 /// Maximum sessions on 1GB VPS
 pub const MAX_SESSIONS: usize = 500;
 
-/// Session idle timeout
+/// Session idle timeout (default)
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Session hard timeout
-pub const HARD_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
+/// Session hard timeout — 0 means unlimited (Issue #33).
+/// Configurable via `session_timeout_secs` in server.json.
+/// PFS ratchet already handles key rotation, so forced session
+/// expiration is unnecessary and causes reconnect failures.
+pub const HARD_TIMEOUT: Duration = Duration::ZERO;
 
 /// Tag window size (allow out-of-order packets)
 pub const TAG_WINDOW_SIZE: usize = 256;
@@ -406,6 +409,10 @@ pub struct SessionManager {
     signing_key: ed25519_dalek::SigningKey,
     /// Default mask profile
     default_mask: MaskProfile,
+    /// Configurable session hard timeout
+    hard_timeout: Duration,
+    /// Configurable session idle timeout
+    idle_timeout: Duration,
 }
 
 impl SessionManager {
@@ -414,6 +421,22 @@ impl SessionManager {
         signing_key: ed25519_dalek::SigningKey,
         default_mask: MaskProfile,
     ) -> Self {
+        Self::with_timeouts(server_keys, signing_key, default_mask, None, None)
+    }
+
+    pub fn with_timeouts(
+        server_keys: KeyPair,
+        signing_key: ed25519_dalek::SigningKey,
+        default_mask: MaskProfile,
+        session_timeout_secs: Option<u64>,
+        idle_timeout_secs: Option<u64>,
+    ) -> Self {
+        let hard_timeout = session_timeout_secs
+            .map(|s| Duration::from_secs(s))
+            .unwrap_or(HARD_TIMEOUT);
+        let idle_timeout = idle_timeout_secs
+            .map(|s| Duration::from_secs(s))
+            .unwrap_or(IDLE_TIMEOUT);
         Self {
             sessions: DashMap::new(),
             tag_map: DashMap::new(),
@@ -422,6 +445,8 @@ impl SessionManager {
             server_keys,
             signing_key,
             default_mask,
+            hard_timeout,
+            idle_timeout,
         }
     }
     
@@ -835,7 +860,12 @@ impl SessionManager {
     pub fn cleanup_expired(&self) -> Vec<[u8; 16]> {
         let expired: Vec<[u8; 16]> = self.sessions
             .iter()
-            .filter(|e| e.value().lock().is_expired() || e.value().lock().is_idle())
+            .filter(|e| {
+                let sess = e.value().lock();
+                sess.last_seen.elapsed() > self.idle_timeout
+                    || (self.hard_timeout > Duration::ZERO
+                        && sess.created_at.elapsed() > self.hard_timeout)
+            })
             .map(|e| *e.key())
             .collect();
         
