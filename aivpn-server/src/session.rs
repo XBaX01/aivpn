@@ -405,7 +405,7 @@ pub struct SessionManager {
     /// Server's signing key (Ed25519)
     signing_key: ed25519_dalek::SigningKey,
     /// Default mask profile
-    _default_mask: MaskProfile,
+    default_mask: MaskProfile,
 }
 
 impl SessionManager {
@@ -421,7 +421,7 @@ impl SessionManager {
             next_ip_octet: AtomicU32::new(2),
             server_keys,
             signing_key,
-            _default_mask: default_mask,
+            default_mask,
         }
     }
     
@@ -988,8 +988,13 @@ impl SessionManager {
             time_window,
         );
 
-        // MDH
-        let mdh = vec![0u8; 4];
+        // MDH — use mask's HeaderSpec for dynamic per-packet generation (Issue #30)
+        let mdh = if let Some(ref spec) = self.default_mask.header_spec {
+            let mut rng = rand::thread_rng();
+            spec.generate(&mut rng)
+        } else {
+            self.default_mask.header_template.clone()
+        };
 
         // Assemble: TAG | MDH | ciphertext
         let mut packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());

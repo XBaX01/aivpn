@@ -56,6 +56,9 @@ RUN mkdir -p /etc/aivpn /dev/net && \
 # Copy example config
 COPY config/server.json.example /usr/share/aivpn/server.json.example
 
+# Seed preset masks so server has masks on first run
+COPY mask-assets/*.json /usr/share/aivpn/preset-masks/
+
 # Expose port
 EXPOSE 443/udp
 

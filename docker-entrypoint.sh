@@ -8,6 +8,19 @@ KEY_PATH="$CONFIG_DIR/server.key"
 
 mkdir -p "$CONFIG_DIR" /var/lib/aivpn/masks
 
+# Seed preset masks on first run (won't overwrite existing files)
+PRESET_DIR="/usr/share/aivpn/preset-masks"
+if [ -d "$PRESET_DIR" ]; then
+    for f in "$PRESET_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ ! -f "/var/lib/aivpn/masks/$base" ]; then
+            cp "$f" "/var/lib/aivpn/masks/$base"
+            echo "Seeded preset mask: $base"
+        fi
+    done
+fi
+
 if [ ! -f "$CONFIG_PATH" ]; then
     cp "$CONFIG_TEMPLATE" "$CONFIG_PATH"
     echo "Initialized $CONFIG_PATH from bundled template"
