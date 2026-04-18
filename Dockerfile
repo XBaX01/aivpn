@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy workspace
 COPY Cargo.toml ./
-COPY Cargo.lock* ./
 COPY aivpn-common aivpn-common/
 COPY aivpn-server aivpn-server/
 COPY aivpn-client aivpn-client/
