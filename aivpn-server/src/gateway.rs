@@ -869,6 +869,12 @@ impl Gateway {
                         let tag_secret = sess.keys.tag_secret;
                         let downlink_iat_ms = sess.last_server_send.elapsed().as_secs_f64() * 1000.0;
                         sess.last_server_send = Instant::now();
+                        // Use the session's own mask for MDH so the client can
+                        // decode with the mask it currently expects (bootstrap
+                        // or runtime after MaskUpdate is processed).
+                        let session_mdh = sess.mask.as_ref()
+                            .map(packet_mdh_bytes_for_mask)
+                            .unwrap_or_else(|| mask.header_template.clone());
                         drop(sess); // Release lock BEFORE expensive encryption
                         
                         // Build inner payload: Data type + IP packet
@@ -879,8 +885,8 @@ impl Gateway {
                         let mut inner_payload = inner_header.encode().to_vec();
                         inner_payload.extend_from_slice(packet);
                         
-                        // Build MDH (no eph_pub for data packets)
-                        let mdh = mask.header_template.clone();
+                        // Build MDH using session mask (not global runtime mask)
+                        let mdh = session_mdh;
                         
                         // Pad and encrypt (outside lock)
                         let pad_len: u16 = 0;
