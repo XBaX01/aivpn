@@ -46,11 +46,12 @@ COPY --from=builder /app/target/release/aivpn-server /usr/local/bin/aivpn-server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Create config directory and TUN device node
-RUN mkdir -p /etc/aivpn /dev/net && \
+RUN mkdir -p /etc/aivpn /dev/net /var/lib/aivpn/bootstrap /var/lib/aivpn/masks && \
     mknod /dev/net/tun c 10 200 2>/dev/null || true && \
     chmod 600 /dev/net/tun && \
     chmod +x /usr/local/bin/docker-entrypoint.sh && \
-    mkdir -p /usr/share/aivpn
+    mkdir -p /usr/share/aivpn && \
+    echo '[]' > /var/lib/aivpn/bootstrap/custom-bootstrap-mask.json
 
 # Copy example config
 COPY config/server.json.example /usr/share/aivpn/server.json.example
