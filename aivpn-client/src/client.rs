@@ -27,13 +27,21 @@ use aivpn_common::client_wire::{
 use aivpn_common::protocol::{
     InnerType, ControlPayload, MAX_PACKET_SIZE,
 };
-use aivpn_common::mask::MaskProfile;
+use aivpn_common::mask::{BootstrapDescriptor, MaskProfile};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::ClientNetworkConfig;
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
+use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
+
+fn packet_mdh_len_for_mask(mask: &MaskProfile) -> usize {
+    mask.header_spec
+        .as_ref()
+        .map(|spec| spec.min_length())
+        .unwrap_or_else(|| mask.header_template.len())
+}
 
 /// Client configuration
 #[derive(Debug, Clone)]
@@ -44,7 +52,7 @@ pub struct ClientConfig {
     pub initial_mask: MaskProfile,
     pub tun_config: TunnelConfig,
     /// Server's Ed25519 signing public key for authentication (HIGH-6)
-    pub server_signing_pub: Option<[u8; 32]>,
+    pub server_signing_pub: [u8; 32],
 }
 
 /// Client state
@@ -81,6 +89,7 @@ pub struct AivpnClient {
     _recv_seq: u32,
     recv_window: RecvWindow,
     transition_recv_window: RecvWindow,
+    recv_mdh_len: usize,
     // Traffic counters
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
@@ -96,6 +105,7 @@ impl AivpnClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
         let keypair = KeyPair::generate();
         let tunnel = Tunnel::new(config.tun_config.clone());
+        let recv_mdh_len = packet_mdh_len_for_mask(&config.initial_mask);
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
 
@@ -115,6 +125,7 @@ impl AivpnClient {
             _recv_seq: 0,
             recv_window: RecvWindow::new(),
             transition_recv_window: RecvWindow::new(),
+            recv_mdh_len,
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
@@ -132,11 +143,16 @@ impl AivpnClient {
         // Create TUN device first
         self.tunnel.create()?;
         
-        // Parse server IP for full-tunnel bypass route
-        let server_addr: SocketAddr = self.config.server_addr.parse()
-            .map_err(|e: std::net::AddrParseError| Error::Io(
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-            ))?;
+        // Resolve the server address. Docker/local test setups often use a
+        // hostname rather than a literal IP:port string.
+        let server_addr = tokio::net::lookup_host(&self.config.server_addr)
+            .await
+            .map_err(Error::Io)?
+            .next()
+            .ok_or_else(|| Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("failed to resolve server address: {}", self.config.server_addr),
+            )))?;
         
         // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
         let domain = if server_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 };
@@ -381,9 +397,6 @@ impl AivpnClient {
         }));
         self.upload_state = Some(upload_state.clone());
 
-        // Store mdh_len for the receive path (before moving engine into the task).
-        let mdh_len = upload_engine.mask().header_template.len();
-
         let mut upload_task = tokio::spawn(Self::spawn_upload(
             tun_to_udp_rx,
             control_rx,
@@ -457,7 +470,7 @@ impl AivpnClient {
                         None => break Err(Error::Channel("UDP->TUN channel closed".into())),
                     };
 
-                    if let Err(e) = self.receive_and_write_packet_with_mdh(&packet, mdh_len).await {
+                    if let Err(e) = self.receive_and_write_packet(&packet).await {
                         match &e {
                             Error::InvalidPacket(_) => warn!("Receive invalid packet: {}", e),
                             _ => {
@@ -540,12 +553,14 @@ impl AivpnClient {
     }
 
     /// Receive packet from server and write to TUN (using pre-computed mdh_len)
-    async fn receive_and_write_packet_with_mdh(&mut self, packet: &[u8], mdh_len: usize) -> Result<()> {
+    async fn receive_and_write_packet(&mut self, packet: &[u8]) -> Result<()> {
         if self.transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             self.transition_recv_keys = None;
             self.transition_recv_deadline = None;
             self.transition_recv_window.reset();
         }
+
+        let mdh_len = self.recv_mdh_len;
 
         let keys = self.session_keys.as_ref()
             .ok_or(Error::Session("No session keys".into()))?;
@@ -603,6 +618,16 @@ impl AivpnClient {
                     Err(e) => warn!("Failed to parse mask update: {}", e),
                 }
             }
+            ControlPayload::BootstrapDescriptorUpdate { descriptor_data } => {
+                match rmp_serde::from_slice::<BootstrapDescriptor>(&descriptor_data) {
+                    Ok(descriptor) => {
+                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, &self.config.server_signing_pub) {
+                            warn!("Failed to store bootstrap descriptor: {}", e);
+                        }
+                    }
+                    Err(e) => warn!("Failed to parse bootstrap descriptor update: {}", e),
+                }
+            }
             ControlPayload::KeyRotate { new_eph_pub: _ } => {
                 debug!("Key rotation signal received");
             }
@@ -614,18 +639,16 @@ impl AivpnClient {
                 }
                 
                 // Verify Ed25519 signature if server signing key configured (HIGH-6)
-                if let Some(signing_pub) = &self.config.server_signing_pub {
-                    use ed25519_dalek::{VerifyingKey, Verifier, Signature};
-                    let vk = VerifyingKey::from_bytes(signing_pub)
-                        .map_err(|e| Error::Crypto(format!("Invalid server signing key: {}", e)))?;
-                    let mut message = Vec::with_capacity(64);
-                    message.extend_from_slice(&server_eph_pub);
-                    message.extend_from_slice(&self.keypair.public_key_bytes());
-                    let sig = Signature::from_bytes(&signature);
-                    vk.verify(&message, &sig)
-                        .map_err(|_| Error::Crypto("ServerHello signature verification failed".into()))?;
-                    info!("Server authenticated via Ed25519 signature");
-                }
+                use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+                let vk = VerifyingKey::from_bytes(&self.config.server_signing_pub)
+                    .map_err(|e| Error::Crypto(format!("Invalid server signing key: {}", e)))?;
+                let mut message = Vec::with_capacity(64);
+                message.extend_from_slice(&server_eph_pub);
+                message.extend_from_slice(&self.keypair.public_key_bytes());
+                let sig = Signature::from_bytes(&signature);
+                vk.verify(&message, &sig)
+                    .map_err(|_| Error::Crypto("ServerHello signature verification failed".into()))?;
+                info!("Server authenticated via Ed25519 signature");
                 
                 // Compute DH2 = client_eph * server_eph for PFS (CRIT-3)
                 let dh2 = self.keypair.compute_shared(&server_eph_pub)?;
@@ -773,6 +796,7 @@ impl AivpnClient {
     
     /// Update mask profile
     pub fn update_mask(&mut self, new_mask: MaskProfile) {
+        self.recv_mdh_len = packet_mdh_len_for_mask(&new_mask);
         if let Some(ref mut engine) = self.mimicry_engine {
             info!("Updating mask to {}", new_mask.mask_id);
             engine.update_mask(new_mask);

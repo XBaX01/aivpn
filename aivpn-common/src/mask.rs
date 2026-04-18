@@ -8,6 +8,261 @@ use rand::distributions::weighted::WeightedIndex;
 
 use crate::error::{Error, Result};
 
+/// Rotating bootstrap descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapDescriptor {
+    pub descriptor_id: String,
+    pub version: u16,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub base_mask_ids: Vec<String>,
+    #[serde(default)]
+    pub embedded_masks: Vec<MaskProfile>,
+    pub candidate_count: u8,
+    #[serde(with = "serde_bytes")]
+    pub kdf_salt: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    #[serde(default = "default_signature")]
+    pub signature: [u8; 64],
+}
+
+impl BootstrapDescriptor {
+    pub fn is_valid_at(&self, unix_secs: u64) -> bool {
+        unix_secs >= self.created_at && unix_secs <= self.expires_at
+    }
+
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0u8; 64];
+        rmp_serde::to_vec(&unsigned).expect("bootstrap descriptor serializable")
+    }
+}
+
+/// Multi-channel bootstrap descriptor distribution.
+///
+/// Each channel represents a different method to fetch bootstrap descriptors.
+/// Using multiple channels makes it harder for censors to block all distribution points.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BootstrapChannel {
+    /// CDN-based distribution (e.g., Cloudflare, AWS CloudFront)
+    CDN {
+        /// CDN URL endpoint
+        url: String,
+        /// CDN provider name for logging/analytics
+        provider: String,
+    },
+    /// Telegram bot-based distribution
+    Telegram {
+        /// Telegram bot username
+        bot_username: String,
+        /// Bot token (optional, can use public bot)
+        token: Option<String>,
+    },
+    /// GitHub releases/assets distribution
+    GitHub {
+        /// Repository in format "owner/repo"
+        repo: String,
+        /// Asset name pattern (e.g., "bootstrap-descriptors-v*.json")
+        asset_name: String,
+    },
+    /// IPFS-based distribution (content-addressed)
+    IPFS {
+        /// IPFS content hash (CID)
+        hash: String,
+        /// Gateway URL (optional, uses default gateway if None)
+        gateway: Option<String>,
+    },
+    /// Email-based distribution (for enterprise deployments)
+    Email {
+        /// Email address to request descriptors from
+        address: String,
+        /// Subject line pattern for automated requests
+        subject_pattern: String,
+    },
+}
+
+impl BootstrapChannel {
+    /// Get a human-readable name for this channel
+    pub fn name(&self) -> &str {
+        match self {
+            BootstrapChannel::CDN { provider, .. } => provider.as_str(),
+            BootstrapChannel::Telegram { bot_username, .. } => bot_username.as_str(),
+            BootstrapChannel::GitHub { repo, .. } => repo.as_str(),
+            BootstrapChannel::IPFS { hash, .. } => hash.as_str(),
+            BootstrapChannel::Email { address, .. } => address.as_str(),
+        }
+    }
+    
+    /// Get the channel type name
+    pub fn channel_type(&self) -> &str {
+        match self {
+            BootstrapChannel::CDN { .. } => "CDN",
+            BootstrapChannel::Telegram { .. } => "Telegram",
+            BootstrapChannel::GitHub { .. } => "GitHub",
+            BootstrapChannel::IPFS { .. } => "IPFS",
+            BootstrapChannel::Email { .. } => "Email",
+        }
+    }
+}
+
+/// Configuration for multi-channel bootstrap descriptor distribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapConfig {
+    /// List of channels to try (in order of preference)
+    pub channels: Vec<BootstrapChannel>,
+    /// Maximum age of descriptors to accept (seconds)
+    pub max_descriptor_age: u64,
+    /// Minimum number of channels that must succeed
+    pub min_success_channels: usize,
+    /// Background refresh interval (seconds)
+    pub refresh_interval: u64,
+    /// Whether to use random delay before first refresh
+    pub randomize_first_refresh: bool,
+}
+
+impl Default for BootstrapConfig {
+    fn default() -> Self {
+        Self {
+            channels: Vec::new(),
+            max_descriptor_age: 86400, // 24 hours
+            min_success_channels: 1,
+            refresh_interval: 3600, // 1 hour
+            randomize_first_refresh: true,
+        }
+    }
+}
+
+impl BootstrapConfig {
+    /// Create a new bootstrap config with the given channels
+    pub fn new(channels: Vec<BootstrapChannel>) -> Self {
+        Self {
+            channels,
+            ..Default::default()
+        }
+    }
+    
+    /// Add a CDN channel
+    pub fn with_cdn(mut self, url: impl Into<String>, provider: impl Into<String>) -> Self {
+        self.channels.push(BootstrapChannel::CDN {
+            url: url.into(),
+            provider: provider.into(),
+        });
+        self
+    }
+    
+    /// Add a Telegram channel
+    pub fn with_telegram(mut self, bot_username: impl Into<String>) -> Self {
+        self.channels.push(BootstrapChannel::Telegram {
+            bot_username: bot_username.into(),
+            token: None,
+        });
+        self
+    }
+    
+    /// Add a GitHub channel
+    pub fn with_github(mut self, repo: impl Into<String>, asset_name: impl Into<String>) -> Self {
+        self.channels.push(BootstrapChannel::GitHub {
+            repo: repo.into(),
+            asset_name: asset_name.into(),
+        });
+        self
+    }
+    
+    /// Add an IPFS channel
+    pub fn with_ipfs(mut self, hash: impl Into<String>) -> Self {
+        self.channels.push(BootstrapChannel::IPFS {
+            hash: hash.into(),
+            gateway: None,
+        });
+        self
+    }
+}
+
+pub fn current_unix_secs() -> u64 {
+    crate::crypto::current_timestamp_ms() / 1000
+}
+
+fn derive_bootstrap_seed(
+    descriptor: &BootstrapDescriptor,
+    preshared_key: Option<&[u8; 32]>,
+    slot: u8,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&descriptor.kdf_salt);
+    hasher.update(descriptor.descriptor_id.as_bytes());
+    hasher.update(&[slot]);
+    match preshared_key {
+        Some(psk) => {
+            hasher.update(psk);
+        }
+        None => {
+            hasher.update(&[0u8; 32]);
+        }
+    };
+    let hash = hasher.finalize();
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&hash.as_bytes()[..32]);
+    seed
+}
+
+pub fn derive_bootstrap_candidate(
+    descriptor: &BootstrapDescriptor,
+    preshared_key: Option<&[u8; 32]>,
+    slot: u8,
+) -> Option<MaskProfile> {
+    let embedded_masks = &descriptor.embedded_masks;
+    let base_ids = if descriptor.base_mask_ids.is_empty() && embedded_masks.is_empty() {
+        preset_masks::all()
+            .into_iter()
+            .map(|mask| mask.mask_id)
+            .collect::<Vec<_>>()
+    } else {
+        descriptor.base_mask_ids.clone()
+    };
+    if base_ids.is_empty() && embedded_masks.is_empty() {
+        return None;
+    }
+
+    let seed = derive_bootstrap_seed(descriptor, preshared_key, slot);
+    let selector_len = if !embedded_masks.is_empty() { embedded_masks.len() } else { base_ids.len() };
+    let base_index = (seed[0] as usize) % selector_len;
+    let mut mask = if !embedded_masks.is_empty() {
+        embedded_masks[base_index].clone()
+    } else {
+        preset_masks::by_id(&base_ids[base_index])?
+    };
+    let extra_gap_len = (seed[1] % 9) as usize;
+
+    if extra_gap_len > 0 {
+        let mut fields = mask.header_spec
+            .as_ref()
+            .map(HeaderSpec::fields)
+            .unwrap_or_else(|| vec![HeaderField::Fixed { bytes: mask.header_template.clone() }]);
+        fields.push(HeaderField::Random { len: extra_gap_len });
+        mask.header_spec = Some(HeaderSpec::Structured { fields });
+        mask.eph_pub_offset = mask.eph_pub_offset.saturating_add(extra_gap_len as u16);
+    }
+
+    mask.mask_id = format!(
+        "bootstrap:{}:{}:{}:{:02x}{:02x}",
+        descriptor.descriptor_id,
+        if !embedded_masks.is_empty() { &embedded_masks[base_index].mask_id } else { &base_ids[base_index] },
+        slot,
+        seed[0],
+        seed[1]
+    );
+    Some(mask)
+}
+
+pub fn derive_bootstrap_candidates(
+    descriptor: &BootstrapDescriptor,
+    preshared_key: Option<&[u8; 32]>,
+) -> Vec<MaskProfile> {
+    (0..descriptor.candidate_count)
+        .filter_map(|slot| derive_bootstrap_candidate(descriptor, preshared_key, slot))
+        .collect()
+}
+
 /// Mask profile for traffic mimicry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskProfile {
@@ -615,6 +870,21 @@ pub mod preset_masks {
             webrtc_sberjazz_v1(),
         ]
     }
+
+    pub fn by_id(mask_id: &str) -> Option<MaskProfile> {
+        match mask_id {
+            "webrtc_zoom_v3" => Some(webrtc_zoom_v3()),
+            "quic_https_v2" => Some(quic_https_v2()),
+            "webrtc_yandex_telemost_v1" => Some(webrtc_yandex_telemost_v1()),
+            "webrtc_vk_teams_v1" => Some(webrtc_vk_teams_v1()),
+            "webrtc_sberjazz_v1" => Some(webrtc_sberjazz_v1()),
+            _ => None,
+        }
+    }
+
+    pub fn bootstrap_default() -> MaskProfile {
+        webrtc_zoom_v3()
+    }
 }
 
 #[cfg(test)]
@@ -763,5 +1033,69 @@ mod tests {
         let mask2 = preset_masks::quic_https_v2();
         assert!(mask2.header_spec.is_some());
         assert_eq!(mask2.version, 2);
+    }
+
+    #[test]
+    fn bootstrap_derivation_is_deterministic() {
+        let descriptor = BootstrapDescriptor {
+            descriptor_id: "epoch-1".into(),
+            version: 1,
+            created_at: 0,
+            expires_at: u64::MAX,
+            base_mask_ids: vec!["webrtc_zoom_v3".into(), "quic_https_v2".into()],
+            embedded_masks: Vec::new(),
+            candidate_count: 4,
+            kdf_salt: [7u8; 32],
+            signature: [0u8; 64],
+        };
+        let psk = [3u8; 32];
+        let left = derive_bootstrap_candidates(&descriptor, Some(&psk));
+        let right = derive_bootstrap_candidates(&descriptor, Some(&psk));
+
+        assert_eq!(left.len(), right.len());
+        for (lhs, rhs) in left.iter().zip(right.iter()) {
+            assert_eq!(lhs.mask_id, rhs.mask_id);
+            assert_eq!(lhs.eph_pub_offset, rhs.eph_pub_offset);
+            assert_eq!(lhs.header_spec.as_ref().map(|s| s.min_length()), rhs.header_spec.as_ref().map(|s| s.min_length()));
+        }
+    }
+
+    #[test]
+    fn bootstrap_derivation_varies_across_psks() {
+        let descriptor = BootstrapDescriptor {
+            descriptor_id: "epoch-2".into(),
+            version: 1,
+            created_at: 0,
+            expires_at: u64::MAX,
+            base_mask_ids: vec!["webrtc_zoom_v3".into(), "quic_https_v2".into()],
+            embedded_masks: Vec::new(),
+            candidate_count: 4,
+            kdf_salt: [11u8; 32],
+            signature: [0u8; 64],
+        };
+
+        let first = derive_bootstrap_candidates(&descriptor, Some(&[1u8; 32]));
+        let second = derive_bootstrap_candidates(&descriptor, Some(&[2u8; 32]));
+
+        assert_ne!(first[0].mask_id, second[0].mask_id);
+    }
+
+    #[test]
+    fn bootstrap_derivation_supports_embedded_masks() {
+        let descriptor = BootstrapDescriptor {
+            descriptor_id: "epoch-3".into(),
+            version: 1,
+            created_at: 0,
+            expires_at: u64::MAX,
+            base_mask_ids: Vec::new(),
+            embedded_masks: vec![preset_masks::webrtc_zoom_v3()],
+            candidate_count: 1,
+            kdf_salt: [13u8; 32],
+            signature: [0u8; 64],
+        };
+
+        let masks = derive_bootstrap_candidates(&descriptor, Some(&[9u8; 32]));
+        assert_eq!(masks.len(), 1);
+        assert!(masks[0].mask_id.starts_with("bootstrap:epoch-3:webrtc_zoom_v3:"));
     }
 }

@@ -7,6 +7,8 @@
 //! - Auto Mask Recording CLI support
 
 pub mod client;
+pub mod bootstrap_cache;
+pub mod bootstrap_loader;
 pub mod mimicry;
 pub mod tunnel;
 pub mod record_cmd;

@@ -8,6 +8,12 @@ license.workspace = true
 name = "aivpn-client"
 path = "src/main.rs"
 
+[features]
+default = []
+# Production secure mode: disables built-in bootstrap fallback
+# When enabled, client will fail to start if no valid descriptors are available
+production-secure = []
+
 [dependencies]
 aivpn-common = { path = "../aivpn-common", features = ["client-upload"] }
 
@@ -42,3 +48,4 @@ clap = { version = "4.4", features = ["derive"] }
 base64 = "0.22"
 hex = "0.4"
 portable-atomic = "1"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }

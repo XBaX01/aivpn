@@ -4,7 +4,7 @@
   "created_at": 0,
   "expires_at": 18446744073709551615,
   "spoof_protocol": "QUIC",
-  "header_template": [192, 0, 0, 0, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0],
+  "header_template": [192, 0, 0, 0, 1, 8, 73, 142, 56, 201, 15, 88, 197, 42],
   "eph_pub_offset": 14,
   "eph_pub_length": 32,
   "size_distribution": {

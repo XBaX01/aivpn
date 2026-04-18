@@ -4,7 +4,7 @@
   "created_at": 0,
   "expires_at": 18446744073709551615,
   "spoof_protocol": "WebRTC_STUN",
-  "header_template": [0, 1, 0, 0, 33, 18, 164, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "header_template": [0, 1, 0, 0, 33, 18, 164, 66, 89, 201, 77, 134, 45, 167, 22, 98, 173, 55, 141, 210],
   "eph_pub_offset": 20,
   "eph_pub_length": 32,
   "size_distribution": {

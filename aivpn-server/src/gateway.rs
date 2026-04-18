@@ -16,7 +16,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn, error, debug};
-use hex;
 
 use aivpn_common::crypto::{
     self, encrypt_payload, decrypt_payload,
@@ -26,7 +25,9 @@ use aivpn_common::protocol::{
     InnerType, InnerHeader, ControlPayload, ControlSubtype,
     MAX_PACKET_SIZE,
 };
-use aivpn_common::mask::MaskProfile;
+use aivpn_common::mask::{
+    current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
+};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::VpnNetworkConfig;
 
@@ -69,6 +70,8 @@ pub struct GatewayConfig {
     pub session_timeout_secs: Option<u64>,
     /// Session idle timeout in seconds (default: 300). `None` uses the default.
     pub idle_timeout_secs: Option<u64>,
+    /// Optional custom bootstrap masks embedded into signed descriptors.
+    pub bootstrap_masks: Vec<MaskProfile>,
 }
 
 impl Default for GatewayConfig {
@@ -89,6 +92,7 @@ impl Default for GatewayConfig {
             mask_dir: std::path::PathBuf::from("/var/lib/aivpn/masks"),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            bootstrap_masks: Vec::new(),
         }
     }
 }
@@ -157,40 +161,46 @@ impl MaskCatalog {
     /// handshake embeds `eph_pub` inside the MDH at `eph_offset`.
     pub fn packet_layout(&self) -> (usize, usize, usize, usize) {
         let fallback = (20usize, 52usize, 20usize, 32usize);
-        let primary_id = self.primary_mask_id.lock().clone();
-        let Some(mask) = self.masks.get(&primary_id).map(|entry| entry.value().clone())
-            .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone())) else {
+        let Some(mask) = self.primary_mask() else {
             return fallback;
         };
 
-        let eph_offset = mask.eph_pub_offset as usize;
-        let eph_len = mask.eph_pub_length as usize;
-        let packet_mdh_len = mask.header_spec
-            .as_ref()
-            .map(|spec| spec.min_length())
-            .unwrap_or_else(|| mask.header_template.len());
-        let handshake_mdh_len = packet_mdh_len.max(eph_offset.saturating_add(eph_len));
-        (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len)
+        packet_layout_for_mask(&mask)
     }
 
     /// Get the regular MDH bytes used for server->client packets.
     /// Uses HeaderSpec for dynamic per-packet generation when available (Issue #30 fix).
     pub fn packet_mdh_bytes(&self) -> Vec<u8> {
+        self.primary_mask()
+            .map(|mask| packet_mdh_bytes_for_mask(&mask))
+            .unwrap_or_else(|| vec![0u8; 20])
+    }
+
+    pub fn primary_mask(&self) -> Option<MaskProfile> {
         let primary_id = self.primary_mask_id.lock().clone();
-        let mask = self.masks.get(&primary_id)
+        self.masks.get(&primary_id)
             .map(|entry| entry.value().clone())
-            .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone()));
-        match mask {
-            Some(m) => {
-                if let Some(ref spec) = m.header_spec {
-                    let mut rng = rand::thread_rng();
-                    spec.generate(&mut rng)
-                } else {
-                    m.header_template.clone()
-                }
-            }
-            None => vec![0u8; 20],
-        }
+            .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone()))
+    }
+}
+
+fn packet_layout_for_mask(mask: &MaskProfile) -> (usize, usize, usize, usize) {
+    let eph_offset = mask.eph_pub_offset as usize;
+    let eph_len = mask.eph_pub_length as usize;
+    let packet_mdh_len = mask.header_spec
+        .as_ref()
+        .map(|spec| spec.min_length())
+        .unwrap_or_else(|| mask.header_template.len());
+    let handshake_mdh_len = packet_mdh_len.max(eph_offset.saturating_add(eph_len));
+    (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len)
+}
+
+fn packet_mdh_bytes_for_mask(mask: &MaskProfile) -> Vec<u8> {
+    if let Some(ref spec) = mask.header_spec {
+        let mut rng = rand::thread_rng();
+        spec.generate(&mut rng)
+    } else {
+        mask.header_template.clone()
     }
 }
 
@@ -226,6 +236,82 @@ pub struct Gateway {
     /// Mask store for auto-generated masks
     #[allow(dead_code)]
     mask_store: Option<Arc<MaskStore>>,
+    /// Active bootstrap descriptors for previous/current/next epochs.
+    bootstrap_descriptors: Vec<BootstrapDescriptor>,
+}
+
+const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
+const BOOTSTRAP_DESCRIPTOR_CANDIDATES: u8 = 4;
+
+fn bootstrap_epoch(unix_secs: u64) -> u64 {
+    unix_secs / BOOTSTRAP_ROTATION_SECS
+}
+
+pub fn derive_server_signing_key(server_private_key: &[u8; 32]) -> ed25519_dalek::SigningKey {
+    let seed = blake3::derive_key("aivpn-ed25519-signing-v1", server_private_key);
+    ed25519_dalek::SigningKey::from_bytes(&seed)
+}
+
+fn sign_bootstrap_descriptor(
+    mut descriptor: BootstrapDescriptor,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> BootstrapDescriptor {
+    use ed25519_dalek::Signer;
+    descriptor.signature = signing_key.sign(&descriptor.signing_bytes()).to_bytes();
+    descriptor
+}
+
+fn build_bootstrap_descriptor(
+    server_seed: &[u8; 32],
+    signing_key: &ed25519_dalek::SigningKey,
+    epoch: u64,
+    bootstrap_masks: &[MaskProfile],
+) -> BootstrapDescriptor {
+    let mut hasher = blake3::Hasher::new_keyed(server_seed);
+    hasher.update(&epoch.to_le_bytes());
+    let hash = hasher.finalize();
+    let mut kdf_salt = [0u8; 32];
+    kdf_salt.copy_from_slice(&hash.as_bytes()[..32]);
+    let created_at = epoch * BOOTSTRAP_ROTATION_SECS;
+    let expires_at = created_at + (2 * BOOTSTRAP_ROTATION_SECS);
+    let (base_mask_ids, embedded_masks) = if bootstrap_masks.is_empty() {
+        (
+            aivpn_common::mask::preset_masks::all()
+                .into_iter()
+                .map(|mask| mask.mask_id)
+                .collect(),
+            Vec::new(),
+        )
+    } else {
+        (Vec::new(), bootstrap_masks.to_vec())
+    };
+
+    sign_bootstrap_descriptor(
+        BootstrapDescriptor {
+            descriptor_id: format!("epoch-{}", epoch),
+            version: 1,
+            created_at,
+            expires_at,
+            base_mask_ids,
+            embedded_masks,
+            candidate_count: BOOTSTRAP_DESCRIPTOR_CANDIDATES,
+            kdf_salt,
+            signature: [0u8; 64],
+        },
+        signing_key,
+    )
+}
+
+pub fn build_bootstrap_descriptors(
+    server_seed: &[u8; 32],
+    signing_key: &ed25519_dalek::SigningKey,
+    bootstrap_masks: &[MaskProfile],
+) -> Vec<BootstrapDescriptor> {
+    let epoch = bootstrap_epoch(current_unix_secs());
+    [epoch.saturating_sub(1), epoch, epoch.saturating_add(1)]
+        .into_iter()
+        .map(|value| build_bootstrap_descriptor(server_seed, signing_key, value, bootstrap_masks))
+        .collect()
 }
 
 impl Gateway {
@@ -334,9 +420,6 @@ impl Gateway {
     }
 
     pub fn new(config: GatewayConfig) -> Result<Self> {
-        use rand::rngs::OsRng;
-        use rand::RngCore;
-        
         // Create server keypair (use config key if provided, otherwise generate ephemeral)
         let server_keys = if config.server_private_key != [0u8; 32] {
             crypto::KeyPair::from_private_key(config.server_private_key)
@@ -345,9 +428,8 @@ impl Gateway {
         };
         
         // Create Ed25519 signing key
-        let mut key_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut key_bytes);
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        let signing_key = derive_server_signing_key(&config.server_private_key);
+        let bootstrap_descriptors = build_bootstrap_descriptors(&config.server_private_key, &signing_key, &config.bootstrap_masks);
         
         // Initialize mask catalog (empty — populated from disk only)
         let mask_catalog = Arc::new(MaskCatalog::new());
@@ -358,14 +440,10 @@ impl Gateway {
             config.mask_dir.clone(),
         ));
         
-        // Set primary mask — must match what clients use for handshake.
-        // Prefer "webrtc_zoom_v3" (hardcoded in client), fall back to first available.
-        const DEFAULT_PRIMARY_MASK: &str = "webrtc_zoom_v3";
-        let primary_id = if mask_catalog.masks.contains_key(DEFAULT_PRIMARY_MASK) {
-            DEFAULT_PRIMARY_MASK.to_string()
-        } else if let Some(first) = mask_catalog.masks.iter().next() {
+        // Runtime primary mask is selected from the masks loaded on disk.
+        // Bootstrap compatibility is handled separately using built-in presets.
+        let primary_id = if let Some(first) = mask_catalog.masks.iter().next() {
             let id = first.key().clone();
-            warn!("Primary mask '{}' not found on disk, falling back to '{}'", DEFAULT_PRIMARY_MASK, id);
             id
         } else {
             String::new()
@@ -378,9 +456,7 @@ impl Gateway {
         }
         
         // Get default mask from catalog (required — at least one mask must exist on disk)
-        let default_mask = mask_catalog.masks.get(DEFAULT_PRIMARY_MASK)
-            .map(|e| e.value().clone())
-            .or_else(|| mask_catalog.masks.iter().next().map(|e| e.value().clone()))
+        let default_mask = mask_catalog.primary_mask()
             .ok_or_else(|| Error::Session(
                 format!("No masks found in {:?} — place mask JSON files there before starting the server", config.mask_dir)
             ))?;
@@ -424,7 +500,22 @@ impl Gateway {
             client_db: config.client_db,
             recording_manager: Some(recording_manager),
             mask_store: Some(mask_store),
+            bootstrap_descriptors,
         })
+    }
+
+    async fn send_bootstrap_descriptors(
+        &self,
+        session: &Arc<parking_lot::Mutex<Session>>,
+    ) -> Result<()> {
+        for descriptor in &self.bootstrap_descriptors {
+            let payload = ControlPayload::BootstrapDescriptorUpdate {
+                descriptor_data: rmp_serde::to_vec(descriptor)
+                    .map_err(|e| Error::Session(format!("Failed to serialize bootstrap descriptor: {}", e)))?,
+            };
+            self.send_control_message(&payload, session).await?;
+        }
+        Ok(())
     }
     
     /// Start the gateway
@@ -623,7 +714,7 @@ impl Gateway {
             
             // Collect mask update packets to send AFTER releasing the neural lock
             // (parking_lot::MutexGuard is !Send, cannot hold across .await)
-            let mut pending_sends: Vec<(Vec<u8>, std::net::SocketAddr)> = Vec::new();
+            let mut pending_sends: Vec<(Vec<u8>, std::net::SocketAddr, [u8; 16], MaskProfile)> = Vec::new();
             
             {
                 let neural_guard = neural.lock();
@@ -652,13 +743,11 @@ impl Gateway {
                                             catalog.available_count()
                                         );
                                         
-                                        // Update session's mask and build notification packet
-                                        if let Some((session, client_addr)) =
-                                            sessions.update_session_mask(session_id, new_mask.clone())
-                                        {
+                                        if let Some(session) = sessions.get_session(session_id) {
+                                            let client_addr = session.lock().client_addr;
                                             match sessions.build_mask_update_packet(&session, &new_mask) {
                                                 Ok(packet) => {
-                                                    pending_sends.push((packet, client_addr));
+                                                    pending_sends.push((packet, client_addr, *session_id, new_mask.clone()));
                                                 }
                                                 Err(e) => {
                                                     warn!("Failed to build MaskUpdate packet: {}", e);
@@ -701,11 +790,10 @@ impl Gateway {
                                 "Anomaly-triggered rotation to mask '{}'",
                                 new_mask.mask_id
                             );
-                            if let Some((session, client_addr)) =
-                                sessions.update_session_mask(session_id, new_mask.clone())
-                            {
+                            if let Some(session) = sessions.get_session(session_id) {
+                                let client_addr = session.lock().client_addr;
                                 if let Ok(packet) = sessions.build_mask_update_packet(&session, &new_mask) {
-                                    pending_sends.push((packet, client_addr));
+                                    pending_sends.push((packet, client_addr, *session_id, new_mask.clone()));
                                 }
                             }
                             metrics.record_mask_rotation();
@@ -715,10 +803,11 @@ impl Gateway {
             } // neural_guard dropped here
             
             // Send collected MaskUpdate packets (async, safe now)
-            for (packet, client_addr) in pending_sends {
+            for (packet, client_addr, session_id, new_mask) in pending_sends {
                 if let Err(e) = socket.send_to(&packet, client_addr).await {
                     warn!("Failed to send MaskUpdate to {}: {}", client_addr, e);
                 } else {
+                    sessions.update_session_mask(&session_id, new_mask);
                     info!("MaskUpdate control message sent to {}", client_addr);
                 }
             }
@@ -1087,14 +1176,14 @@ impl Gateway {
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&packet_data[0..TAG_SIZE]);
         
-        // Determine handshake layout from the primary mask.
-        let (packet_mdh_len, handshake_mdh_len, eph_offset, eph_len) = self.mask_catalog.packet_layout();
+        // Existing-session parsing uses the runtime primary mask layout.
+        let (packet_mdh_len, handshake_mdh_len, _eph_offset, _eph_len) = self.mask_catalog.packet_layout();
         debug!(
             "Server using packet layout: packet_mdh_len={}, handshake_mdh_len={}, eph_offset={}, eph_len={}",
             packet_mdh_len,
             handshake_mdh_len,
-            eph_offset,
-            eph_len
+            _eph_offset,
+            _eph_len
         );
         let mut is_new_session = false;
         let (session, counter, is_ratcheted_tag) = if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
@@ -1141,55 +1230,66 @@ impl Gateway {
             //     }
             // }
 
-            // Try to establish a new one from eph_pub in MDH
-            if packet_data.len() < TAG_SIZE + handshake_mdh_len {
-                return Err(Error::InvalidPacket("Too short for session init"));
-            }
-            let eph_start = TAG_SIZE + eph_offset;
-            if packet_data.len() < eph_start + eph_len {
-                return Err(Error::InvalidPacket("Missing eph_pub for new session"));
-            }
-            let mut eph_pub = [0u8; 32];
-            eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + eph_len]);
-            debug!("Server received eph_pub (before deobfuscation): {}", hex::encode(&eph_pub));
-            
-            // Deobfuscate eph_pub (HIGH-9)
-            crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
-            debug!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
-            
-            // Try to create session with each registered client's PSK.
+            // Try to establish a new session using one of the built-in bootstrap masks.
+            // Runtime masks can be server-generated, but bootstrap must remain compatible
+            // with clients that only know the shipped presets.
             // If client_db is configured, iterate registered clients and try
             // DH + PSK to find one whose derived tags match.
             // Falls back to no-PSK for backward compatibility.
-            let (session, matched_client_id) = if let Some(ref db) = self.client_db {
+            let builtin_bootstrap_masks = aivpn_common::mask::preset_masks::all();
+            let (session, matched_client_id, bootstrap_mask) = if let Some(ref db) = self.client_db {
                 let clients = db.list_clients();
                 let mut found = None;
-                for client_cfg in &clients {
-                    if !client_cfg.enabled { continue; }
+                'bootstrap: for client_cfg in &clients {
+                    if !client_cfg.enabled {
+                        continue;
+                    }
+
                     let psk = client_cfg.psk;
-                    match self.session_manager.create_session(
-                        client_addr,
-                        eph_pub,
-                        Some(psk),
-                        Some(client_cfg.vpn_ip),
-                    ) {
-                        Ok(sess) => {
-                            debug!("Testing tag validation for client {} (VPN IP: {})", client_cfg.id, client_cfg.vpn_ip);
-                            let validation = sess.lock().validate_tag(&tag);
-                            if validation.is_some() {
-                                debug!("Tag validation SUCCESS for client {}", client_cfg.id);
-                                found = Some((sess, Some(client_cfg.id.clone())));
-                                break;
-                            } else {
-                                // PSK mismatch — rollback this attempt
-                                debug!("Tag validation FAILED for client {} (tag: {})", client_cfg.id, hex::encode(&tag));
+                    let candidate_masks = self.bootstrap_descriptors.iter()
+                        .flat_map(|descriptor| derive_bootstrap_candidates(descriptor, Some(&psk)))
+                        .chain(builtin_bootstrap_masks.clone().into_iter())
+                        .collect::<Vec<_>>();
+
+                    for bootstrap_mask in candidate_masks {
+                        let (_, candidate_handshake_mdh_len, candidate_eph_offset, candidate_eph_len) =
+                            packet_layout_for_mask(&bootstrap_mask);
+                        if packet_data.len() < TAG_SIZE + candidate_handshake_mdh_len {
+                            continue;
+                        }
+                        let eph_start = TAG_SIZE + candidate_eph_offset;
+                        if packet_data.len() < eph_start + candidate_eph_len {
+                            continue;
+                        }
+
+                        let mut eph_pub = [0u8; 32];
+                        eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + candidate_eph_len]);
+                        crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
+
+                        match self.session_manager.create_session(
+                            client_addr,
+                            eph_pub,
+                            Some(psk),
+                            Some(client_cfg.vpn_ip),
+                        ) {
+                            Ok(sess) => {
+                                let validation = sess.lock().validate_tag(&tag);
+                                if validation.is_some() {
+                                    debug!(
+                                        "Tag validation SUCCESS for client {} via bootstrap mask {}",
+                                        client_cfg.id,
+                                        bootstrap_mask.mask_id
+                                    );
+                                    found = Some((sess, Some(client_cfg.id.clone()), bootstrap_mask));
+                                    break 'bootstrap;
+                                }
                                 let sid = sess.lock().session_id;
                                 self.session_manager.rollback_failed_session(&sid);
                             }
-                        }
-                        Err(e) => {
-                            debug!("create_session failed: {}", e);
-                            continue;
+                            Err(e) => {
+                                debug!("create_session failed: {}", e);
+                                continue;
+                            }
                         }
                     }
                 }
@@ -1214,13 +1314,42 @@ impl Gateway {
                 }
             } else {
                 // No client DB — legacy mode without PSK
-                let sess = self.session_manager.create_session(
-                    client_addr,
-                    eph_pub,
-                    None,
-                    None,
-                )?;
-                (sess, None)
+                let mut found = None;
+                let candidate_masks = self.bootstrap_descriptors.iter()
+                    .flat_map(|descriptor| derive_bootstrap_candidates(descriptor, None))
+                    .chain(builtin_bootstrap_masks.clone().into_iter())
+                    .collect::<Vec<_>>();
+                for bootstrap_mask in candidate_masks {
+                    let (_, candidate_handshake_mdh_len, candidate_eph_offset, candidate_eph_len) =
+                        packet_layout_for_mask(&bootstrap_mask);
+                    if packet_data.len() < TAG_SIZE + candidate_handshake_mdh_len {
+                        continue;
+                    }
+                    let eph_start = TAG_SIZE + candidate_eph_offset;
+                    if packet_data.len() < eph_start + candidate_eph_len {
+                        continue;
+                    }
+
+                    let mut eph_pub = [0u8; 32];
+                    eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + candidate_eph_len]);
+                    crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
+
+                    let sess = self.session_manager.create_session(
+                        client_addr,
+                        eph_pub,
+                        None,
+                        None,
+                    )?;
+                    let validation = sess.lock().validate_tag(&tag);
+                    if validation.is_some() {
+                        found = Some((sess, None, bootstrap_mask));
+                        break;
+                    }
+                    let sid = sess.lock().session_id;
+                    self.session_manager.rollback_failed_session(&sid);
+                }
+
+                found.ok_or_else(|| Error::InvalidPacket("No bootstrap mask matched this handshake"))?
             };
             
             // Validate the tag against the session.
@@ -1267,6 +1396,11 @@ impl Gateway {
             // Successful handshake — clear cooldown for this IP
             self.handshake_cooldowns.remove(&client_addr.ip());
 
+            {
+                let mut sess = session.lock();
+                sess.mask = Some(bootstrap_mask.clone());
+            }
+
             // Record handshake in client DB
             if let (Some(ref db), Some(ref cid)) = (&self.client_db, &matched_client_id) {
                 db.record_handshake(cid);
@@ -1276,6 +1410,22 @@ impl Gateway {
             }
             
             self.send_server_hello(&session, client_addr).await?;
+            self.send_bootstrap_descriptors(&session).await?;
+
+            if let Some(runtime_mask) = self.mask_catalog.primary_mask() {
+                if runtime_mask.mask_id != bootstrap_mask.mask_id {
+                    match self.session_manager.build_mask_update_packet(&session, &runtime_mask) {
+                        Ok(packet) => {
+                            self.udp_socket.as_ref().unwrap().send_to(&packet, client_addr).await?;
+                            let session_id = session.lock().session_id;
+                            self.session_manager.update_session_mask(&session_id, runtime_mask);
+                        }
+                        Err(e) => {
+                            warn!("Failed to send initial runtime MaskUpdate: {}", e);
+                        }
+                    }
+                }
+            }
             
             // NOTE: PFS ratchet is deferred until AFTER decrypting the init packet,
             // which was encrypted with pre-ratchet keys.
@@ -1651,6 +1801,9 @@ impl Gateway {
             ControlPayload::RecordingStatus { .. } => {
                 // Client-side only, ignore on server
             }
+            ControlPayload::BootstrapDescriptorUpdate { .. } => {
+                // Client-side only, ignore on server
+            }
         }
         
         Ok(())
@@ -1663,9 +1816,16 @@ impl Gateway {
         session: &Arc<parking_lot::Mutex<Session>>,
     ) -> Result<()> {
         let socket = self.udp_socket.as_ref().unwrap();
+        let mdh = {
+            let sess = session.lock();
+            sess.mask
+                .as_ref()
+                .map(packet_mdh_bytes_for_mask)
+                .unwrap_or_else(|| self.mask_catalog.packet_mdh_bytes())
+        };
         Self::send_control_message_via(
             socket,
-            &self.mask_catalog.packet_mdh_bytes(),
+            &mdh,
             payload,
             session,
         ).await
@@ -1789,10 +1949,15 @@ impl Gateway {
             counter,
             time_window,
         );
-        
-        // Build MDH using the current packet mask so client/server agree on
-        // the ciphertext offset for ServerHello and other server packets.
-        let mdh = self.mask_catalog.packet_mdh_bytes();
+        let current_mask = sess.mask.clone();
+        drop(sess);
+
+        // Build MDH using the session's current packet mask so the peer can
+        // decode bootstrap traffic before any runtime MaskUpdate arrives.
+        let mdh = current_mask
+            .as_ref()
+            .map(packet_mdh_bytes_for_mask)
+            .unwrap_or_else(|| self.mask_catalog.packet_mdh_bytes());
         
         // Assemble packet: TAG | MDH | ciphertext (no cleartext padding)
         let mut packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());

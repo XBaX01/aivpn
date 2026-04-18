@@ -1,9 +1,0 @@
-{
-  "server_addr": "YOUR_SERVER_IP:443",
-  "server_public_key": "<base64_encoded_32_byte_public_key>",
-  "preshared_key": null,
-  "tun_name": "aivpn",
-  "tun_addr": "10.0.0.2",
-  "tun_netmask": "255.255.255.0",
-  "default_mask": "webrtc_zoom_v3"
-}

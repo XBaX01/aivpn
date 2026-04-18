@@ -61,6 +61,7 @@ pub enum ControlSubtype {
     RecordingFailed = 0x0E,
     RecordingStatusRequest = 0x0F,
     RecordingStatus = 0x10,
+    BootstrapDescriptorUpdate = 0x11,
 }
 
 impl ControlSubtype {
@@ -82,6 +83,7 @@ impl ControlSubtype {
             0x0E => Some(Self::RecordingFailed),
             0x0F => Some(Self::RecordingStatusRequest),
             0x10 => Some(Self::RecordingStatus),
+            0x11 => Some(Self::BootstrapDescriptorUpdate),
             _ => None,
         }
     }
@@ -294,6 +296,9 @@ pub enum ControlPayload {
         can_record: bool,
         active_service: Option<String>,
     },
+    BootstrapDescriptorUpdate {
+        descriptor_data: Vec<u8>,
+    },
 }
 
 impl ControlPayload {
@@ -401,6 +406,11 @@ impl ControlPayload {
                     buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
                     buf.extend_from_slice(service_bytes);
                 }
+            }
+            Self::BootstrapDescriptorUpdate { descriptor_data } => {
+                buf.push(ControlSubtype::BootstrapDescriptorUpdate as u8);
+                buf.extend_from_slice(&(descriptor_data.len() as u16).to_le_bytes());
+                buf.extend_from_slice(descriptor_data);
             }
         }
         
@@ -591,6 +601,18 @@ impl ControlPayload {
                     None
                 };
                 Ok(Self::RecordingStatus { can_record, active_service })
+            }
+            ControlSubtype::BootstrapDescriptorUpdate => {
+                if data.len() < 3 {
+                    return Err(Error::InvalidPacket("BootstrapDescriptorUpdate too short"));
+                }
+                let descriptor_len = u16::from_le_bytes([data[1], data[2]]) as usize;
+                if data.len() < 3 + descriptor_len {
+                    return Err(Error::InvalidPacket("BootstrapDescriptorUpdate invalid length"));
+                }
+                Ok(Self::BootstrapDescriptorUpdate {
+                    descriptor_data: data[3..3 + descriptor_len].to_vec(),
+                })
             }
         }
     }

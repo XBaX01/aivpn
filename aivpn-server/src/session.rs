@@ -1018,12 +1018,14 @@ impl SessionManager {
             time_window,
         );
 
-        // MDH — use mask's HeaderSpec for dynamic per-packet generation (Issue #30)
-        let mdh = if let Some(ref spec) = self.default_mask.header_spec {
+        // Wrap MaskUpdate in the session's current mask. The switch to `new_mask`
+        // happens only after the packet is successfully delivered.
+        let transport_mask = sess.mask.as_ref().unwrap_or(&self.default_mask);
+        let mdh = if let Some(ref spec) = transport_mask.header_spec {
             let mut rng = rand::thread_rng();
             spec.generate(&mut rng)
         } else {
-            self.default_mask.header_template.clone()
+            transport_mask.header_template.clone()
         };
 
         // Assemble: TAG | MDH | ciphertext
