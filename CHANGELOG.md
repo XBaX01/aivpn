@@ -16,6 +16,7 @@
 - **Optimized binary sizes**: Reduced binary sizes by 3-5x (release build)
 - **Universal macOS binaries**: All macOS components built as universal (x86_64 + arm64)
 - **Improved session management**: Better handling of sessions and reconnections
+- **Removed 24h hard session timeout**: `HARD_TIMEOUT` now defaults to `Duration::ZERO` (unlimited). PFS ratchet handles key rotation, forced expiration caused reconnect failures (Issue #33)
 - **Enhanced error handling**: More detailed connection error diagnostics
 
 ### Fixed
