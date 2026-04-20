@@ -1,0 +1,40 @@
+# AIVPN Windows Client Build Dockerfile
+# Uses rust:latest to support libloading 0.9.0 which requires rustc 1.88+
+# Uses clang with Windows GNU target (no MSVC required)
+
+FROM rust:latest AS builder
+
+WORKDIR /app
+
+# Install dependencies for Windows cross-compilation with GNU toolchain
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    clang \
+    llvm \
+    mingw-w64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Windows GNU target (compatible with most Windows systems)
+RUN rustup target add x86_64-pc-windows-gnu
+
+# Set up clang as the compiler for Windows GNU target
+ENV CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+ENV CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++
+
+# Copy workspace
+COPY Cargo.toml ./
+COPY Cargo.lock* ./
+COPY aivpn-common aivpn-common/
+COPY aivpn-client aivpn-client/
+COPY aivpn-server aivpn-server/
+COPY aivpn-android-core aivpn-android-core/
+COPY aivpn-windows aivpn-windows/
+COPY mask-assets mask-assets/
+
+# Build Windows client in release mode (GNU ABI)
+RUN cargo build --release --target x86_64-pc-windows-gnu --bin aivpn-client
+
+# Stage 2: Extract binary
+FROM alpine:latest
+COPY --from=builder /app/target/x86_64-pc-windows-gnu/release/aivpn-client.exe /aivpn-client.exe
