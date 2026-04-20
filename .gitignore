@@ -114,3 +114,7 @@ MACOS_RECORDING_TEST.md
 deploy-server-release.sh
 docker-entrypoint.sh
 update-server.sh
+Dockerfile.windows-test
+Dockerfile.windows-test-full
+test-windows-docker-full.sh
+test-windows-docker.sh
