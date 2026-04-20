@@ -169,8 +169,13 @@ impl VpnManager {
         for path in &paths {
             if let Ok(content) = std::fs::read_to_string(path) {
                 if let Some((sent, recv)) = Self::parse_stats(&content) {
-                    self.stats.bytes_sent = sent;
-                    self.stats.bytes_received = recv;
+                    // Only update if new values are >= current (avoid jumps down)
+                    if sent >= self.stats.bytes_sent || self.stats.bytes_sent == 0 {
+                        self.stats.bytes_sent = sent;
+                    }
+                    if recv >= self.stats.bytes_received || self.stats.bytes_received == 0 {
+                        self.stats.bytes_received = recv;
+                    }
                     return;
                 }
             }

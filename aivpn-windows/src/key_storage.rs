@@ -5,8 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use aivpn_common::network_config::ClientNetworkConfig;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionKey {
     pub name: String,
@@ -16,7 +14,7 @@ pub struct ConnectionKey {
     #[serde(default)]
     pub vpn_ip: String,
     #[serde(default)]
-    pub network_config: Option<ClientNetworkConfig>,
+    pub full_tunnel: bool,
 }
 
 impl ConnectionKey {
@@ -28,17 +26,13 @@ impl ConnectionKey {
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
         let server_addr = json["s"].as_str().unwrap_or("").to_string();
         let vpn_ip = json["i"].as_str().unwrap_or("").to_string();
-        let network_config = json
-            .get("n")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<ClientNetworkConfig>(value).ok());
 
         Some(Self {
             name: name.to_string(),
             key: key.trim().to_string(),
             server_addr,
             vpn_ip,
-            network_config,
+            full_tunnel: false,
         })
     }
 }
@@ -50,8 +44,6 @@ pub struct KeyStorage {
     pub keys: Vec<ConnectionKey>,
     #[serde(default)]
     pub selected: Option<usize>,
-    #[serde(default)]
-    pub full_tunnel: bool,
 }
 
 impl KeyStorage {
@@ -73,7 +65,6 @@ impl KeyStorage {
         Self {
             keys: Vec::new(),
             selected: None,
-            full_tunnel: false,
         }
     }
 
@@ -87,10 +78,11 @@ impl KeyStorage {
         }
     }
 
-    pub fn add_key(&mut self, name: &str, key: &str) -> Result<(), String> {
+    pub fn add_key(&mut self, name: &str, key: &str, full_tunnel: bool) -> Result<(), String> {
         // Validate key format
-        let ck = ConnectionKey::from_key_string(name, key)
+        let mut ck = ConnectionKey::from_key_string(name, key)
             .ok_or_else(|| "Invalid connection key format".to_string())?;
+        ck.full_tunnel = full_tunnel;
 
         // Check for duplicates
         if self.keys.iter().any(|k| k.key == ck.key) {
@@ -105,12 +97,13 @@ impl KeyStorage {
         Ok(())
     }
 
-    pub fn update_key(&mut self, idx: usize, name: &str, key: &str) -> Result<(), String> {
+    pub fn update_key(&mut self, idx: usize, name: &str, key: &str, full_tunnel: bool) -> Result<(), String> {
         if idx >= self.keys.len() {
             return Err("Invalid key index".to_string());
         }
-        let ck = ConnectionKey::from_key_string(name, key)
+        let mut ck = ConnectionKey::from_key_string(name, key)
             .ok_or_else(|| "Invalid connection key format".to_string())?;
+        ck.full_tunnel = full_tunnel;
         self.keys[idx] = ck;
         self.save();
         Ok(())

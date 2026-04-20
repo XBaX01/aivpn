@@ -88,10 +88,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::Ru, "save") => "Сохранить",
         (Lang::En, "cancel") => "Cancel",
         (Lang::Ru, "cancel") => "Отмена",
-        (Lang::En, "edit") => "Edit",
-        (Lang::Ru, "edit") => "Изм.",
         (Lang::En, "delete") => "Delete",
         (Lang::Ru, "delete") => "Удалить",
+        (Lang::En, "edit") => "Edit",
+        (Lang::Ru, "edit") => "Изм.",
         (Lang::En, "no_keys") => "No keys added",
         (Lang::Ru, "no_keys") => "Ключи не добавлены",
 
