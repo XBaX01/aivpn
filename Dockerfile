@@ -50,8 +50,7 @@ RUN mkdir -p /etc/aivpn /dev/net /var/lib/aivpn/bootstrap /var/lib/aivpn/masks &
     mknod /dev/net/tun c 10 200 2>/dev/null || true && \
     chmod 600 /dev/net/tun && \
     chmod +x /usr/local/bin/docker-entrypoint.sh && \
-    mkdir -p /usr/share/aivpn && \
-    echo '[]' > /var/lib/aivpn/bootstrap/custom-bootstrap-mask.json
+    mkdir -p /usr/share/aivpn
 
 # Copy example config
 COPY config/server.json.example /usr/share/aivpn/server.json.example

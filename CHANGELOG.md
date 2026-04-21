@@ -24,6 +24,7 @@
 - **Android JNI stability**: Improved JNI call stability
 - **Bootstrap mask rotation**: Correct mask rotation on compromise
 - **Session tag window**: Fixed edge cases in tag handling
+- **Bootstrap mask loading** (Issue #38): Fixed parsing of bootstrap mask files - now supports both single MaskProfile objects and arrays of MaskProfile objects, as well as empty files
 
 ### Platform Updates
 - **macOS**: v0.4.0 (build 4)

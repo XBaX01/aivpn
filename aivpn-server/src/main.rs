@@ -426,13 +426,32 @@ fn load_bootstrap_masks(file_config: Option<&ServerFileConfig>) -> Result<Vec<Ma
         return Ok(Vec::new());
     };
 
-    let mut masks = Vec::with_capacity(files.len());
+    let mut masks = Vec::new();
     for file in files {
         let content = std::fs::read_to_string(&file)
             .map_err(|e| format!("{}: {}", file, e))?;
-        let mask = serde_json::from_str::<MaskProfile>(&content)
-            .map_err(|e| format!("{}: {}", file, e))?;
-        masks.push(mask);
+        
+        // Trim whitespace to check if file is empty
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            // Skip empty files silently
+            continue;
+        }
+        
+        // Try to parse as a single MaskProfile first
+        if let Ok(mask) = serde_json::from_str::<MaskProfile>(trimmed) {
+            masks.push(mask);
+            continue;
+        }
+        
+        // Try to parse as an array of MaskProfile
+        if let Ok(arr) = serde_json::from_str::<Vec<MaskProfile>>(trimmed) {
+            masks.extend(arr);
+            continue;
+        }
+        
+        // If both fail, return an error
+        return Err(format!("{}: invalid JSON format, expected MaskProfile object or array of MaskProfile objects", file));
     }
     Ok(masks)
 }
@@ -533,5 +552,224 @@ mod tests {
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
         assert_eq!(resolved.server_vpn_ip, Ipv4Addr::new(10, 150, 0, 1));
         assert_eq!(resolved.mtu, 1400);
+    }
+
+    #[test]
+    fn load_bootstrap_masks_handles_empty_file() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let empty_file = temp_dir.join("empty.json");
+        std::fs::File::create(&empty_file).unwrap().write_all(b"").unwrap();
+        
+        let file_config = ServerFileConfig {
+            listen_addr: None,
+            tun_name: None,
+            tun_addr: None,
+            tun_netmask: None,
+            network_config: None,
+            mask_dir: None,
+            bootstrap_mask_files: Some(vec![empty_file.to_string_lossy().to_string()]),
+            session_timeout_secs: None,
+            idle_timeout_secs: None,
+        };
+        
+        let result = load_bootstrap_masks(Some(&file_config));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn load_bootstrap_masks_handles_empty_array() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let array_file = temp_dir.join("array.json");
+        std::fs::File::create(&array_file).unwrap().write_all(b"[]").unwrap();
+        
+        let file_config = ServerFileConfig {
+            listen_addr: None,
+            tun_name: None,
+            tun_addr: None,
+            tun_netmask: None,
+            network_config: None,
+            mask_dir: None,
+            bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
+            session_timeout_secs: None,
+            idle_timeout_secs: None,
+        };
+        
+        let result = load_bootstrap_masks(Some(&file_config));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn load_bootstrap_masks_handles_single_object() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let single_file = temp_dir.join("single.json");
+        // Use a real mask profile from mask-assets (simplified but valid)
+        let mask_json = r#"{
+            "mask_id": "test_mask",
+            "version": 2,
+            "created_at": 0,
+            "expires_at": 18446744073709551615,
+            "spoof_protocol": "QUIC",
+            "header_template": [192, 0, 0, 0, 1, 8, 73, 142, 56, 201, 15, 88, 197, 42],
+            "eph_pub_offset": 14,
+            "eph_pub_length": 32,
+            "size_distribution": {
+                "dist_type": "Histogram",
+                "bins": [[64, 128, 0.3], [256, 512, 0.4], [768, 1200, 0.3]],
+                "parametric_type": null,
+                "parametric_params": null
+            },
+            "iat_distribution": {
+                "dist_type": "Exponential",
+                "params": [0.1],
+                "jitter_range_ms": [0.0, 10.0]
+            },
+            "padding_strategy": "MatchDistribution",
+            "fsm_states": [{"state_id": 0, "transitions": []}],
+            "fsm_initial_state": 0,
+            "signature_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "reverse_profile": null,
+            "signature": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "header_spec": {
+                "type": "Structured",
+                "fields": [
+                    {"kind": "Fixed", "bytes": [192]},
+                    {"kind": "Fixed", "bytes": [0, 0, 0, 1]},
+                    {"kind": "Fixed", "bytes": [8]},
+                    {"kind": "Id", "len": 8, "mode": "Random"}
+                ]
+            }
+        }"#;
+        std::fs::File::create(&single_file).unwrap().write_all(mask_json.as_bytes()).unwrap();
+        
+        let file_config = ServerFileConfig {
+            listen_addr: None,
+            tun_name: None,
+            tun_addr: None,
+            tun_netmask: None,
+            network_config: None,
+            mask_dir: None,
+            bootstrap_mask_files: Some(vec![single_file.to_string_lossy().to_string()]),
+            session_timeout_secs: None,
+            idle_timeout_secs: None,
+        };
+        
+        let result = load_bootstrap_masks(Some(&file_config));
+        assert!(result.is_ok());
+        let masks = result.unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0].mask_id, "test_mask");
+        
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn load_bootstrap_masks_handles_array_of_objects() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        
+        let array_file = temp_dir.join("array.json");
+        // Use a real mask profile from mask-assets (simplified but valid)
+        let mask_json = r#"[
+            {
+                "mask_id": "mask1",
+                "version": 2,
+                "created_at": 0,
+                "expires_at": 18446744073709551615,
+                "spoof_protocol": "QUIC",
+                "header_template": [192, 0, 0, 0, 1, 8, 73, 142, 56, 201, 15, 88, 197, 42],
+                "eph_pub_offset": 14,
+                "eph_pub_length": 32,
+                "size_distribution": {
+                    "dist_type": "Histogram",
+                    "bins": [[64, 128, 0.3], [256, 512, 0.4], [768, 1200, 0.3]],
+                    "parametric_type": null,
+                    "parametric_params": null
+                },
+                "iat_distribution": {
+                    "dist_type": "Exponential",
+                    "params": [0.1],
+                    "jitter_range_ms": [0.0, 10.0]
+                },
+                "padding_strategy": "MatchDistribution",
+                "fsm_states": [{"state_id": 0, "transitions": []}],
+                "fsm_initial_state": 0,
+                "signature_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "reverse_profile": null,
+                "signature": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "header_spec": {
+                    "type": "Structured",
+                    "fields": [
+                        {"kind": "Fixed", "bytes": [192]},
+                        {"kind": "Fixed", "bytes": [0, 0, 0, 1]}
+                    ]
+                }
+            },
+            {
+                "mask_id": "mask2",
+                "version": 2,
+                "created_at": 0,
+                "expires_at": 18446744073709551615,
+                "spoof_protocol": "WebRTC_STUN",
+                "header_template": [0, 1, 0, 0],
+                "eph_pub_offset": 4,
+                "eph_pub_length": 32,
+                "size_distribution": {
+                    "dist_type": "Histogram",
+                    "bins": [[256, 512, 0.5], [512, 1024, 0.5]],
+                    "parametric_type": null,
+                    "parametric_params": null
+                },
+                "iat_distribution": {
+                    "dist_type": "Exponential",
+                    "params": [0.2],
+                    "jitter_range_ms": [0.0, 20.0]
+                },
+                "padding_strategy": "MatchDistribution",
+                "fsm_states": [{"state_id": 0, "transitions": []}],
+                "fsm_initial_state": 0,
+                "signature_vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "reverse_profile": null,
+                "signature": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "header_spec": null
+            }
+        ]"#;
+        std::fs::File::create(&array_file).unwrap().write_all(mask_json.as_bytes()).unwrap();
+        
+        let file_config = ServerFileConfig {
+            listen_addr: None,
+            tun_name: None,
+            tun_addr: None,
+            tun_netmask: None,
+            network_config: None,
+            mask_dir: None,
+            bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
+            session_timeout_secs: None,
+            idle_timeout_secs: None,
+        };
+        
+        let result = load_bootstrap_masks(Some(&file_config));
+        assert!(result.is_ok());
+        let masks = result.unwrap();
+        assert_eq!(masks.len(), 2);
+        assert_eq!(masks[0].mask_id, "mask1");
+        assert_eq!(masks[1].mask_id, "mask2");
+        
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
