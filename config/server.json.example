@@ -7,9 +7,6 @@
     "mtu": 1346
   },
   "mask_dir": "/var/lib/aivpn/masks",
-  "bootstrap_mask_files": [
-    "/var/lib/aivpn/bootstrap/custom-bootstrap-mask.json"
-  ],
   "max_sessions": 500,
   "session_timeout_secs": 0,
   "idle_timeout_secs": 300,

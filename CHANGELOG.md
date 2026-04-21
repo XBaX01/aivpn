@@ -25,6 +25,7 @@
 - **Bootstrap mask rotation**: Correct mask rotation on compromise
 - **Session tag window**: Fixed edge cases in tag handling
 - **Bootstrap mask loading** (Issue #38): Fixed parsing of bootstrap mask files - now supports both single MaskProfile objects and arrays of MaskProfile objects, as well as empty files
+- **Bootstrap file reference removed from example config**: The `bootstrap_mask_files` entry has been removed from `config/server.json.example` since the bootstrap mask file is no longer created automatically. Users who need custom bootstrap masks can add the `bootstrap_mask_files` entry manually.
 
 ### Platform Updates
 - **macOS**: v0.4.0 (build 4)
