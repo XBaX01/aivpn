@@ -861,6 +861,8 @@ impl Gateway {
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
                     let (session_id, client_addr, downlink_iat_ms, tag, mdh, ciphertext) = {
                         let mut sess = session.lock();
+                        // Commit deferred mask switch if grace period has elapsed
+                        sess.commit_pending_mask();
                         let session_id = sess.session_id;
                         let client_addr = sess.client_addr;
                         let seq_num = sess.next_seq() as u16;
@@ -1849,7 +1851,8 @@ impl Gateway {
     ) -> Result<()> {
         let socket = self.udp_socket.as_ref().unwrap();
         let mdh = {
-            let sess = session.lock();
+            let mut sess = session.lock();
+            sess.commit_pending_mask();
             sess.mask
                 .as_ref()
                 .map(packet_mdh_bytes_for_mask)

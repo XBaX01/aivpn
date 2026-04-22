@@ -23,6 +23,7 @@ use aivpn_common::crypto::{
 };
 use aivpn_common::client_wire::{
     build_inner_packet, decode_packet_with_mdh_len, obfuscate_client_eph_pub, RecvWindow,
+    DecodedPacket,
 };
 use aivpn_common::protocol::{
     InnerType, ControlPayload, MAX_PACKET_SIZE,
@@ -77,6 +78,8 @@ pub struct AivpnClient {
     tunnel: Tunnel,
     udp_socket: Option<Arc<UdpSocket>>,
     mimicry_engine: Option<MimicryEngine>,
+    pub control_tx: Option<mpsc::Sender<ControlPayload>>,
+    pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
     session_keys: Option<SessionKeys>,
     upload_state: Option<Arc<Mutex<UploadCryptoState>>>,
     transition_recv_keys: Option<SessionKeys>,
@@ -88,6 +91,7 @@ pub struct AivpnClient {
     recv_window: RecvWindow,
     transition_recv_window: RecvWindow,
     recv_mdh_len: usize,
+    prev_recv_mdh_len: Option<usize>,
     // Traffic counters
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
@@ -113,6 +117,8 @@ impl AivpnClient {
             tunnel,
             udp_socket: None,
             mimicry_engine: None,
+            control_tx: None,
+            pending_mask: Arc::new(Mutex::new(None)),
             session_keys: None,
             upload_state: None,
             transition_recv_keys: None,
@@ -124,6 +130,7 @@ impl AivpnClient {
             recv_window: RecvWindow::new(),
             transition_recv_window: RecvWindow::new(),
             recv_mdh_len,
+            prev_recv_mdh_len: None,
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
@@ -264,6 +271,7 @@ impl AivpnClient {
         let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(8192);
         let (admin_tx, mut admin_rx) = mpsc::channel::<String>(16);
         let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
+        self.control_tx = Some(control_tx.clone());
 
         // Spawn local IPC listener for CLI commands
         tokio::spawn(async move {
@@ -395,6 +403,8 @@ impl AivpnClient {
         }));
         self.upload_state = Some(upload_state.clone());
 
+        let upload_pending_mask = self.pending_mask.clone();
+
         let mut upload_task = tokio::spawn(Self::spawn_upload(
             tun_to_udp_rx,
             control_rx,
@@ -402,6 +412,7 @@ impl AivpnClient {
             upload_engine,
             upload_state,
             upload_bytes_sent,
+            upload_pending_mask,
         ));
 
         // Main loop: download + shutdown + upload health
@@ -471,6 +482,7 @@ impl AivpnClient {
                     if let Err(e) = self.receive_and_write_packet(&packet).await {
                         match &e {
                             Error::InvalidPacket(_) => warn!("Receive invalid packet: {}", e),
+                            Error::Crypto(_) => warn!("Receive error (crypto): {}", e),
                             _ => {
                                 warn!("Receive error: {}", e);
                                 break Err(e);
@@ -500,16 +512,27 @@ impl AivpnClient {
         engine: MimicryEngine,
         upload_state: Arc<Mutex<UploadCryptoState>>,
         bytes_sent: Arc<AtomicU64>,
+        pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
             engine: MimicryEngine,
             upload_state: Arc<Mutex<UploadCryptoState>>,
             bytes_sent: Arc<AtomicU64>,
+            pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
+        }
+
+        impl MimicryEncryptor {
+            fn check_mask(&mut self) {
+                if let Some(mask) = self.pending_mask.lock().unwrap().take() {
+                    self.engine.update_mask(mask);
+                }
+            }
         }
 
         impl PacketEncryptor for MimicryEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+                self.check_mask();
                 let mut state = self.upload_state.lock().expect("upload state poisoned");
                 let inner = build_inner_packet(InnerType::Data, state.seq, payload);
                 state.seq = state.seq.wrapping_add(1);
@@ -520,6 +543,7 @@ impl AivpnClient {
             }
 
             fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
+                self.check_mask();
                 let mut state = self.upload_state.lock().expect("upload state poisoned");
                 let bytes = payload.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &bytes);
@@ -529,6 +553,7 @@ impl AivpnClient {
             }
 
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
+                self.check_mask();
                 let mut state = self.upload_state.lock().expect("upload state poisoned");
                 let keepalive = ControlPayload::Keepalive.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
@@ -542,7 +567,7 @@ impl AivpnClient {
             }
         }
 
-        let mut enc = MimicryEncryptor { engine, upload_state, bytes_sent };
+        let mut enc = MimicryEncryptor { engine, upload_state, bytes_sent, pending_mask };
         let config = UploadConfig {
             keepalive_interval: Duration::from_secs(15),
             ..Default::default()
@@ -565,24 +590,43 @@ impl AivpnClient {
 
         let decoded = match decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len) {
             Ok(decoded) => {
+                // Clear prev_mdh_len after successful decode with current — transition complete
+                self.prev_recv_mdh_len = None;
                 decoded
             }
             Err(primary_err) => {
-                let Some(fallback_keys) = self.transition_recv_keys.as_ref() else {
-                    return Err(primary_err);
-                };
-
-                match decode_packet_with_mdh_len(
-                    packet,
-                    fallback_keys,
-                    &mut self.transition_recv_window,
-                    mdh_len,
-                ) {
-                    Ok(decoded) => decoded,
-                    Err(_fallback_err) => return Err(primary_err),
+                // Fallback 1: try transition keys (PFS ratchet)
+                if let Some(fallback_keys) = self.transition_recv_keys.as_ref() {
+                    if let Ok(decoded) = decode_packet_with_mdh_len(
+                        packet,
+                        fallback_keys,
+                        &mut self.transition_recv_window,
+                        mdh_len,
+                    ) {
+                        return self.process_decoded(decoded).await;
+                    }
                 }
+
+                // Fallback 2: try previous MDH length (mask rotation in-flight)
+                if let Some(prev_mdh) = self.prev_recv_mdh_len {
+                    if prev_mdh != mdh_len {
+                        if let Ok(decoded) = decode_packet_with_mdh_len(
+                            packet, keys, &mut self.recv_window, prev_mdh,
+                        ) {
+                            debug!("Decoded with prev_mdh_len={} (transition in-flight)", prev_mdh);
+                            return self.process_decoded(decoded).await;
+                        }
+                    }
+                }
+
+                return Err(primary_err);
             }
         };
+        self.process_decoded(decoded).await
+    }
+
+    /// Process a successfully decoded packet (shared by primary and fallback paths)
+    async fn process_decoded(&mut self, decoded: DecodedPacket) -> Result<()> {
         let inner_header = decoded.header;
         let ip_payload = decoded.payload;
 
@@ -734,59 +778,30 @@ impl AivpnClient {
         Ok(())
     }
     
-    /// Send control message
     async fn send_control(&mut self, payload: &ControlPayload) -> Result<()> {
-        let mimicry = self.mimicry_engine.as_mut()
-            .ok_or(Error::Session("No mimicry engine".into()))?;
-
-        // Encode control message
-        let encoded = payload.encode()?;
-
-        // After the upload pipeline starts, all outbound traffic must share the
-        // same counter/seq timeline. Otherwise control packets and data packets
-        // advance independent counters and the server's tag window drifts.
-        let aivpn_packet = if let Some(upload_state) = &self.upload_state {
-            let mut state = upload_state.lock().expect("upload state poisoned");
-            let seq_num = state.seq;
-            state.seq = state.seq.wrapping_add(1);
-            let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
-            let keys = state.keys.clone();
-            let packet = mimicry.build_packet(
-                &inner_payload,
-                &keys,
-                &mut state.counter,
-                None,
-            )?;
-            self.send_seq = state.seq as u32;
-            self.counter = state.counter;
-            packet
+        if let Some(tx) = &self.control_tx {
+            if let Err(e) = tx.send(payload.clone()).await {
+                error!("Failed to send control message to upload task: {}", e);
+            }
         } else {
-            let keys = self.session_keys.as_ref()
-                .ok_or(Error::Session("No session keys".into()))?;
-            let seq_num = self.send_seq as u16;
-            self.send_seq = self.send_seq.wrapping_add(1);
-            let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
-            mimicry.build_packet(
-                &inner_payload,
-                keys,
-                &mut self.counter,
-                None,
-            )?
-        };
-
-        let socket = self.udp_socket.as_ref().unwrap();
-        socket.send(&aivpn_packet).await?;
-
+            warn!("control_tx not initialized, dropping control message");
+        }
         Ok(())
     }
     
     /// Update mask profile
     pub fn update_mask(&mut self, new_mask: MaskProfile) {
-        self.recv_mdh_len = packet_mdh_len_for_mask(&new_mask);
-        if let Some(ref mut engine) = self.mimicry_engine {
-            info!("Updating mask to {}", new_mask.mask_id);
-            engine.update_mask(new_mask);
+        let new_mdh_len = packet_mdh_len_for_mask(&new_mask);
+        if new_mdh_len != self.recv_mdh_len {
+            self.prev_recv_mdh_len = Some(self.recv_mdh_len);
         }
+        self.recv_mdh_len = new_mdh_len;
+        info!("Updating mask to {} (mdh_len: {})", new_mask.mask_id, new_mdh_len);
+        if let Some(ref mut engine) = self.mimicry_engine {
+            engine.update_mask(new_mask.clone());
+        }
+        let mut pending = self.pending_mask.lock().unwrap();
+        *pending = Some(new_mask);
     }
     
     /// Get current state

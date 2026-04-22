@@ -70,6 +70,9 @@ pub struct Session {
     
     /// Current mask profile
     pub mask: Option<MaskProfile>,
+    /// Pending mask awaiting grace period before activation.
+    /// Stored as (new_mask, timestamp_when_MaskUpdate_was_sent).
+    pub pending_mask: Option<(MaskProfile, Instant)>,
     /// Current FSM state
     pub fsm_state: u16,
     /// Packets in current FSM state
@@ -178,6 +181,7 @@ impl Session {
             created_at: now,
             last_server_send: now,
             mask: None,
+            pending_mask: None,
             fsm_state: 0,
             fsm_packets: 0,
             fsm_state_start: now,
@@ -390,6 +394,26 @@ impl Session {
             self.server_eph_pub = None;
             self.server_hello_signature = None;
         }
+    }
+
+    /// Check and commit a pending mask if the grace period has elapsed.
+    /// Returns true if a mask was committed.
+    /// Grace period = 500ms — enough for the MaskUpdate packet to reach the client.
+    pub fn commit_pending_mask(&mut self) -> bool {
+        const MASK_GRACE_PERIOD: Duration = Duration::from_millis(500);
+        if let Some((_, sent_at)) = &self.pending_mask {
+            if sent_at.elapsed() >= MASK_GRACE_PERIOD {
+                let (new_mask, _) = self.pending_mask.take().unwrap();
+                info!("Committing deferred mask switch to '{}'", new_mask.mask_id);
+                self.mask = Some(new_mask);
+                // Reset FSM state for the new mask
+                self.fsm_state = 0;
+                self.fsm_packets = 0;
+                self.fsm_state_start = Instant::now();
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -932,9 +956,10 @@ impl SessionManager {
         self.sessions.iter()
     }
     
-    /// Update mask for a session (triggered by neural resonance compromise detection)
-    /// Returns the session Arc + client address if the session was found, so the
-    /// caller can send a MaskUpdate control message over the wire.
+    /// Schedule a deferred mask switch for a session.
+    /// The MaskUpdate control message has already been sent to the client;
+    /// we store the new mask in `pending_mask` and let it activate after a
+    /// grace period (see `commit_pending_mask`).
     pub fn update_session_mask(
         &self,
         session_id: &[u8; 16],
@@ -944,16 +969,12 @@ impl SessionManager {
             let client_addr;
             {
                 let mut sess = session.lock();
-                info!("Session mask rotated: {} → {}", 
+                info!("Session mask scheduled: {} → {} (grace period 500ms)", 
                     sess.mask.as_ref().map(|m| m.mask_id.as_str()).unwrap_or("default"),
                     new_mask.mask_id
                 );
-                sess.mask = Some(new_mask);
-                // Reset FSM state for the new mask
-                sess.fsm_state = 0;
-                sess.fsm_packets = 0;
-                sess.fsm_state_start = Instant::now();
-                // Return to Active state — MaskChange was a dead-end that froze the session
+                // Don't switch immediately — store as pending
+                sess.pending_mask = Some((new_mask, Instant::now()));
                 sess.state = SessionState::Active;
                 client_addr = sess.client_addr;
             }
