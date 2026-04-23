@@ -80,10 +80,7 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     .small_button(RichText::new(t(app.lang, "quit")).color(DIM).size(11.0))
                     .clicked()
                 {
-                    if app.vpn.is_connected() {
-                        app.vpn.disconnect();
-                    }
-                    std::process::exit(0);
+                    app.should_quit = true;
                 }
             });
         });

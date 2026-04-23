@@ -4,6 +4,18 @@
 //!
 //! Native Windows app using egui/eframe with system tray support.
 //! Manages aivpn-client.exe as a subprocess — no console window visible.
+//!
+//! Window behavior:
+//! - Close (×) or Minimize (_) → window hides to system tray
+//! - Left-click tray icon → restore window
+//! - Right-click tray icon → context menu (Show / Quit)
+//! - Quit button in UI or tray menu → disconnect VPN and exit
+//!
+//! Architecture:
+//! A background thread continuously polls tray events even when the
+//! window is hidden (SW_HIDE stops eframe's update loop). The thread
+//! calls Win32 ShowWindow directly to wake up eframe, and communicates
+//! the action type via an atomic flag.
 
 mod vpn_manager;
 mod key_storage;
@@ -22,30 +34,46 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const WINDOW_WIDTH: f32 = 360.0;
 const WINDOW_HEIGHT: f32 = 480.0;
 
+// ── Win32 window management ────────────────────────────────────────────────
+
+/// Hide the AIVPN window (removes from taskbar)
+#[cfg(windows)]
+fn win32_hide_window() {
+    use winapi::um::winuser::{FindWindowW, ShowWindow, SW_HIDE};
+    unsafe {
+        let title: Vec<u16> = "AIVPN\0".encode_utf16().collect();
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn win32_hide_window() {}
+
+// ── Entry point ────────────────────────────────────────────────────────────
+
 fn main() -> eframe::Result<()> {
     let log_path = startup_log_path();
     write_startup_log(&log_path, "startup: entered main");
-    write_startup_log(&log_path, "startup: using wgpu renderer path");
 
-    // Embed app icon directly into the binary — no external file needed
-    let icon = {
-        let png_bytes = include_bytes!("../assets/aivpn_preview.png");
-        match image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                Some(Box::new(egui::IconData {
-                    rgba: rgba.into_raw(),
-                    width: w,
-                    height: h,
-                }))
-            }
-            Err(e) => {
-                eprintln!("Icon decode error: {}", e);
-                None
-            }
-        }
+    // Decode embedded app icon (shared between window title bar and tray)
+    let (icon_rgba, icon_w, icon_h) = decode_embedded_icon();
+
+    let egui_icon = if !icon_rgba.is_empty() {
+        Some(Box::new(egui::IconData {
+            rgba: icon_rgba.clone(),
+            width: icon_w,
+            height: icon_h,
+        }))
+    } else {
+        None
     };
+
+    let tray_icon_rgba = icon_rgba;
+    let tray_icon_w = icon_w;
+    let tray_icon_h = icon_h;
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
@@ -55,8 +83,8 @@ fn main() -> eframe::Result<()> {
         .with_decorations(true)
         .with_transparent(false)
         .with_title("AIVPN");
-    
-    if let Some(icon_data) = icon {
+
+    if let Some(icon_data) = egui_icon {
         viewport = viewport.with_icon(icon_data);
     }
 
@@ -73,14 +101,12 @@ fn main() -> eframe::Result<()> {
                 },
                 native_adapter_selector: Some(std::sync::Arc::new(
                     |adapters: &[wgpu::Adapter], _surface| -> Result<wgpu::Adapter, String> {
-                        // Prefer hardware, fall back to software (WARP)
                         for adapter in adapters {
                             let info = adapter.get_info();
                             if info.device_type != wgpu::DeviceType::Cpu {
                                 return Ok(adapter.clone());
                             }
                         }
-                        // Accept any adapter including software
                         adapters.first().cloned().ok_or_else(|| "No adapters found".to_string())
                     },
                 )),
@@ -94,9 +120,23 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         "AIVPN",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_visuals(dark_visuals());
-            Ok(Box::new(AivpnApp::new()))
+
+            let lang = Lang::load();
+            let tray_mgr = tray::TrayManager::new(
+                tray_icon_rgba,
+                tray_icon_w,
+                tray_icon_h,
+                localization::t(lang, "show"),
+                localization::t(lang, "quit"),
+            ).ok();
+
+            if tray_mgr.is_none() {
+                eprintln!("Warning: failed to create tray icon");
+            }
+
+            Ok(Box::new(AivpnApp::new(tray_mgr)))
         }),
     );
 
@@ -106,6 +146,23 @@ fn main() -> eframe::Result<()> {
     }
 
     result
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+fn decode_embedded_icon() -> (Vec<u8>, u32, u32) {
+    let png_bytes = include_bytes!("../assets/aivpn_preview.png");
+    match image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            (rgba.into_raw(), w, h)
+        }
+        Err(e) => {
+            eprintln!("Icon decode error: {}", e);
+            (Vec::new(), 0, 0)
+        }
+    }
 }
 
 fn startup_log_path() -> PathBuf {
@@ -119,7 +176,6 @@ fn write_startup_log(path: &PathBuf, message: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-
     let line = format!("{}\r\n", message);
     let _ = fs::OpenOptions::new()
         .create(true)
@@ -136,7 +192,8 @@ fn dark_visuals() -> egui::Visuals {
     visuals
 }
 
-/// Main application state
+// ── Application state ──────────────────────────────────────────────────────
+
 pub struct AivpnApp {
     vpn: VpnManager,
     keys: KeyStorage,
@@ -151,14 +208,17 @@ pub struct AivpnApp {
     error_timer: Option<std::time::Instant>,
     // Recording UI state
     recording_service_name: String,
+    // Tray
+    tray: Option<tray::TrayManager>,
+    pub should_quit: bool,
+    window_visible: bool,
 }
 
 impl AivpnApp {
-    fn new() -> Self {
-        let keys = KeyStorage::load();
+    fn new(tray: Option<tray::TrayManager>) -> Self {
         Self {
             vpn: VpnManager::new(),
-            keys,
+            keys: KeyStorage::load(),
             lang: Lang::load(),
             show_add_key: false,
             new_key_name: String::new(),
@@ -168,6 +228,9 @@ impl AivpnApp {
             error_message: None,
             error_timer: None,
             recording_service_name: String::new(),
+            tray,
+            should_quit: false,
+            window_visible: true,
         }
     }
 
@@ -186,14 +249,64 @@ impl AivpnApp {
     }
 }
 
+// ── Main loop ──────────────────────────────────────────────────────────────
+
 impl eframe::App for AivpnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.clear_old_error();
         self.vpn.poll_status();
 
-        // Request repaint every second for live stats
+        // Keep event loop ticking (for tooltip updates while window is visible)
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
+        // ── Intercept close (×) → hide to tray ────────────────────────
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.window_visible = false;
+            win32_hide_window();
+            // Note: after SW_HIDE, eframe may stop calling update().
+            // The background tray thread handles events independently
+            // and calls ShowWindow to restore when needed.
+        }
+
+        // ── Intercept minimize (_) → hide to tray ─────────────────────
+        if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) && self.window_visible {
+            self.window_visible = false;
+            win32_hide_window();
+        }
+
+        // ── Check for tray actions (set by background thread) ─────────
+        if let Some(ref tm) = self.tray {
+            let action = tm.take_action();
+            match action {
+                1 => {
+                    // ACTION_SHOW: window was already restored by the tray thread
+                    self.window_visible = true;
+                }
+                2 => {
+                    // ACTION_QUIT
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+        }
+
+        // ── Handle quit ────────────────────────────────────────────────
+        if self.should_quit {
+            if self.vpn.is_connected() {
+                self.vpn.disconnect();
+            }
+            // Drop tray icon to remove it from system tray
+            self.tray = None;
+            std::process::exit(0);
+        }
+
+        // ── Update tray tooltip ────────────────────────────────────────
+        if let Some(ref tm) = self.tray {
+            tm.update_tooltip(self.vpn.state(), self.vpn.stats());
+        }
+
+        // ── Draw UI ────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             ui::draw_main_ui(ui, self);
         });

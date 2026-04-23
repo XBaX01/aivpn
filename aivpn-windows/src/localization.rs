@@ -108,6 +108,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::Ru, "full_tunnel") => "Весь трафик через VPN",
 
         // Misc
+        (Lang::En, "show") => "Show",
+        (Lang::Ru, "show") => "Показать",
         (Lang::En, "quit") => "Quit",
         (Lang::Ru, "quit") => "Выход",
         (Lang::En, "version") => "Version",
