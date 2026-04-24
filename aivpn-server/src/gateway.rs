@@ -1229,29 +1229,34 @@ impl Gateway {
             // on a different port. Multiple clients behind the same NAT must be
             // able to handshake independently (different PSKs → different sessions).
 
+            // FIX Issue #42: Skip handshake if this IP already has a fresh
+            // ratcheted session on a different port (NAT rebind / stale packets).
+            if self.session_manager.has_recent_ratcheted_session_on_other_endpoint(
+                &client_addr,
+                Duration::from_secs(30),
+            ) {
+                return Err(Error::InvalidPacket("Active session exists on other port"));
+            }
+
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
             // After mask rotation or session timeout, stale clients may flood the server
-            // with packets that consistently fail tag validation (issue #21).
-            // TEMPORARILY DISABLED cooldown for debugging - client cannot handshake
-            // {
-            //     let ip = client_addr.ip();
-            //     if let Some(entry) = self.handshake_cooldowns.get(&ip) {
-            //         let (fail_count, last_fail) = *entry;
-            //         // Increased cooldown: start with 2s, max 30s to avoid blocking legitimate clients
-            //         let cooldown = Duration::from_millis(
-            //             (2000 * (1 << fail_count.min(3))) as u64
-            //         );
-            //         if last_fail.elapsed() < cooldown {
-            //             debug!("Handshake cooldown active for {}: fail_count={}, elapsed={:?}, cooldown={:?}",
-            //                 hash_addr(&client_addr), fail_count, last_fail.elapsed(), cooldown);
-            //             return Err(Error::InvalidPacket("Handshake cooldown active"));
-            //         } else {
-            //             debug!("Handshake cooldown expired for {}: elapsed={:?} >= cooldown={:?}",
-            //                 hash_addr(&client_addr), last_fail.elapsed(), cooldown);
-            //         }
-            //     }
-            // }
+            // with packets that consistently fail tag validation (issue #21, #42).
+            {
+                let ip = client_addr.ip();
+                if let Some(entry) = self.handshake_cooldowns.get(&ip) {
+                    let (fail_count, last_fail) = *entry;
+                    // Exponential cooldown: 2s → 4s → 8s → 16s (max)
+                    let cooldown = Duration::from_millis(
+                        (2000 * (1 << fail_count.min(3))) as u64
+                    );
+                    if last_fail.elapsed() < cooldown {
+                        debug!("Handshake cooldown active for {}: fail_count={}, elapsed={:?}, cooldown={:?}",
+                            hash_addr(&client_addr), fail_count, last_fail.elapsed(), cooldown);
+                        return Err(Error::InvalidPacket("Handshake cooldown active"));
+                    }
+                }
+            }
 
             // Try to establish a new session using one of the built-in bootstrap masks.
             // Runtime masks can be server-generated, but bootstrap must remain compatible
