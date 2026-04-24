@@ -2,10 +2,10 @@
 //! 
 //! Manages active VPN sessions with O(1) tag validation
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -430,7 +430,8 @@ pub struct SessionManager {
     /// VPN IP -> Session ID mapping for TUN return routing
     vpn_ip_map: DashMap<Ipv4Addr, [u8; 16]>,
     /// Next VPN IP to assign (last octet)
-    next_ip_octet: AtomicU32,
+    /// Pool of free VPN IP octets (2..=254). IPs are returned when sessions end.
+    ip_pool: Mutex<BTreeSet<u8>>,
     /// Server's long-term keypair
     server_keys: KeyPair,
     /// Server's signing key (Ed25519)
@@ -469,7 +470,7 @@ impl SessionManager {
             sessions: DashMap::new(),
             tag_map: DashMap::new(),
             vpn_ip_map: DashMap::new(),
-            next_ip_octet: AtomicU32::new(2),
+            ip_pool: Mutex::new((2..=254u8).collect()),
             server_keys,
             signing_key,
             default_mask,
@@ -588,14 +589,14 @@ impl SessionManager {
         
         // Assign VPN IP and register mapping.
         // Priority: 1) static IP from client config, 2) reused IP, 3) auto-assign
-        let vpn_ip = static_vpn_ip.or(reused_vpn_ip).or_else(|| {
-            let octet = self.next_ip_octet.fetch_add(1, Ordering::Relaxed);
-            if octet <= 254 {
-                Some(Ipv4Addr::new(10, 0, 0, octet as u8))
-            } else {
-                None
-            }
-        });
+        let vpn_ip = if let Some(ip) = static_vpn_ip.or(reused_vpn_ip) {
+            // Static or reused IP — ensure it's removed from the free pool
+            self.ip_pool.lock().remove(&ip.octets()[3]);
+            Some(ip)
+        } else {
+            // Allocate the lowest available IP from the pool
+            self.ip_pool.lock().pop_first().map(|octet| Ipv4Addr::new(10, 0, 0, octet))
+        };
 
         if let Some(vpn_ip) = vpn_ip {
             session.lock().vpn_ip = Some(vpn_ip);
@@ -675,12 +676,14 @@ impl SessionManager {
 
         self.remove_session(session_id);
 
-        // If there is still another session that owns this VPN IP, restore it.
+        // If there is still another session that owns this VPN IP, restore
+        // the mapping and take the IP back out of the free pool.
         if let Some(vpn_ip) = vpn_ip {
             for entry in self.sessions.iter() {
                 let sess = entry.value().lock();
                 if sess.vpn_ip == Some(vpn_ip) {
                     self.vpn_ip_map.insert(vpn_ip, *entry.key());
+                    self.ip_pool.lock().remove(&vpn_ip.octets()[3]);
                     break;
                 }
             }
@@ -842,7 +845,13 @@ impl SessionManager {
             // Remove VPN IP mapping only if it still points to THIS session.
             // A newer session may have already claimed the same VPN IP.
             if let Some(vpn_ip) = sess.vpn_ip {
-                self.vpn_ip_map.remove_if(&vpn_ip, |_, sid| sid == session_id);
+                if self.vpn_ip_map.remove_if(&vpn_ip, |_, sid| sid == session_id).is_some() {
+                    // No other session owns this IP — return it to the free pool
+                    let octet = vpn_ip.octets()[3];
+                    if octet >= 2 {
+                        self.ip_pool.lock().insert(octet);
+                    }
+                }
             }
             Some(*session_id)
         } else {
