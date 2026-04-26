@@ -118,3 +118,12 @@ Dockerfile.windows-test
 Dockerfile.windows-test-full
 test-windows-docker-full.sh
 test-windows-docker.sh
+backups/62.204.42.184/clients.json
+
+# Security: Never commit deployment scripts with credentials
+deploy-release.sh
+.env
+*.env
+.secrets
+credentials.json
+deployment-config.sh
