@@ -28,7 +28,7 @@ use jni::JNIEnv;
 /// ```kotlin
 /// external fun runTunnel(
 ///     vpnService: VpnService,
-///     tunFd: Int,          // from ParcelFileDescriptor.detachFd()
+///     tunFd: Int,          // borrowed fd from ParcelFileDescriptor; Rust duplicates it
 ///     serverHost: String,
 ///     serverPort: Int,
 ///     serverKey: ByteArray, // 32 bytes

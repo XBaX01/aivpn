@@ -48,7 +48,8 @@ const CHANNEL_SIZE: usize = 8192;
 // ──────────── Session runtime (read by JNI exports in lib.rs) ────────────
 
 pub struct SessionRuntime {
-    udp_fd: AtomicI32,
+    udp_control_fd: AtomicI32,
+    stop_event_fd: AtomicI32,
     upload_bytes: AtomicU64,
     download_bytes: AtomicU64,
 }
@@ -56,7 +57,8 @@ pub struct SessionRuntime {
 impl SessionRuntime {
     fn new() -> Self {
         Self {
-            udp_fd: AtomicI32::new(-1),
+            udp_control_fd: AtomicI32::new(-1),
+            stop_event_fd: AtomicI32::new(-1),
             upload_bytes: AtomicU64::new(0),
             download_bytes: AtomicU64::new(0),
         }
@@ -71,6 +73,16 @@ struct ActiveSessionGuard {
 
 impl Drop for ActiveSessionGuard {
     fn drop(&mut self) {
+        let udp_fd = self.session.udp_control_fd.swap(-1, Ordering::SeqCst);
+        if udp_fd >= 0 {
+            unsafe { libc::close(udp_fd) };
+        }
+
+        let stop_fd = self.session.stop_event_fd.swap(-1, Ordering::SeqCst);
+        if stop_fd >= 0 {
+            unsafe { libc::close(stop_fd) };
+        }
+
         if let Ok(mut guard) = ACTIVE_SESSION.lock() {
             if let Some(current) = guard.as_ref() {
                 if Arc::ptr_eq(current, &self.session) {
@@ -97,14 +109,35 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
 }
 
 pub fn stop_active_tunnel() {
-    let fd = ACTIVE_SESSION
+    let (udp_fd, stop_fd) = ACTIVE_SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|s| s.udp_fd.swap(-1, Ordering::SeqCst)))
-        .unwrap_or(-1);
+        .and_then(|guard| {
+            guard.as_ref().map(|s| {
+                (
+                    s.udp_control_fd.swap(-1, Ordering::SeqCst),
+                    s.stop_event_fd.load(Ordering::SeqCst),
+                )
+            })
+        })
+        .unwrap_or((-1, -1));
 
-    if fd >= 0 {
-        unsafe { libc::close(fd) };
+    if stop_fd >= 0 {
+        let value: u64 = 1;
+        unsafe {
+            let _ = libc::write(
+                stop_fd,
+                &value as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        };
+    }
+
+    if udp_fd >= 0 {
+        unsafe {
+            libc::shutdown(udp_fd, libc::SHUT_RDWR);
+            libc::close(udp_fd);
+        };
     }
 }
 
@@ -157,11 +190,17 @@ pub async fn run_tunnel_android(
         .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
 
     let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest, &session)?;
+    let stop_signal = create_stop_signal(&session)?;
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──
-    unsafe { libc::fcntl(tun_fd_int, libc::F_SETFL, libc::O_NONBLOCK) };
-    // SAFETY: we own this fd (Kotlin called detachFd()).
-    let owned_tun = unsafe { OwnedFd::from_raw_fd(tun_fd_int) };
+    let owned_tun_fd = unsafe { libc::dup(tun_fd_int) };
+    if owned_tun_fd < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    unsafe { libc::fcntl(owned_tun_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    // SAFETY: this is Rust's private duplicate of the Android-owned TUN fd.
+    let owned_tun = unsafe { OwnedFd::from_raw_fd(owned_tun_fd) };
     let tun = AsyncFd::new(owned_tun)?;
 
     // Convert the raw UDP fd to a tokio UdpSocket (already connected to server).
@@ -202,6 +241,10 @@ pub async fn run_tunnel_android(
         tokio::pin!(retry);
 
         tokio::select! {
+            _ = wait_for_stop_signal(&stop_signal) => {
+                return Err(Error::Session("Tunnel stop requested".into()));
+            }
+
             res = udp.recv(&mut recv_buf) => {
                 match res {
                     Ok(n) => break n,
@@ -327,6 +370,12 @@ pub async fn run_tunnel_android(
     loop {
         tokio::select! {
             biased;
+
+            _ = wait_for_stop_signal(&stop_signal) => {
+                tun_reader_task.abort();
+                upload_sender_task.abort();
+                return Err(Error::Session("Tunnel stop requested".into()));
+            }
 
             // ── Rekey (triggers fresh reconnect in Kotlin) ──
             _ = &mut rekey_sleep => {
@@ -534,9 +583,57 @@ fn create_protected_udp_socket(
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
-    session.udp_fd.store(fd, Ordering::SeqCst);
+    let control_fd = unsafe { libc::dup(fd) };
+    if control_fd < 0 {
+        unsafe { libc::close(fd) };
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    session.udp_control_fd.store(control_fd, Ordering::SeqCst);
 
     Ok(fd)
+}
+
+fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>> {
+    let stop_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    if stop_fd < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    let control_fd = unsafe { libc::dup(stop_fd) };
+    if control_fd < 0 {
+        unsafe { libc::close(stop_fd) };
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    session.stop_event_fd.store(control_fd, Ordering::SeqCst);
+
+    let owned_stop_fd = unsafe { OwnedFd::from_raw_fd(stop_fd) };
+    Ok(AsyncFd::new(owned_stop_fd)?)
+}
+
+async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
+    loop {
+        let mut guard = stop_signal.readable().await?;
+        match guard.try_io(|inner| {
+            let mut value: u64 = 0;
+            let n = unsafe {
+                libc::read(
+                    inner.as_raw_fd(),
+                    &mut value as *mut u64 as *mut libc::c_void,
+                    std::mem::size_of::<u64>(),
+                )
+            };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(r) => return r,
+            Err(_would_block) => continue,
+        }
+    }
 }
 
 fn to_sockaddr_in(addr: &SocketAddrV4) -> libc::sockaddr_in {

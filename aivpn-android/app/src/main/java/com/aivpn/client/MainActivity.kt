@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         updateLanguageButton()
 
         binding.btnConnect.setOnClickListener {
-            if (isConnected) disconnect() else connect()
+            if (AivpnService.isServiceActive) disconnect() else connect()
         }
 
         binding.btnLanguage.setOnClickListener {
@@ -126,6 +126,9 @@ class MainActivity : AppCompatActivity() {
         if (AivpnService.isRunning) {
             isConnected = true
             updateUI(true, AivpnService.lastStatusText)
+        } else if (AivpnService.isServiceActive) {
+            isConnected = false
+            updateUI(false, AivpnService.lastStatusText)
         }
     }
 
@@ -362,6 +365,9 @@ class MainActivity : AppCompatActivity() {
         if (AivpnService.isRunning) {
             isConnected = true
             updateUI(true, AivpnService.lastStatusText)
+        } else if (AivpnService.isServiceActive) {
+            isConnected = false
+            updateUI(false, AivpnService.lastStatusText)
         }
 
         updateSplitTunnelHint()
@@ -485,11 +491,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI(connected: Boolean, statusText: String) {
         isConnected = connected
+        val serviceActive = connected || AivpnService.isServiceActive
         binding.btnConnect.text = getString(
-            if (connected) R.string.btn_disconnect else R.string.btn_connect
+            if (serviceActive) R.string.btn_disconnect else R.string.btn_connect
         )
         binding.btnConnect.setBackgroundColor(
-            getColor(if (connected) R.color.disconnect else R.color.accent)
+            getColor(if (serviceActive) R.color.disconnect else R.color.accent)
         )
         binding.textStatus.text = statusText
         binding.statusDot.setBackgroundResource(
@@ -502,8 +509,8 @@ class MainActivity : AppCompatActivity() {
         binding.statsRow.visibility = statsVisibility
 
         // Lock/unlock input fields while connected
-        binding.editConnectionKey.isEnabled = !connected
-        binding.btnAddProfile.isEnabled = !connected
+        binding.editConnectionKey.isEnabled = !serviceActive
+        binding.btnAddProfile.isEnabled = !serviceActive
         renderProfiles()
 
         // Timer management

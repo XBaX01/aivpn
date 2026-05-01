@@ -47,10 +47,12 @@ class AivpnService : VpnService() {
         @Volatile var statusCallback:  ((Boolean, String) -> Unit)? = null
         @Volatile var trafficCallback: ((Long, Long) -> Unit)?      = null
         @Volatile var isRunning     = false
+        @Volatile var isServiceActive = false
         @Volatile var lastStatusText = ""
     }
 
-    // TUN interface wrapper (Kotlin holds PFD for lifecycle; Rust holds raw fd after detach)
+    // TUN interface wrapper kept open across reconnects so Android does not tear down
+    // the device-level VPN interface between Rust tunnel restarts.
     private var vpnInterface: ParcelFileDescriptor? = null
 
     // Coroutine lifecycle
@@ -139,6 +141,7 @@ class AivpnService : VpnService() {
         savedVpnPrefixLen = normalizedPrefixLen
         savedVpnMtu = normalizedMtu
         manualDisconnect = false
+        isServiceActive = true
 
         restartJob?.cancel()
         restartJob = serviceScope.launch {
@@ -162,6 +165,7 @@ class AivpnService : VpnService() {
                         sessionEstablished = false
                         networkTrigger = false
                         runTunnel()
+                        closeTunnel()
                         // runTunnel() returns normally only on Rust rekey trigger — reconnect fast.
                         retryDelayMs = INITIAL_RETRY_DELAY_MS
                     } catch (e: CancellationException) {
@@ -169,8 +173,8 @@ class AivpnService : VpnService() {
                     } catch (e: Exception) {
                         Log.e(TAG, "Tunnel error: ${e.message}", e)
                         isRunning = false
-                        closeTunnel()
                         if (manualDisconnect) break
+                        closeTunnel()
 
                         // Network-triggered reconnects and reconnects after an established
                         // session use zero delay so the switch feels instant.
@@ -202,9 +206,9 @@ class AivpnService : VpnService() {
                 Log.d(TAG, "Service job cancelled")
             } finally {
                 isRunning = false
-                closeTunnel()
                 serviceJob = null
                 if (!manualDisconnect) {
+                    isServiceActive = false
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -237,71 +241,17 @@ class AivpnService : VpnService() {
             if (decoded.size == 32) decoded else null
         }
 
-        val tunAddress4 = savedVpnIp ?: "10.0.0.2"
-        val tunPrefixLen = savedVpnPrefixLen.coerceIn(1, 30)
-        val tunMtu = savedVpnMtu.coerceAtLeast(576)
-
-        // Build TUN (must stay in Kotlin — Android API).
-        // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
-        // IPv6 is intentionally disabled in this client.
-        val builder = Builder()
-            .setSession("AIVPN")
-            .addAddress(tunAddress4, tunPrefixLen)
-            .addRoute("0.0.0.0", 0)          // IPv4: route all through VPN
-            .addDnsServer("8.8.8.8")
-            .addDnsServer("1.1.1.1")
-            .setMtu(tunMtu)
-            .setBlocking(false)
-
-        // Split tunneling: route only selected apps through VPN
-        val allowedApps = SecureStorage.loadAllowedApps(this)
-        for (pkg in allowedApps) {
-            try {
-                builder.addAllowedApplication(pkg)
-            } catch (_: Exception) {
-                // Package may have been uninstalled — skip silently
-            }
-        }
-
-        // Split tunneling: exclude domains by resolving to IPs
-        val excludedDomains = SecureStorage.loadExcludedDomains(this)
-        if (excludedDomains.isNotEmpty()) {
-            val excludedIPs = mutableSetOf<String>()
-            for (domain in excludedDomains) {
-                try {
-                    val addresses = java.net.InetAddress.getAllByName(domain)
-                    for (addr in addresses) {
-                        if (addr is java.net.Inet4Address) {
-                            excludedIPs.add(addr.hostAddress ?: continue)
-                        }
-                    }
-                } catch (_: Exception) {
-                    Log.d(TAG, "Failed to resolve excluded domain: $domain")
-                }
-            }
-            // If we have excluded IPs, replace the default route with specific /1 routes
-            // that cover everything except the excluded IPs (which get /32 direct routes).
-            // Android VPN routing: more specific routes win, so /32 routes for excluded IPs
-            // hit the underlying network, while 0.0.0.0/0 catches everything else.
-            // However, addRoute(0/0) is already added above. We need to exclude by NOT
-            // routing those IPs through VPN. On Android, the only way is per-app exclusion
-            // or using the system routing table. We log them for now and they can be used
-            // by the Rust tunnel for domain-based bypassing via DNS interception.
-            if (excludedIPs.isNotEmpty()) {
-                Log.d(TAG, "Excluded domain IPs: $excludedIPs")
-            }
-        }
-
-        val pfd = builder.establish() ?: throw Exception("Failed to establish VPN interface")
-
-        vpnInterface = pfd
+        ensureVpnInterface()
+        val activeTun = vpnInterface ?: throw Exception("VPN interface is not available")
         // WireGuard approach: let Android OS choose the best underlying network.
         // Setting null allows automatic network selection and seamless WiFi↔cellular switching.
         // The socket is protected via VpnService.protect() in Rust so it bypasses VPN routing.
         setUnderlyingNetworks(null)
 
-        // detachFd(): raw fd ownership transfers to Rust.  pfd.close() becomes a no-op.
-        val tunFd = pfd.detachFd()
+        // Keep the original ParcelFileDescriptor open in the service so Android keeps the
+        // device VPN active across reconnects. Rust receives only the borrowed fd number
+        // and duplicates it on its side, so it never closes an Android-owned descriptor.
+        val tunFd = activeTun.fd
 
         sessionEstablished = false
         isRunning          = true
@@ -459,6 +409,7 @@ class AivpnService : VpnService() {
 
     private fun stopVpn() {
         manualDisconnect = true
+        isServiceActive = false
         restartJob?.cancel()
         restartJob = null
         unregisterNetworkCallback()
@@ -492,6 +443,7 @@ class AivpnService : VpnService() {
 
     override fun onDestroy() {
         manualDisconnect = true
+        isServiceActive = false
         restartJob?.cancel()
         restartJob = null
         unregisterNetworkCallback()
@@ -502,6 +454,59 @@ class AivpnService : VpnService() {
         isRunning = false
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    private fun ensureVpnInterface() {
+        if (vpnInterface != null) {
+            return
+        }
+
+        val tunAddress4 = savedVpnIp ?: "10.0.0.2"
+        val tunPrefixLen = savedVpnPrefixLen.coerceIn(1, 30)
+        val tunMtu = savedVpnMtu.coerceAtLeast(576)
+
+        // Build TUN (must stay in Kotlin — Android API).
+        // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
+        // IPv6 is intentionally disabled in this client.
+        val builder = Builder()
+            .setSession("AIVPN")
+            .addAddress(tunAddress4, tunPrefixLen)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("8.8.8.8")
+            .addDnsServer("1.1.1.1")
+            .setMtu(tunMtu)
+            .setBlocking(false)
+
+        val allowedApps = SecureStorage.loadAllowedApps(this)
+        for (pkg in allowedApps) {
+            try {
+                builder.addAllowedApplication(pkg)
+            } catch (_: Exception) {
+                // Package may have been uninstalled — skip silently
+            }
+        }
+
+        val excludedDomains = SecureStorage.loadExcludedDomains(this)
+        if (excludedDomains.isNotEmpty()) {
+            val excludedIPs = mutableSetOf<String>()
+            for (domain in excludedDomains) {
+                try {
+                    val addresses = java.net.InetAddress.getAllByName(domain)
+                    for (addr in addresses) {
+                        if (addr is java.net.Inet4Address) {
+                            excludedIPs.add(addr.hostAddress ?: continue)
+                        }
+                    }
+                } catch (_: Exception) {
+                    Log.d(TAG, "Failed to resolve excluded domain: $domain")
+                }
+            }
+            if (excludedIPs.isNotEmpty()) {
+                Log.d(TAG, "Excluded domain IPs: $excludedIPs")
+            }
+        }
+
+        vpnInterface = builder.establish() ?: throw Exception("Failed to establish VPN interface")
     }
 
     // ──────────── Network waiting ────────────
