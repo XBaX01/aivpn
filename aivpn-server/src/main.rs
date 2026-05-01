@@ -131,6 +131,21 @@ async fn main() {
     let mgmt_db = client_db.clone();
     #[cfg(all(feature = "management-api", unix))]
     let mgmt_socket = args.management_socket.clone();
+    #[cfg(all(feature = "management-api", unix))]
+    let mgmt_pub_key = if server_private_key != [0u8; 32] {
+        Some(crypto::KeyPair::from_private_key(server_private_key).public_key_bytes())
+    } else {
+        None
+    };
+    #[cfg(all(feature = "management-api", unix))]
+    let mgmt_server_addr = args.server_ip.as_ref().map(|ip| {
+        if ip.parse::<SocketAddr>().is_ok() {
+            ip.clone()
+        } else {
+            let port = listen_addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(443);
+            format!("{}:{}", ip, port)
+        }
+    });
 
     // Create config
     let config = GatewayConfig {
@@ -159,7 +174,7 @@ async fn main() {
             let db = mgmt_db.clone();
             let socket = mgmt_socket.clone();
             let handle = tokio::spawn(async move {
-                aivpn_server::management_api::serve(Some(db), socket).await;
+                aivpn_server::management_api::serve(Some(db), socket, mgmt_pub_key, mgmt_server_addr).await;
             });
             // Keep handle alive; log if the task exits unexpectedly
             tokio::spawn(async move {

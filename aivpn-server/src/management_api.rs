@@ -29,6 +29,10 @@ use crate::client_db::{ClientDatabase, ClientStats};
 struct ApiState {
     db: Arc<ClientDatabase>,
     started_at: Instant,
+    /// Server public key bytes (from --key-file), needed to build connection keys.
+    server_pub_key: Option<[u8; 32]>,
+    /// Resolved server address "IP:port" (from --server-ip + --listen port).
+    server_addr: Option<String>,
 }
 
 // ── Wire types (PSK is never included) ───────────────────────────────────────
@@ -133,6 +137,46 @@ async fn reload(State(state): State<ApiState>) -> impl IntoResponse {
     }
 }
 
+async fn get_connection_key(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let (pub_key, server_addr) = match (&state.server_pub_key, &state.server_addr) {
+        (Some(k), Some(a)) => (k, a.as_str()),
+        _ => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err("--server-ip or --key-file not configured; cannot build connection key"),
+        ).into_response(),
+    };
+
+    let client = match state.db.find_by_id(&id) {
+        Some(c) => c,
+        None => return (StatusCode::NOT_FOUND, err(format!("Client '{}' not found", id))).into_response(),
+    };
+
+    let client_net_cfg = match state.db.network_config().client_config(client.vpn_ip) {
+        Ok(cfg) => cfg,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, err(e)).into_response(),
+    };
+
+    use base64::Engine;
+    let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(pub_key);
+
+    let json = serde_json::json!({
+        "s": server_addr,
+        "k": pub_b64,
+        "p": psk_b64,
+        "i": client_net_cfg.client_ip,
+        "n": client_net_cfg,
+    });
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_string(&json).unwrap().as_bytes());
+    let connection_key = format!("aivpn://{}", encoded);
+
+    Json(serde_json::json!({ "connection_key": connection_key })).into_response()
+}
+
 // ── Router ───────────────────────────────────────────────────────────────────
 
 fn router(state: ApiState) -> Router {
@@ -140,6 +184,7 @@ fn router(state: ApiState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/clients", get(list_clients).post(add_client))
         .route("/api/v1/clients/:id", get(get_client).delete(remove_client))
+        .route("/api/v1/clients/:id/connection-key", get(get_connection_key))
         .route("/api/v1/reload", post(reload))
         .with_state(state)
 }
@@ -149,7 +194,12 @@ fn router(state: ApiState) -> Router {
 /// Start the management API server on the given Unix socket path.
 /// If `socket_path` is `None`, the server is not started.
 /// Errors are logged but do not affect the main gateway.
-pub async fn serve(db: Option<Arc<ClientDatabase>>, socket_path: Option<String>) {
+pub async fn serve(
+    db: Option<Arc<ClientDatabase>>,
+    socket_path: Option<String>,
+    server_pub_key: Option<[u8; 32]>,
+    server_addr: Option<String>,
+) {
     let Some(db) = db else {
         tracing::info!("Management API: no client database configured, skipping");
         return;
@@ -192,6 +242,8 @@ pub async fn serve(db: Option<Arc<ClientDatabase>>, socket_path: Option<String>)
     let state = ApiState {
         db,
         started_at: Instant::now(),
+        server_pub_key,
+        server_addr,
     };
     let app = router(state);
 
