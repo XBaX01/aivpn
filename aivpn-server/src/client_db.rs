@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -22,7 +22,9 @@ pub struct ClientConfig {
     pub id: String,
     /// Human-readable name
     pub name: String,
-    /// Pre-shared key (32 bytes, base64-encoded in JSON)
+    /// Pre-shared key (32 bytes, base64-encoded in JSON).
+    /// SECURITY: never return `ClientConfig` directly from API handlers — use `ClientResponse`
+    /// instead, which explicitly excludes this field.
     #[serde(with = "base64_bytes")]
     pub psk: [u8; 32],
     /// Assigned static VPN IP
@@ -72,6 +74,7 @@ pub struct ClientDatabase {
     data: RwLock<ClientDbFile>,
     file_path: PathBuf,
     network_config: VpnNetworkConfig,
+    last_mtime: Mutex<Option<std::time::SystemTime>>,
 }
 
 impl ClientDatabase {
@@ -87,10 +90,15 @@ impl ClientDatabase {
             ClientDbFile::default()
         };
 
+        let last_mtime = Mutex::new(
+            std::fs::metadata(file_path).and_then(|m| m.modified()).ok()
+        );
+
         Ok(Self {
             data: RwLock::new(data),
             file_path: file_path.to_path_buf(),
             network_config,
+            last_mtime,
         })
     }
 
@@ -106,6 +114,11 @@ impl ClientDatabase {
             .map_err(|e| Error::Session(format!("Failed to write client DB: {}", e)))?;
         std::fs::rename(&tmp_path, &self.file_path)
             .map_err(|e| Error::Session(format!("Failed to rename client DB: {}", e)))?;
+
+        // Refresh cached mtime so reload_if_changed ignores our own write
+        if let Ok(mtime) = std::fs::metadata(&self.file_path).and_then(|m| m.modified()) {
+            *self.last_mtime.lock() = Some(mtime);
+        }
 
         Ok(())
     }
@@ -219,21 +232,29 @@ impl ClientDatabase {
 
     /// Reload client database from disk if the file has changed.
     /// Preserves in-memory traffic stats for existing clients.
-    /// Returns true if a reload was performed.
+    /// Returns true if the client list changed.
     pub fn reload_if_changed(&self) -> bool {
         let metadata = match std::fs::metadata(&self.file_path) {
             Ok(m) => m,
             Err(_) => return false,
         };
 
-        let _ = metadata;
+        let current_mtime = metadata.modified().ok();
+        {
+            let last = self.last_mtime.lock();
+            if *last == current_mtime {
+                return false;
+            }
+        }
 
         match self.reload_from_disk() {
-            Ok(true) => {
-                info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
-                true
+            Ok(changed) => {
+                *self.last_mtime.lock() = current_mtime;
+                if changed {
+                    info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
+                }
+                changed
             }
-            Ok(false) => false,
             Err(e) => {
                 warn!("Failed to reload client DB: {}", e);
                 false

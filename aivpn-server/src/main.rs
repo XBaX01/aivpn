@@ -126,6 +126,12 @@ async fn main() {
 
     let listen_addr = resolve_listen_addr(&args, file_config.as_ref());
 
+    // Clone client_db for management API before moving into GatewayConfig
+    #[cfg(all(feature = "management-api", unix))]
+    let mgmt_db = client_db.clone();
+    #[cfg(all(feature = "management-api", unix))]
+    let mgmt_socket = args.management_socket.clone();
+
     // Create config
     let config = GatewayConfig {
         listen_addr,
@@ -145,6 +151,45 @@ async fn main() {
         idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
         bootstrap_masks,
     };
+
+    // Spawn management API (Unix socket, optional)
+    #[cfg(all(feature = "management-api", unix))]
+    {
+        if mgmt_socket.is_some() {
+            let db = mgmt_db.clone();
+            let socket = mgmt_socket.clone();
+            let handle = tokio::spawn(async move {
+                aivpn_server::management_api::serve(Some(db), socket).await;
+            });
+            // Keep handle alive; log if the task exits unexpectedly
+            tokio::spawn(async move {
+                if handle.await.is_err() {
+                    error!("Management API task exited unexpectedly");
+                }
+            });
+        }
+
+        // SIGHUP → reload client database
+        {
+            let db = mgmt_db;
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sighup = match signal(SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to register SIGHUP handler: {}", e);
+                        return;
+                    }
+                };
+                loop {
+                    sighup.recv().await;
+                    info!("SIGHUP received — reloading client database");
+                    let db = db.clone();
+                    let _ = tokio::task::spawn_blocking(move || db.reload_if_changed()).await;
+                }
+            });
+        }
+    }
 
     // Create and run server
     match AivpnServer::new(config) {
@@ -490,6 +535,8 @@ mod tests {
             server_ip: None,
             per_ip_pps_limit: 1000,
             mask_dir: None,
+            #[cfg(all(feature = "management-api", unix))]
+            management_socket: None,
         }
     }
 

@@ -18,6 +18,9 @@ pub mod server;
 pub mod nat;
 pub mod client_db;
 
+#[cfg(all(feature = "management-api", unix))]
+pub mod management_api;
+
 // Phase 3-5 modules
 pub mod neural;
 pub mod key_rotation;

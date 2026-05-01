@@ -62,6 +62,13 @@ pub struct ServerArgs {
     /// Resolved in order: CLI flag → env AIVPN_MASK_DIR → server.json "mask_dir" → default.
     #[arg(long, env = "AIVPN_MASK_DIR")]
     pub mask_dir: Option<String>,
+
+    /// Unix socket path for the management HTTP API.
+    /// If not specified, the management API is disabled.
+    /// Example: /run/aivpn/api.sock
+    #[cfg(all(feature = "management-api", unix))]
+    #[arg(long, env = "AIVPN_MANAGEMENT_SOCKET")]
+    pub management_socket: Option<String>,
 }
 
 /// AIVPN Server instance
@@ -75,7 +82,7 @@ impl AivpnServer {
         let gateway = Gateway::new(config)?;
         Ok(Self { gateway })
     }
-    
+
     /// Run the server
     pub async fn run(self) -> Result<()> {
         self.gateway.run().await
