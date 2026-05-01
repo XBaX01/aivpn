@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -22,7 +22,9 @@ pub struct ClientConfig {
     pub id: String,
     /// Human-readable name
     pub name: String,
-    /// Pre-shared key (32 bytes, base64-encoded in JSON)
+    /// Pre-shared key (32 bytes, base64-encoded in JSON).
+    /// SECURITY: never return `ClientConfig` directly from API handlers — use `ClientResponse`
+    /// instead, which explicitly excludes this field.
     #[serde(with = "base64_bytes")]
     pub psk: [u8; 32],
     /// Assigned static VPN IP
@@ -72,6 +74,7 @@ pub struct ClientDatabase {
     data: RwLock<ClientDbFile>,
     file_path: PathBuf,
     network_config: VpnNetworkConfig,
+    last_mtime: Mutex<Option<std::time::SystemTime>>,
 }
 
 impl ClientDatabase {
@@ -87,10 +90,15 @@ impl ClientDatabase {
             ClientDbFile::default()
         };
 
+        let last_mtime = Mutex::new(
+            std::fs::metadata(file_path).and_then(|m| m.modified()).ok()
+        );
+
         Ok(Self {
             data: RwLock::new(data),
             file_path: file_path.to_path_buf(),
             network_config,
+            last_mtime,
         })
     }
 
@@ -106,6 +114,11 @@ impl ClientDatabase {
             .map_err(|e| Error::Session(format!("Failed to write client DB: {}", e)))?;
         std::fs::rename(&tmp_path, &self.file_path)
             .map_err(|e| Error::Session(format!("Failed to rename client DB: {}", e)))?;
+
+        // Refresh cached mtime so reload_if_changed ignores our own write
+        if let Ok(mtime) = std::fs::metadata(&self.file_path).and_then(|m| m.modified()) {
+            *self.last_mtime.lock() = Some(mtime);
+        }
 
         Ok(())
     }
@@ -219,21 +232,29 @@ impl ClientDatabase {
 
     /// Reload client database from disk if the file has changed.
     /// Preserves in-memory traffic stats for existing clients.
-    /// Returns true if a reload was performed.
+    /// Returns true if the client configuration changed.
     pub fn reload_if_changed(&self) -> bool {
         let metadata = match std::fs::metadata(&self.file_path) {
             Ok(m) => m,
             Err(_) => return false,
         };
 
-        let _ = metadata;
+        let current_mtime = metadata.modified().ok();
+        {
+            let last = self.last_mtime.lock();
+            if *last == current_mtime {
+                return false;
+            }
+        }
 
         match self.reload_from_disk() {
-            Ok(true) => {
-                info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
-                true
+            Ok(changed) => {
+                *self.last_mtime.lock() = current_mtime;
+                if changed {
+                    info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
+                }
+                changed
             }
-            Ok(false) => false,
             Err(e) => {
                 warn!("Failed to reload client DB: {}", e);
                 false
@@ -251,10 +272,18 @@ impl ClientDatabase {
 
         let mut data = self.data.write();
 
-        // Check if anything actually changed (compare client count and IDs)
-        let old_ids: std::collections::HashSet<String> = data.clients.iter().map(|c| c.id.clone()).collect();
-        let new_ids: std::collections::HashSet<String> = new_data.clients.iter().map(|c| c.id.clone()).collect();
-        let changed = old_ids != new_ids;
+        // Check if anything actually changed in the client configuration.
+        // PSK must be part of the signature so secret rotation takes effect
+        // without requiring a full server restart.
+        let old_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = data.clients
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
+            .collect();
+        let new_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = new_data.clients
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
+            .collect();
+        let changed = old_sig != new_sig;
 
         if !changed {
             return Ok(false);
@@ -339,5 +368,60 @@ mod base64_bytes {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(arr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_network_config() -> VpnNetworkConfig {
+        VpnNetworkConfig {
+            server_vpn_ip: Ipv4Addr::new(10, 99, 0, 1),
+            prefix_len: 24,
+            mtu: 1400,
+        }
+    }
+
+    #[test]
+    fn reload_if_changed_applies_psk_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("clients.json");
+        let db = ClientDatabase::load(&db_path, test_network_config()).unwrap();
+
+        let client = db.add_client("alice").unwrap();
+        let old_psk = client.psk;
+
+        db.record_traffic(&client.id, 111, 222);
+
+        let mut on_disk: ClientDbFile = serde_json::from_str(
+            &std::fs::read_to_string(&db_path).unwrap(),
+        )
+        .unwrap();
+        let new_psk = [0xAB; 32];
+        on_disk.clients[0].psk = new_psk;
+
+        let original_mtime = std::fs::metadata(&db_path).unwrap().modified().unwrap();
+        let updated_json = serde_json::to_string_pretty(&on_disk).unwrap();
+        let mut mtime_changed = false;
+        for _ in 0..20 {
+            std::fs::write(&db_path, &updated_json).unwrap();
+            let new_mtime = std::fs::metadata(&db_path).unwrap().modified().unwrap();
+            if new_mtime != original_mtime {
+                mtime_changed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        assert!(mtime_changed, "test setup failed to advance client DB mtime");
+
+        assert!(db.reload_if_changed(), "PSK rotation must trigger reload");
+        assert!(db.find_by_psk(&old_psk).is_none(), "old PSK must stop authenticating after reload");
+
+        let reloaded = db.find_by_psk(&new_psk).expect("new PSK must authenticate after reload");
+        assert_eq!(reloaded.id, client.id);
+        assert_eq!(reloaded.stats.bytes_in, 111);
+        assert_eq!(reloaded.stats.bytes_out, 222);
     }
 }

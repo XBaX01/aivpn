@@ -127,3 +127,6 @@ deploy-release.sh
 .secrets
 credentials.json
 deployment-config.sh
+
+# Claude Code — local agent memory, never commit
+.claude/
