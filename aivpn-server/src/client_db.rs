@@ -272,10 +272,16 @@ impl ClientDatabase {
 
         let mut data = self.data.write();
 
-        // Check if anything actually changed (compare client count and IDs)
-        let old_ids: std::collections::HashSet<String> = data.clients.iter().map(|c| c.id.clone()).collect();
-        let new_ids: std::collections::HashSet<String> = new_data.clients.iter().map(|c| c.id.clone()).collect();
-        let changed = old_ids != new_ids;
+        // Check if anything actually changed (compare id, name, vpn_ip, enabled)
+        let old_sig: std::collections::HashSet<(String, String, String, bool)> = data.clients
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone(), c.vpn_ip.to_string(), c.enabled))
+            .collect();
+        let new_sig: std::collections::HashSet<(String, String, String, bool)> = new_data.clients
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone(), c.vpn_ip.to_string(), c.enabled))
+            .collect();
+        let changed = old_sig != new_sig;
 
         if !changed {
             return Ok(false);
