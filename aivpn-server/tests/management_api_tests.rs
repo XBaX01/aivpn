@@ -62,10 +62,20 @@ fn unique_socket_path() -> String {
 
 /// Spawn the management API server and wait until the socket file appears.
 async fn spawn_server(db: Arc<ClientDatabase>, socket_path: String) {
+    spawn_server_with_key(db, socket_path, None, None).await;
+}
+
+/// Spawn the management API server with optional server key and address.
+async fn spawn_server_with_key(
+    db: Arc<ClientDatabase>,
+    socket_path: String,
+    server_pub_key: Option<[u8; 32]>,
+    server_addr: Option<String>,
+) {
     let db_clone = db.clone();
     let path_clone = socket_path.clone();
     tokio::spawn(async move {
-        management_api::serve(Some(db_clone), Some(path_clone)).await;
+        management_api::serve(Some(db_clone), Some(path_clone), server_pub_key, server_addr).await;
     });
 
     // Wait until the socket exists (up to 2 s)
@@ -372,4 +382,57 @@ async fn test_psk_never_exposed() {
     for item in list.as_array().unwrap() {
         assert!(item.get("psk").is_none(), "PSK in list item: {:?}", item);
     }
+}
+
+/// GET /api/v1/clients/:id/connection-key returns 503 when server is not
+/// configured with --server-ip / --key-file.
+#[tokio::test]
+async fn test_connection_key_without_server_config_returns_503() {
+    let (_dir, db) = make_temp_db("conn_key_503");
+    let sock = unique_socket_path();
+    // No server_pub_key, no server_addr
+    spawn_server(db, sock.clone()).await;
+
+    let mut sender = connect(&sock).await;
+    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"ivan"}"#)).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut s2 = connect(&sock).await;
+    let path = format!("/api/v1/clients/{}/connection-key", id);
+    let (status, body) = send(&mut s2, Method::GET, &path, None).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "expected 503: {:?}", body);
+    assert!(body["error"].is_string(), "error field expected: {:?}", body);
+}
+
+/// GET /api/v1/clients/:id/connection-key returns 200 with a valid aivpn:// string
+/// when the server is configured with a key and address.
+#[tokio::test]
+async fn test_connection_key_returns_aivpn_url() {
+    let (_dir, db) = make_temp_db("conn_key_200");
+    let sock = unique_socket_path();
+
+    // Fake 32-byte server public key and a server address
+    let pub_key = [0x42u8; 32];
+    let server_addr = "1.2.3.4:4443".to_string();
+    spawn_server_with_key(db, sock.clone(), Some(pub_key), Some(server_addr)).await;
+
+    // Create client
+    let mut sender = connect(&sock).await;
+    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"judy"}"#)).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Get connection key
+    let mut s2 = connect(&sock).await;
+    let path = format!("/api/v1/clients/{}/connection-key", id);
+    let (status, body) = send(&mut s2, Method::GET, &path, None).await;
+
+    assert_eq!(status, StatusCode::OK, "expected 200: {:?}", body);
+    let key = body["connection_key"].as_str().expect("connection_key must be a string");
+    assert!(key.starts_with("aivpn://"), "key must start with aivpn://: {}", key);
+
+    // connection-key for non-existent client must return 404
+    let mut s3 = connect(&sock).await;
+    let (status404, _) = send(&mut s3, Method::GET, "/api/v1/clients/no-such-id/connection-key", None).await;
+    assert_eq!(status404, StatusCode::NOT_FOUND);
 }
