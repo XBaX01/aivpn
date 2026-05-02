@@ -20,7 +20,7 @@
 - ✅ macOS应用：正常工作
 - ✅ CLI客户端：正常工作
 - ✅ Android应用：正常工作
-- 🧪 Windows客户端：测试中
+- ✅ Windows客户端：正常工作（GUI + CLI）
 
 ## 📥 下载（预编译二进制）
 
@@ -32,7 +32,8 @@
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 MB | 原生x86_64 GNU/Linux CLI二进制 |
 | **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 MB | 用于ARMv7服务器和SBC的静态musl客户端二进制 |
 | **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 MB | 用于支持Entware路由器的静态musl客户端二进制 |
-| **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | 包含`aivpn-client.exe` + `wintun.dll` |
+| **Windows（安装程序）** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | 一键安装程序：GUI应用 + CLI + Wintun驱动。**以管理员身份运行** |
+| **Windows（便携版）** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | 便携归档：`aivpn.exe`（GUI）+ `aivpn-client.exe`（CLI）+ `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | 安装并粘贴你的连接密钥 |
 | **Linux服务器** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | 预编译的x86_64 GNU/Linux服务器二进制，用于VPS或快速Docker部署 |
 | **Linux服务器 ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | 用于ARMv7 Linux主机的静态musl服务器二进制 |
@@ -50,9 +51,18 @@
 
 ### 快速开始（Windows）
 
+#### 选项A：安装程序（推荐）
+1. 下载[aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+2. 右键点击 → **以管理员身份运行**，按照安装向导操作
+3. 从开始菜单启动**AIVPN**（自动以管理员身份运行）
+4. 粘贴你的连接密钥（`aivpn://...`）并点击**连接**
+
+> ⚠️ VPN客户端需要管理员权限来创建Wintun网络适配器。请始终以管理员身份运行。
+
+#### 选项B：便携归档
 1. 下载并解压[aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
-2. 确保`aivpn-client.exe`和`wintun.dll`保留在同一文件夹中
-3. 在PowerShell中**以管理员身份**运行：
+2. 确保`aivpn.exe`、`aivpn-client.exe`和`wintun.dll`保留在同一文件夹中
+3. 右键点击`aivpn.exe` → **以管理员身份运行**使用GUI，或通过CLI：
    ```powershell
    .\aivpn-client.exe -k "your_connection_key_here"
    ```
@@ -490,16 +500,21 @@ sudo ./target/release/aivpn-client \
 
 ##### Windows
 
-用户首选：下载并解压`releases/aivpn-windows-package.zip`。
+推荐用户通过[aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)安装（包含GUI应用、CLI客户端和Wintun驱动）。
 
-如果改为分发原始文件，请将`wintun.dll`保留在`.exe`旁边：
+或者下载并解压[aivpn-windows-package.zip](releases/aivpn-windows-package.zip)。归档包含：
 
 ```
-aivpn-client.exe
-wintun.dll
+aivpn.exe          # GUI应用程序
+aivpn-client.exe   # CLI客户端
+wintun.dll         # Wintun网络驱动
 ```
 
-从PowerShell**以管理员身份**运行：
+> ⚠️ **需要管理员权限。** VPN客户端需要管理员权限来创建Wintun网络适配器。请始终右键点击 → "以管理员身份运行"或从提升权限的PowerShell启动。
+
+**GUI模式**（推荐）：右键点击`aivpn.exe` → **以管理员身份运行**，粘贴连接密钥并点击连接。
+
+**CLI模式**，从PowerShell**以管理员身份**运行：
 
 ```powershell
 .\aivpn-client.exe --server YOUR_VPS_IP:443 --server-key SERVER_PUBLIC_KEY_BASE64

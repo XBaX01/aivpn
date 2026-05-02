@@ -21,7 +21,7 @@
 - ✅ Приложение macOS: работает
 - ✅ CLI-клиент: работает
 - ✅ Android-приложение: работает
-- 🧪 Windows-клиент: сейчас в тестировании
+- ✅ Windows-клиент: работает (GUI + CLI)
 
 ## 📥 Готовые бинарники
 
@@ -33,7 +33,8 @@
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 МБ | Нативный x86_64 GNU/Linux CLI бинарник |
 | **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl CLI-клиент для ARMv7 серверов и SBC |
 | **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 МБ | Статический musl CLI-клиент для роутеров с Entware |
-| **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Внутри `aivpn-client.exe` и `wintun.dll` |
+| **Windows (установщик)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 МБ | Установщик в один клик: GUI-приложение + CLI + Wintun драйвер. **Запускать от администратора** |
+| **Windows (портативная)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Портативный архив: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 МБ | Готовый x86_64 GNU/Linux бинарник сервера для VPS или быстрого Docker-деплоя |
 | **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl бинарник сервера для ARMv7 Linux-хостов |
@@ -49,9 +50,19 @@
 > ⚠️ VPN-клиенту требуются права root для создания TUN-устройства. Приложение запросит пароль через `sudo`.
 
 ### Быстрый старт (Windows)
+
+#### Вариант А: Установщик (рекомендуется)
+1. Скачайте [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+2. Правой кнопкой мыши → **Запустить от имени администратора**, следуйте инструкциям установщика
+3. Запустите **AIVPN** из меню «Пуск» (запускается с правами администратора автоматически)
+4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
+
+> ⚠️ VPN-клиенту требуются права администратора для создания сетевого адаптера Wintun. Всегда запускайте от имени администратора.
+
+#### Вариант Б: Портативный архив
 1. Скачайте и распакуйте [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
-2. Убедитесь, что `aivpn-client.exe` и `wintun.dll` лежат в одной папке
-3. Запустите **от имени администратора** в PowerShell:
+2. Убедитесь, что `aivpn.exe`, `aivpn-client.exe` и `wintun.dll` лежат в одной папке
+3. Правой кнопкой на `aivpn.exe` → **Запустить от имени администратора** для GUI, или через CLI:
    ```powershell
    .\aivpn-client.exe -k "ваш_ключ_подключения"
    ```
@@ -474,16 +485,21 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Для пользователей предпочтительно скачивать и распаковывать `releases/aivpn-windows-package.zip`.
+Для пользователей предпочтительна установка через [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) (включает GUI-приложение, CLI-клиент и Wintun драйвер).
 
-Если выкладываете файлы по отдельности, `wintun.dll` (от [WireGuard/wintun](https://www.wintun.net/)) должен лежать рядом с `.exe`:
+Альтернативно можно скачать и распаковать [aivpn-windows-package.zip](releases/aivpn-windows-package.zip). Архив содержит:
 
 ```
-aivpn-client.exe
-wintun.dll
+aivpn.exe          # GUI-приложение
+aivpn-client.exe   # CLI-клиент
+wintun.dll         # Сетевой драйвер Wintun
 ```
 
-Запуск из Powershell **с правами администратора**:
+> ⚠️ **Требуются права администратора.** VPN-клиенту нужны права администратора для создания сетевого адаптера Wintun. Всегда запускайте через правую кнопку мыши → «Запуск от имени администратора» или из PowerShell с повышенными привилегиями.
+
+**GUI-режим** (рекомендуется): правой кнопкой на `aivpn.exe` → **Запуск от имени администратора**, вставьте ключ подключения и нажмите «Подключить».
+
+**CLI-режим** из PowerShell **от имени администратора**:
 
 ```powershell
 .\aivpn-client.exe --server IP_ВАШЕГО_VPS:443 --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64

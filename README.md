@@ -20,7 +20,7 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 - ✅ macOS app: working
 - ✅ CLI client: working
 - ✅ Android app: working
-- 🧪 Windows client: currently in testing
+- ✅ Windows client: working (GUI + CLI)
 
 ## 📥 Downloads (Pre-built Binaries)
 
@@ -32,7 +32,8 @@ No need to compile — download and run:
 | **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 MB | Native x86_64 GNU/Linux CLI binary |
 | **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 MB | Static musl client binary for ARMv7 servers and SBCs |
 | **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 MB | Static musl client binary for Entware-capable routers |
-| **Windows** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Includes `aivpn-client.exe` + `wintun.dll` |
+| **Windows (installer)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | One-click installer, includes GUI app + CLI + Wintun driver. **Run as Administrator** |
+| **Windows (portable)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Portable archive: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | Prebuilt x86_64 GNU/Linux server binary for VPS or fast Docker deploy |
 | **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | Static musl server binary for ARMv7 Linux hosts |
@@ -48,9 +49,19 @@ No need to compile — download and run:
 > ⚠️ The VPN client requires root privileges for TUN device. The app will prompt for password via `sudo`.
 
 ### Quick Start (Windows)
+
+#### Option A: Installer (recommended)
+1. Download [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+2. Right-click → **Run as Administrator** and follow the installer
+3. Launch **AIVPN** from the Start Menu (runs as Administrator automatically)
+4. Paste your connection key (`aivpn://...`) and click **Connect**
+
+> ⚠️ The VPN client requires Administrator privileges to create the Wintun network adapter. Always run as Administrator.
+
+#### Option B: Portable archive
 1. Download and extract [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
-2. Ensure `aivpn-client.exe` and `wintun.dll` remain in the same folder
-3. Run **as Administrator** in PowerShell:
+2. Ensure `aivpn.exe`, `aivpn-client.exe`, and `wintun.dll` remain in the same folder
+3. Right-click `aivpn.exe` → **Run as Administrator** for the GUI, or use CLI:
    ```powershell
    .\aivpn-client.exe -k "your_connection_key_here"
    ```
@@ -484,16 +495,21 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Preferred for users: download and extract `releases/aivpn-windows-package.zip`.
+Preferred for users: install via [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) (includes GUI app, CLI client, and Wintun driver).
 
-If you distribute raw files instead, keep `wintun.dll` next to the `.exe`:
+Alternatively, download and extract [aivpn-windows-package.zip](releases/aivpn-windows-package.zip). The archive contains:
 
 ```
-aivpn-client.exe
-wintun.dll
+aivpn.exe          # GUI application
+aivpn-client.exe   # CLI client
+wintun.dll         # Wintun network driver
 ```
 
-Run from PowerShell **as Administrator**:
+> ⚠️ **Administrator privileges required.** The VPN client needs Administrator rights to create the Wintun network adapter. Always right-click → "Run as Administrator" or launch from an elevated PowerShell.
+
+**GUI mode** (recommended): right-click `aivpn.exe` → **Run as Administrator**, paste your connection key and click Connect.
+
+**CLI mode** from PowerShell **as Administrator**:
 
 ```powershell
 .\aivpn-client.exe --server YOUR_VPS_IP:443 --server-key SERVER_PUBLIC_KEY_BASE64
