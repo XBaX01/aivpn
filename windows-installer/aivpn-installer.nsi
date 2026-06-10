@@ -29,8 +29,8 @@ ShowInstDetails show
 ShowUnInstDetails show
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "${STAGE_DIR}\aivpn.ico"
-!define MUI_UNICON "${STAGE_DIR}\aivpn.ico"
+!define MUI_ICON "${STAGE_DIR}/aivpn.ico"
+!define MUI_UNICON "${STAGE_DIR}/aivpn.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_DIRECTORYPAGE_VERIFYONLEAVE
@@ -63,10 +63,10 @@ Section "Install" SecInstall
   Delete "${START_MENU_DIR}\Uninstall AIVPN.lnk"
   Delete "$DESKTOP\AIVPN.lnk"
 
-  File "${STAGE_DIR}\aivpn.exe"
-  File "${STAGE_DIR}\aivpn-client.exe"
-  File "${STAGE_DIR}\wintun.dll"
-  File "${STAGE_DIR}\aivpn.ico"
+  File "${STAGE_DIR}/aivpn.exe"
+  File "${STAGE_DIR}/aivpn-client.exe"
+  File "${STAGE_DIR}/wintun.dll"
+  File "${STAGE_DIR}/aivpn.ico"
 
   WriteUninstaller "${UNINSTALL_EXE}"
   WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "DisplayName" "${APP_NAME}"
