@@ -187,24 +187,25 @@ if [[ "${BUILD_TYPE}" == "release" ]]; then
         echo "  Copied signed release APK -> ${APK_DST}"
     elif [[ -f "${RELEASE_APK_UNSIGNED}" ]]; then
         echo "  release APK is unsigned. Attempting to sign with debug keystore..."
-        if command -v jarsigner >/dev/null 2>&1 && [[ -f "${HOME}/.android/debug.keystore" ]]; then
-            rm -f "${RELEASE_APK_SIGNED_LOCAL}"
-            jarsigner \
-                -keystore "${HOME}/.android/debug.keystore" \
-                -storepass android \
-                -keypass android \
-                -signedjar "${RELEASE_APK_SIGNED_LOCAL}" \
-                "${RELEASE_APK_UNSIGNED}" \
-                androiddebugkey >/dev/null
+        # Use apksigner (not jarsigner) — targetSdk 34+ requires APK Signature Scheme v2;
+        # jarsigner produces v1-only signatures which Android rejects as invalid.
+        if command -v apksigner >/dev/null 2>&1 && [[ -f "${HOME}/.android/debug.keystore" ]]; then
+            apksigner sign \
+                --ks "${HOME}/.android/debug.keystore" \
+                --ks-pass pass:android \
+                --key-pass pass:android \
+                --ks-key-alias androiddebugkey \
+                --out "${RELEASE_APK_SIGNED_LOCAL}" \
+                "${RELEASE_APK_UNSIGNED}"
 
-            if jarsigner -verify -certs "${RELEASE_APK_SIGNED_LOCAL}" >/dev/null 2>&1; then
+            if apksigner verify "${RELEASE_APK_SIGNED_LOCAL}" >/dev/null 2>&1; then
                 cp -f "${RELEASE_APK_SIGNED_LOCAL}" "${APK_DST}"
-                echo "  Signed release APK with debug.keystore -> ${APK_DST}"
+                echo "  Signed release APK (v2/v3) with debug.keystore -> ${APK_DST}"
             else
-                echo "  WARNING: release signing verification failed. Falling back to debug APK..."
+                echo "  WARNING: apksigner verification failed. Falling back to debug APK..."
             fi
         else
-            echo "  WARNING: jarsigner/debug.keystore unavailable. Falling back to debug APK..."
+            echo "  WARNING: apksigner/debug.keystore unavailable. Falling back to debug APK..."
         fi
 
         if [[ ! -f "${APK_DST}" || "$(shasum -a 256 "${APK_DST}" | awk '{print $1}')" == "$(shasum -a 256 "${RELEASE_APK_UNSIGNED}" | awk '{print $1}')" ]]; then
