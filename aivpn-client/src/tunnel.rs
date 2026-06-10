@@ -27,6 +27,9 @@ pub struct TunnelConfig {
     pub mtu: u16,
     /// Route all traffic through VPN (full tunnel mode)
     pub full_tunnel: bool,
+    /// MDH (mask-defined header) byte count for the initial mask.
+    /// Must match the server's active mask to avoid packet decode failures on connect.
+    pub mdh_len: u16,
 }
 
 impl Default for TunnelConfig {
@@ -40,6 +43,7 @@ impl Default for TunnelConfig {
             prefix_len: 24,
             mtu: WAN_SAFE_TUN_MTU,
             full_tunnel: false,
+            mdh_len: 20u16,
         }
     }
 }
@@ -58,6 +62,7 @@ impl TunnelConfig {
             prefix_len: network_config.prefix_len,
             mtu: network_config.mtu,
             full_tunnel,
+            mdh_len: network_config.mdh_len,
         }
     }
 
@@ -69,7 +74,7 @@ impl TunnelConfig {
             server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
-            mdh_len: 20,
+            mdh_len: self.mdh_len,
         };
         network_config.validate()?;
         Ok(network_config)

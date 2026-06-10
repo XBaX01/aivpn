@@ -214,7 +214,8 @@ impl AivpnClient {
             self.config.preshared_key.as_ref(),
             &self.keypair.public_key_bytes(),
         ));
-        let keys = self.session_keys.as_ref().unwrap();
+        let keys = self.session_keys.as_ref()
+            .ok_or(Error::Session("session_keys not set after derive".into()))?;
         debug!("Client tag_secret: {}", hex::encode(&keys.tag_secret));
         
         self.state = ClientState::Connected;
@@ -345,7 +346,8 @@ impl AivpnClient {
         });
 
         // Spawn UDP reader task
-        let udp_socket = self.udp_socket.as_ref().unwrap().clone();
+        let udp_socket = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before run()".into()))?.clone();
         let udp_to_tun_tx_clone = udp_to_tun_tx.clone();
         let shutdown_for_tasks = shutdown.clone();
         let udp_task = tokio::spawn(async move {
@@ -423,7 +425,8 @@ impl AivpnClient {
         });
 
         // ── Spawn upload task using the shared pipeline ──
-        let upload_udp = self.udp_socket.as_ref().unwrap().clone();
+        let upload_udp = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before upload task".into()))?.clone();
         let upload_keys = self.session_keys.clone()
             .ok_or(Error::Session("No session keys".into()))?;
         let upload_engine = self.mimicry_engine.take()
@@ -806,7 +809,8 @@ impl AivpnClient {
             Some(&obf),
         )?;
         
-        let socket = self.udp_socket.as_ref().unwrap();
+        let socket = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before send_init".into()))?;
         socket.send(&aivpn_packet).await?;
         
         info!("Sent init handshake ({} bytes)", aivpn_packet.len());
