@@ -100,7 +100,6 @@ impl KeyRotator {
         
         // Prepare rotation event
         let event = KeyRotationEvent {
-            old_eph_pub: self.current_keypair.public_key_bytes(),
             new_eph_pub: new_keypair.public_key_bytes(),
             rotation_count: self.rotation_count,
         };
@@ -137,12 +136,13 @@ impl KeyRotator {
         self.next_keypair.as_ref().map(|k| k.public_key_bytes())
     }
     
-    /// Generate CONTROL message for key rotation
-    pub fn create_rotation_message(&self) -> ControlPayload {
-        ControlPayload::KeyRotate {
-            new_eph_pub: self.next_public_key()
-                .unwrap_or_else(|| self.current_public_key()),
-        }
+    /// Generate a CONTROL message for key rotation.
+    ///
+    /// Returns `None` when no next key has been pre-generated yet — callers must
+    /// call `rotate_keys()` before this to avoid sending the current key as "new",
+    /// which would silently produce a no-op rotation on the peer.
+    pub fn create_rotation_message(&self) -> Option<ControlPayload> {
+        self.next_public_key().map(|new_eph_pub| ControlPayload::KeyRotate { new_eph_pub })
     }
     
     /// Get rotation statistics
@@ -160,7 +160,6 @@ impl KeyRotator {
 /// Key rotation event
 #[derive(Debug, Clone)]
 pub struct KeyRotationEvent {
-    pub old_eph_pub: [u8; X25519_PUBLIC_KEY_SIZE],
     pub new_eph_pub: [u8; X25519_PUBLIC_KEY_SIZE],
     pub rotation_count: u64,
 }

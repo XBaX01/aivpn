@@ -9,6 +9,7 @@
 
 import Foundation
 import Darwin
+import SystemConfiguration
 
 // MARK: - Constants
 
@@ -485,9 +486,16 @@ func createSocket() -> Int32 {
         return -1
     }
 
-    // Make socket accessible to all users
-    try? FileManager.default.setAttributes([.posixPermissions: 0o666],
-                                          ofItemAtPath: SOCKET_PATH)
+    // Restrict socket to owner only; chown to the console user so the GUI app
+    // (running as the logged-in user, not root) can connect. 0o666 would expose
+    // the socket — and any connection key/PSK it carries — to all local processes.
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                            ofItemAtPath: SOCKET_PATH)
+    var consoleUID: uid_t = 0
+    var consoleGID: gid_t = 0
+    if SCDynamicStoreCopyConsoleUser(nil, &consoleUID, &consoleGID) != nil {
+        chown(SOCKET_PATH, consoleUID, consoleGID)
+    }
 
     return fd
 }
