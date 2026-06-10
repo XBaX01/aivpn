@@ -67,6 +67,7 @@ aivpn-android/**/.cxx/
 aivpn-android/**/captures/
 *.apk
 !releases/*.apk
+*.idsig
 *.aab
 *.ap_
 *.dex
