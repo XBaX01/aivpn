@@ -13,8 +13,10 @@ import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -90,14 +92,11 @@ class AivpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val server    = intent.getStringExtra("server")     ?: return START_NOT_STICKY
-                val serverKey = intent.getStringExtra("server_key") ?: return START_NOT_STICKY
-                startVpn(server, serverKey,
-                    intent.getStringExtra("psk"),
-                    intent.getStringExtra("vpn_ip"),
-                    intent.getStringExtra("server_vpn_ip"),
-                    intent.getIntExtra("vpn_prefix_len", LEGACY_PREFIX_LEN),
-                    intent.getIntExtra("vpn_mtu", DEFAULT_TUN_MTU))
+                // Read only the profile ID from the Intent.  The actual server key
+                // and PSK are loaded from EncryptedSharedPreferences inside the
+                // service so they never travel through IPC as plaintext extras.
+                val profileId = intent.getStringExtra("profile_id") ?: return START_NOT_STICKY
+                loadAndStartVpnFromProfile(profileId)
             }
             ACTION_DISCONNECT -> stopVpn()
         }
@@ -555,6 +554,70 @@ class AivpnService : VpnService() {
             Pair(serverAddr.substring(0, lastColon), port)
         else
             Pair(serverAddr, 443)
+    }
+
+    // ──────────── Profile-keyed connect ────────────
+
+    /**
+     * Load the VPN profile from EncryptedSharedPreferences by [profileId] and
+     * start the tunnel.  Server keys stay in secure storage and are never
+     * exposed as Intent extras.
+     */
+    private fun loadAndStartVpnFromProfile(profileId: String) {
+        val profiles = SecureStorage.loadProfiles(this)
+        val profile = profiles.find { it.id == profileId } ?: profiles.firstOrNull()
+        if (profile == null) {
+            Log.w(TAG, "loadAndStartVpnFromProfile: no profile for id=$profileId")
+            return
+        }
+        val parsed = parseConnectionKeyInService(profile.key) ?: return
+        startVpn(
+            serverAddr      = parsed.server,
+            serverKeyBase64 = parsed.serverKey,
+            pskBase64       = parsed.psk,
+            vpnIp           = parsed.vpnIp,
+            serverVpnIp     = parsed.serverVpnIp,
+            vpnPrefixLen    = parsed.prefixLen,
+            vpnMtu          = parsed.mtu,
+        )
+    }
+
+    private data class ParsedConnectionKey(
+        val server: String,
+        val serverKey: String,
+        val psk: String?,
+        val vpnIp: String,
+        val serverVpnIp: String,
+        val prefixLen: Int,
+        val mtu: Int,
+    )
+
+    private fun parseConnectionKeyInService(raw: String): ParsedConnectionKey? {
+        val payload = raw.trim().let {
+            if (it.startsWith("aivpn://")) it.removePrefix("aivpn://") else it
+        }
+        return try {
+            val bytes = Base64.decode(payload,
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            val net = json.optJSONObject("n")
+            val vpnIp = net?.optString("client_ip")?.takeIf { it.isNotBlank() }
+                ?: json.getString("i")
+            val serverVpnIp = net?.optString("server_vpn_ip")?.takeIf { it.isNotBlank() }
+                ?: "10.0.0.1"
+            ParsedConnectionKey(
+                server      = json.getString("s"),
+                serverKey   = json.getString("k"),
+                psk         = json.optString("p").takeIf { it.isNotEmpty() },
+                vpnIp       = vpnIp,
+                serverVpnIp = serverVpnIp,
+                prefixLen   = net?.optInt("prefix_len", LEGACY_PREFIX_LEN) ?: LEGACY_PREFIX_LEN,
+                mtu         = net?.optInt("mtu", DEFAULT_TUN_MTU) ?: DEFAULT_TUN_MTU,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "parseConnectionKeyInService failed: ${e.message}")
+            null
+        }
     }
 
     // ──────────── Notifications ────────────

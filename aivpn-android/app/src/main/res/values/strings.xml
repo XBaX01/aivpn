@@ -62,6 +62,7 @@
     <string name="split_tunnel_hint_combined">%1$s via VPN, %2$s bypass VPN</string>
     <string name="split_tunnel_add_domain">Enter domain…</string>
     <string name="split_tunnel_domain_hint">Traffic to these domains will bypass VPN</string>
+    <string name="split_tunnel_apps_unavailable">App list unavailable — QUERY_ALL_PACKAGES permission denied</string>
     <string name="split_tunnel_domain_invalid">Invalid domain format</string>
     <string name="split_tunnel_domain_exists">Domain already added</string>
 </resources>

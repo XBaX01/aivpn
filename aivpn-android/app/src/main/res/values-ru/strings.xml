@@ -62,6 +62,7 @@
     <string name="split_tunnel_hint_combined">%1$s через VPN, %2$s обходят VPN</string>
     <string name="split_tunnel_add_domain">Введите домен…</string>
     <string name="split_tunnel_domain_hint">Трафик к этим доменам обходит VPN</string>
+    <string name="split_tunnel_apps_unavailable">Список приложений недоступен — запрещено разрешение QUERY_ALL_PACKAGES</string>
     <string name="split_tunnel_domain_invalid">Неверный формат домена</string>
     <string name="split_tunnel_domain_exists">Домен уже добавлен</string>
 </resources>

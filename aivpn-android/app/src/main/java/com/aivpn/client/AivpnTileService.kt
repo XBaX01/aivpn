@@ -3,9 +3,7 @@ package com.aivpn.client
 import android.content.Intent
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import android.util.Base64
 import android.util.Log
-import org.json.JSONObject
 
 /**
  * Quick Settings tile (notification shade shortcut) for toggling the VPN.
@@ -91,49 +89,13 @@ class AivpnTileService : TileService() {
             return
         }
 
-        val parsed = parseKey(profile.key)
-        if (parsed == null) {
-            Log.w(TAG, "Failed to parse connection key for profile '${profile.name}'")
-            return
-        }
-
+        // Pass only the profile ID via Intent; AivpnService loads the keys
+        // from EncryptedSharedPreferences to avoid plaintext IPC extras.
         val intent = Intent(this, AivpnService::class.java).apply {
             action = AivpnService.ACTION_CONNECT
-            putExtra("server", parsed.server)
-            putExtra("server_key", parsed.serverKey)
-            putExtra("psk", parsed.psk)
-            putExtra("vpn_ip", parsed.vpnIp)
-            putExtra("prefix_len", parsed.prefixLen)
+            putExtra("profile_id", profile.id)
         }
         startForegroundService(intent)
         qsTile?.let { it.state = Tile.STATE_ACTIVE; it.updateTile() }
-    }
-
-    // Minimal connection key parser. The canonical parser is in MainActivity.parseConnectionKey;
-    // keep field names in sync if the key format changes.
-    private data class ParsedKey(
-        val server: String,
-        val serverKey: String,
-        val psk: String?,
-        val vpnIp: String,
-        val prefixLen: Int,
-    )
-
-    private fun parseKey(raw: String): ParsedKey? {
-        return try {
-            val stripped = raw.trim().removePrefix("aivpn://")
-            val bytes = Base64.decode(stripped, Base64.URL_SAFE or Base64.NO_PADDING)
-            val json = JSONObject(String(bytes, Charsets.UTF_8))
-            ParsedKey(
-                server    = json.getString("s"),
-                serverKey = json.getString("k"),
-                psk       = json.optString("p").takeIf { it.isNotEmpty() },
-                vpnIp     = json.getString("i"),
-                prefixLen = json.optInt("x", 24),
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "parseKey failed: ${e.message}")
-            null
-        }
     }
 }

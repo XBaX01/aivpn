@@ -468,22 +468,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpnService() {
-        val connectionKey = binding.editConnectionKey.text.toString().trim()
-        val parsed = parseConnectionKey(connectionKey) ?: return
-        val server = parsed.server
-        val serverKey = parsed.serverKey
-        val psk = parsed.psk
-        val vpnIp = parsed.vpnIp
-
+        // Pass only the profile ID via Intent so that the server key and PSK are
+        // read from EncryptedSharedPreferences inside AivpnService rather than
+        // travelling through IPC as plaintext Intent extras.
+        val profileId = activeProfileId ?: return
         val intent = Intent(this, AivpnService::class.java).apply {
             action = AivpnService.ACTION_CONNECT
-            putExtra("server", server)
-            putExtra("server_key", serverKey)
-            putExtra("psk", psk)
-            putExtra("vpn_ip", vpnIp)
-            putExtra("server_vpn_ip", parsed.serverVpnIp)
-            putExtra("vpn_prefix_len", parsed.prefixLen)
-            putExtra("vpn_mtu", parsed.mtu)
+            putExtra("profile_id", profileId)
         }
         startForegroundService(intent)
         updateUI(true, getString(R.string.status_connecting))

@@ -153,7 +153,20 @@ class SplitTunnelActivity : AppCompatActivity() {
             0
         }
 
-        allApps = pm.getInstalledApplications(flags)
+        // On Android 12+ the system may deny QUERY_ALL_PACKAGES for policy reasons
+        // even when it is declared in the manifest.  Catch SecurityException so the
+        // activity degrades gracefully instead of crashing.
+        val installedApps = try {
+            pm.getInstalledApplications(flags)
+        } catch (e: Exception) {
+            android.util.Log.w("SplitTunnelActivity",
+                "getInstalledApplications denied — app list unavailable: ${e.message}")
+            Toast.makeText(this,
+                getString(R.string.split_tunnel_apps_unavailable), Toast.LENGTH_LONG).show()
+            emptyList()
+        }
+
+        allApps = installedApps
             .filter { appInfo ->
                 // Exclude own package
                 appInfo.packageName != ownPackage
