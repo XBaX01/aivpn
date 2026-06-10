@@ -492,9 +492,15 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(connected: Boolean, statusText: String) {
         isConnected = connected
         val serviceActive = connected || AivpnService.isServiceActive
-        binding.btnConnect.text = getString(
-            if (serviceActive) R.string.btn_disconnect else R.string.btn_connect
-        )
+        // When not connected, append the active profile name so the user can see
+        // which profile will be used without having to look at the profile list.
+        binding.btnConnect.text = if (serviceActive) {
+            getString(R.string.btn_disconnect)
+        } else {
+            val activeName = profiles.find { it.id == activeProfileId }?.name
+            if (activeName != null) "${getString(R.string.btn_connect)} · $activeName"
+            else getString(R.string.btn_connect)
+        }
         binding.btnConnect.setBackgroundColor(
             getColor(if (serviceActive) R.color.disconnect else R.color.accent)
         )
