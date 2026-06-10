@@ -31,7 +31,7 @@ use aivpn_common::mask::{
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::VpnNetworkConfig;
 
-use crate::session::{SessionManager, Session};
+use crate::session::{SessionManager, Session, MAX_SESSIONS};
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
@@ -624,6 +624,7 @@ impl Gateway {
             let recorder = self.recording_manager.clone();
             let socket = self.udp_socket.as_ref().unwrap().clone();
             let mdh = self.mask_catalog.packet_mdh_bytes();
+            let neural = self.neural_module.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -640,6 +641,11 @@ impl Gateway {
                     }
 
                     let removed = sessions.cleanup_expired();
+                    for session_id in &removed {
+                        // Release per-session neural traffic stats; without this the
+                        // neural_module's DashMap grows unbounded as sessions expire.
+                        neural.lock().cleanup_stats(*session_id);
+                    }
                     // Stop active recordings for removed sessions
                     if let Some(ref rec) = recorder {
                         let store = rec.store();
@@ -1266,6 +1272,18 @@ impl Gateway {
                 }
             };
 
+            // Guard against session pool exhaustion: the handshake path calls
+            // create_session() speculatively for every (client × bootstrap_mask)
+            // combination before tag validation confirms which one is correct.
+            // An attacker spoofing many source IPs can fill the pool with temporary
+            // sessions and block legitimate clients. Reserve 10 slots so ratchet
+            // renewals for existing sessions always have capacity.
+            if self.session_manager.session_count() + 10 >= MAX_SESSIONS {
+                debug!("Session pool near capacity ({}/{}), dropping unauthenticated handshake from {}",
+                    self.session_manager.session_count(), MAX_SESSIONS, hash_addr(&client_addr));
+                return Ok(());
+            }
+
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
             // After mask rotation or session timeout, stale clients may flood the server
@@ -1806,6 +1824,7 @@ impl Gateway {
                 // Close session and stop active recording if any
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
+                self.neural_module.lock().cleanup_stats(session_id);
                 if let Some(ref recorder) = self.recording_manager {
                     let socket = self.udp_socket.as_ref().unwrap().clone();
                     let store = recorder.store();
