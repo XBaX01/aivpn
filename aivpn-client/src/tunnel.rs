@@ -276,7 +276,15 @@ impl Tunnel {
             if let Some(ref idx) = self.wintun_if_index {
                 info!("Wintun interface index: {}", idx);
             } else {
-                error!("Could not determine wintun interface index — routes may bind to wrong adapter");
+                // Without the interface index, configure_windows() would add VPN routes
+                // bound to the default gateway NIC instead of the wintun adapter, silently
+                // routing all traffic outside the tunnel. Fail hard so the user sees a
+                // clear error rather than a "connected" tunnel that leaks all traffic.
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Could not determine wintun interface index — cannot add routes safely. \
+                     Ensure Wintun is installed and the adapter name matches the config.",
+                )));
             }
             self.configure_windows()?;
         }
