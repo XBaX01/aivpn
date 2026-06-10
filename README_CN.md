@@ -1,5 +1,7 @@
 # AIVPN
 
+[![CI](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml)
+
 传统VPN已经消亡。ISP和国家级别的防火墙（如GFW）只需查看数据包大小、时间间隔和握手模式，就能在几毫秒内检测到WireGuard和OpenVPN。你可以使用任何加密算法来加密载荷——DPI系统并不关心内容，它们阻止的是连接本身的"形状"。
 
 **AIVPN**是我对现代深度包检测（DPI）的回应。我们不仅加密数据包——我们将它们伪装成真实的应用流量。当你的ISP看到一个Zoom通话或TikTok滚动时，实际上它是一个完全加密的隧道。
