@@ -19,7 +19,7 @@ COPY aivpn-server aivpn-server/
 COPY aivpn-client aivpn-client/
 COPY aivpn-android-core aivpn-android-core/
 COPY aivpn-windows aivpn-windows/
-COPY mask-assets mask-assets/
+COPY aivpn-common/mask-assets mask-assets/
 
 # Build in release mode (Cargo.lock is auto-generated if missing)
 RUN cargo build --release --bin aivpn-server
@@ -56,7 +56,7 @@ RUN mkdir -p /etc/aivpn /dev/net /var/lib/aivpn/bootstrap /var/lib/aivpn/masks &
 COPY config/server.json.example /usr/share/aivpn/server.json.example
 
 # Seed preset masks so server has masks on first run
-COPY mask-assets/*.json /usr/share/aivpn/preset-masks/
+COPY aivpn-common/mask-assets/*.json /usr/share/aivpn/preset-masks/
 
 # Expose port
 EXPOSE 443/udp

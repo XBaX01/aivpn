@@ -3,6 +3,8 @@ name = "aivpn-android-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
 
 # Produces a C-compatible shared library (.so) loaded by System.loadLibrary("aivpn_core").
 [lib]
@@ -10,7 +12,7 @@ name = "aivpn_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-aivpn-common = { path = "../aivpn-common", features = ["client-upload"] }
+aivpn-common = { path = "../aivpn-common", version = "0.4.0", features = ["client-upload"] }
 
 jni       = "0.21"
 libc      = "0.2"

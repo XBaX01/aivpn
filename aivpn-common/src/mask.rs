@@ -898,25 +898,25 @@ pub mod preset_masks {
     }
 
     fn load_webrtc_zoom_v3() -> MaskProfile {
-        parse_mask(include_str!("../../mask-assets/webrtc_zoom_v3.json"))
+        parse_mask(include_str!("../mask-assets/webrtc_zoom_v3.json"))
     }
 
     fn load_quic_https_v2() -> MaskProfile {
-        parse_mask(include_str!("../../mask-assets/quic_https_v2.json"))
+        parse_mask(include_str!("../mask-assets/quic_https_v2.json"))
     }
 
     fn load_webrtc_yandex_telemost_v1() -> MaskProfile {
         parse_mask(include_str!(
-            "../../mask-assets/webrtc_yandex_telemost_v1.json"
+            "../mask-assets/webrtc_yandex_telemost_v1.json"
         ))
     }
 
     fn load_webrtc_vk_teams_v1() -> MaskProfile {
-        parse_mask(include_str!("../../mask-assets/webrtc_vk_teams_v1.json"))
+        parse_mask(include_str!("../mask-assets/webrtc_vk_teams_v1.json"))
     }
 
     fn load_webrtc_sberjazz_v1() -> MaskProfile {
-        parse_mask(include_str!("../../mask-assets/webrtc_sberjazz_v1.json"))
+        parse_mask(include_str!("../mask-assets/webrtc_sberjazz_v1.json"))
     }
 
     pub fn webrtc_zoom_v3() -> MaskProfile {

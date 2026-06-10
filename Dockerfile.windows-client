@@ -30,7 +30,7 @@ COPY aivpn-client aivpn-client/
 COPY aivpn-server aivpn-server/
 COPY aivpn-android-core aivpn-android-core/
 COPY aivpn-windows aivpn-windows/
-COPY mask-assets mask-assets/
+COPY aivpn-common/mask-assets mask-assets/
 
 # Build Windows client in release mode (GNU ABI)
 RUN cargo build --release --target x86_64-pc-windows-gnu --bin aivpn-client
