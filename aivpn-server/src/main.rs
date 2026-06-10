@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn load_bootstrap_masks_handles_empty_file() {
         use std::io::Write;
-        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap_1");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let empty_file = temp_dir.join("empty.json");
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn load_bootstrap_masks_handles_empty_array() {
         use std::io::Write;
-        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap_2");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let array_file = temp_dir.join("array.json");
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn load_bootstrap_masks_handles_single_object() {
         use std::io::Write;
-        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap_3");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let single_file = temp_dir.join("single.json");
@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn load_bootstrap_masks_handles_array_of_objects() {
         use std::io::Write;
-        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
+        let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap_4");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let array_file = temp_dir.join("array.json");
