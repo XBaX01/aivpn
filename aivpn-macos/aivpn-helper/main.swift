@@ -358,6 +358,11 @@ func getLog() -> HelperResponse {
                               pid: managedPID > 0 ? Int(managedPID) : nil, log: "")
     }
     let lines = logContent.components(separatedBy: "\n")
+    // Keep log file bounded so it doesn't grow unboundedly over a long session
+    if lines.count > 500 {
+        let kept = lines.suffix(500).joined(separator: "\n")
+        try? kept.write(toFile: LOG_PATH, atomically: true, encoding: .utf8)
+    }
     let recent = lines.suffix(50).joined(separator: "\n")
     return HelperResponse(status: "ok", message: "Log retrieved",
                           connected: isConnected,
@@ -637,6 +642,10 @@ func main() {
 
     log("AIVPN Helper v\(HELPER_VERSION) started (socket: \(SOCKET_PATH))")
 
+    // Serial queue: keeps shared mutable state (managedPID, isConnected) thread-safe
+    // while freeing the accept loop from blocking on slow 5-second-timeout connections.
+    let connectionQueue = DispatchQueue(label: "aivpn.helper.connections")
+
     // Main accept loop — runs forever (LaunchDaemon manages lifecycle)
     while true {
         var clientBuf = [Int8](repeating: 0, count: 106)
@@ -652,8 +661,10 @@ func main() {
             break
         }
 
-        handleConnection(clientFD)
-        close(clientFD)
+        connectionQueue.async {
+            handleConnection(clientFD)
+            close(clientFD)
+        }
     }
 
     log("AIVPN Helper exiting")

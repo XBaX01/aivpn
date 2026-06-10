@@ -4,7 +4,6 @@ import UserNotifications
 @main
 struct AivpnApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var vpnManager = VPNManager()
     @StateObject private var localization = LocalizationManager()
 
     var body: some Scene {

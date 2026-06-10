@@ -9,6 +9,7 @@
 //! - Telegram/Discord webhook monitoring
 
 use std::collections::HashMap;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{info, debug};
 
@@ -224,85 +225,20 @@ impl SteganographicEncoder {
         // Create signature
         // In production: sign with Ed25519
         
-        // Encode as base64
-        let encoded = base64_encode(&mask_bytes);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&mask_bytes);
         
         // Format: "aivpn-mask-v1:<base64>"
         Ok(format!("aivpn-mask-v1:{}", encoded))
     }
     
-    /// Encode mask for image LSB
-    pub fn encode_for_image(&self, mask: &MaskProfile) -> Result<Vec<u8>> {
-        // Format: [64 bytes latent_vector][32 bytes signature]
-        let mut payload = Vec::with_capacity(96);
-        
-        // For MVP, use signature_vector from mask
-        for &val in &mask.signature_vector {
-            payload.extend_from_slice(&val.to_le_bytes());
-        }
-        
-        // Pad to 64 bytes if needed
-        while payload.len() < 64 {
-            payload.push(0);
-        }
-        
-        // Add signature (placeholder for MVP)
-        payload.extend_from_slice(&[0u8; 32]);
-        
-        Ok(payload)
+    /// Encode mask for image LSB steganography.
+    pub fn encode_for_image(&self, _mask: &MaskProfile) -> Result<Vec<u8>> {
+        unimplemented!("image LSB steganography encoding is not yet implemented")
     }
-    
-    /// Encode mask for blockchain OP_RETURN
-    pub fn encode_for_blockchain(&self, mask: &MaskProfile) -> Result<Vec<u8>> {
-        // OP_RETURN limit: 80 bytes (Bitcoin), so we need to compress
-        // Use only the signature_vector (64 floats = 256 bytes) - too large
-        // Instead, send a hash/reference that clients can use to fetch full mask
-        
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        mask.mask_id.hash(&mut hasher);
-        let hash = hasher.finish();
-        
-        // Format: [8 bytes "AIVPN"][8 bytes hash]
-        let mut payload = Vec::with_capacity(16);
-        payload.extend_from_slice(b"AIVPN");
-        payload.extend_from_slice(&hash.to_le_bytes());
-        
-        Ok(payload)
+
+    /// Encode mask for blockchain OP_RETURN.
+    pub fn encode_for_blockchain(&self, _mask: &MaskProfile) -> Result<Vec<u8>> {
+        unimplemented!("blockchain OP_RETURN encoding is not yet implemented")
     }
 }
 
-/// Simple base64 encoder
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    
-    let mut i = 0;
-    while i < data.len() {
-        let b0 = data[i] as usize;
-        let b1 = if i + 1 < data.len() { data[i + 1] as usize } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as usize } else { 0 };
-        
-        result.push(TABLE[(b0 >> 2) & 0x3F] as char);
-        result.push(TABLE[((b0 << 4) | (b1 >> 4)) & 0x3F] as char);
-        
-        if i + 1 < data.len() {
-            result.push(TABLE[((b1 << 2) | (b2 >> 6)) & 0x3F] as char);
-        }
-        
-        if i + 2 < data.len() {
-            result.push(TABLE[b2 & 0x3F] as char);
-        }
-        
-        i += 3;
-    }
-    
-    // Padding
-    while result.len() % 4 != 0 {
-        result.push('=');
-    }
-    
-    result
-}
