@@ -212,7 +212,7 @@ fn parse_descriptors_from_json(
     // Verify each descriptor
     let mut valid_descriptors = Vec::new();
     for descriptor in descriptors {
-        if store_verified_descriptor(descriptor.clone()).is_ok() {
+        if store_verified_descriptor(descriptor.clone(), None).is_ok() {
             valid_descriptors.push(descriptor);
         }
     }

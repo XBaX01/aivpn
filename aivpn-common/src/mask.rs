@@ -36,6 +36,19 @@ impl BootstrapDescriptor {
         unsigned.signature = [0u8; 64];
         rmp_serde::to_vec(&unsigned).expect("bootstrap descriptor serializable")
     }
+
+    /// Verify the ed25519 signature of this descriptor against an operator signing key.
+    pub fn verify_signature(&self, public_key: &[u8; 32]) -> Result<bool> {
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+        let vk = VerifyingKey::from_bytes(public_key)
+            .map_err(|e| Error::Crypto(format!("Invalid Ed25519 public key: {}", e)))?;
+        let message = self.signing_bytes();
+        let sig = Signature::from_bytes(&self.signature);
+        match vk.verify(&message, &sig) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 /// Multi-channel bootstrap descriptor distribution.

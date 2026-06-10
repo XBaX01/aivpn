@@ -343,7 +343,7 @@ async fn main() {
     let network_config = network_config;
 
     for descriptor in inline_descriptors {
-        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor) {
+        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, None) {
             warn!("Failed to store bootstrap descriptor from config/key: {}", e);
         }
     }

@@ -701,7 +701,7 @@ impl AivpnClient {
             ControlPayload::BootstrapDescriptorUpdate { descriptor_data } => {
                 match rmp_serde::from_slice::<BootstrapDescriptor>(&descriptor_data) {
                     Ok(descriptor) => {
-                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor) {
+                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, None) {
                             warn!("Failed to store bootstrap descriptor: {}", e);
                         }
                     }
