@@ -49,7 +49,10 @@ pub fn select_initial_mask(preshared_key: Option<&[u8; 32]>) -> Option<MaskProfi
         if !descriptor.is_valid_at(now) {
             continue;
         }
-        if let Some(mask) = derive_bootstrap_candidates(&descriptor, preshared_key).into_iter().next() {
+        if let Some(mask) = derive_bootstrap_candidates(&descriptor, preshared_key)
+            .into_iter()
+            .next()
+        {
             return Some(mask);
         }
     }
@@ -58,9 +61,13 @@ pub fn select_initial_mask(preshared_key: Option<&[u8; 32]>) -> Option<MaskProfi
 
 pub fn store_descriptor(descriptor: BootstrapDescriptor) -> Result<()> {
     let mut cache = load_cache_file();
-    cache.descriptors.retain(|existing| existing.descriptor_id != descriptor.descriptor_id);
+    cache
+        .descriptors
+        .retain(|existing| existing.descriptor_id != descriptor.descriptor_id);
     cache.descriptors.push(descriptor);
-    cache.descriptors.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    cache
+        .descriptors
+        .sort_by(|left, right| right.created_at.cmp(&left.created_at));
     cache.descriptors.truncate(MAX_CACHED_DESCRIPTORS);
 
     let dir = cache_dir();
@@ -95,10 +102,12 @@ pub fn store_verified_descriptor(
             }
             match descriptor.verify_signature(key)? {
                 true => {}
-                false => return Err(aivpn_common::error::Error::Session(format!(
-                    "Bootstrap descriptor {} has invalid ed25519 signature — rejecting",
-                    descriptor.descriptor_id
-                ))),
+                false => {
+                    return Err(aivpn_common::error::Error::Session(format!(
+                        "Bootstrap descriptor {} has invalid ed25519 signature — rejecting",
+                        descriptor.descriptor_id
+                    )))
+                }
             }
         }
         None => {
@@ -126,7 +135,11 @@ pub async fn refresh_from_urls(urls: &[String]) -> usize {
 
         let descriptors = serde_json::from_str::<Vec<BootstrapDescriptor>>(&body)
             .ok()
-            .or_else(|| serde_json::from_str::<BootstrapDescriptor>(&body).ok().map(|descriptor| vec![descriptor]));
+            .or_else(|| {
+                serde_json::from_str::<BootstrapDescriptor>(&body)
+                    .ok()
+                    .map(|descriptor| vec![descriptor])
+            });
 
         let Some(descriptors) = descriptors else {
             continue;

@@ -1,5 +1,5 @@
 //! Session Manager
-//! 
+//!
 //! Manages active VPN sessions with O(1) tag validation
 
 use std::collections::{BTreeSet, HashMap};
@@ -8,21 +8,20 @@ use std::sync::Arc;
 
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
-use parking_lot::Mutex;
 use chacha20poly1305::aead::OsRng;
+use dashmap::DashMap;
+use hex;
+use parking_lot::Mutex;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
-use tracing::{info, debug, trace};
-use hex;
+use tracing::{debug, info, trace};
 
 use aivpn_common::crypto::{
-    self, SessionKeys, KeyPair, TAG_SIZE, X25519_PUBLIC_KEY_SIZE, 
-    NONCE_SIZE, DEFAULT_WINDOW_MS,
+    self, KeyPair, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE, X25519_PUBLIC_KEY_SIZE,
 };
-use aivpn_common::protocol::{InnerType, InnerHeader, ControlPayload};
-use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::MaskProfile;
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 
 /// Maximum sessions on 1GB VPS
 pub const MAX_SESSIONS: usize = 500;
@@ -58,7 +57,7 @@ pub struct Session {
     pub state: SessionState,
     pub keys: SessionKeys,
     pub eph_pub: [u8; X25519_PUBLIC_KEY_SIZE],
-    
+
     /// Packet counter for tag generation
     pub counter: u64,
     /// Last seen timestamp
@@ -67,7 +66,7 @@ pub struct Session {
     pub created_at: Instant,
     /// Last server-to-client packet timestamp (for downlink recording IAT)
     pub last_server_send: Instant,
-    
+
     /// Current mask profile
     pub mask: Option<MaskProfile>,
     /// Pending mask awaiting grace period before activation.
@@ -79,14 +78,14 @@ pub struct Session {
     pub fsm_packets: u32,
     /// Duration in current FSM state
     pub fsm_state_start: Instant,
-    
+
     /// Sequence number for outgoing packets
     pub send_seq: u32,
     /// Last received sequence (for ACK)
     pub recv_seq: u32,
     /// Send counter for nonce generation (u64, same space as tags)
     pub send_counter: u64,
-    
+
     /// Expected tags (counter -> tag)
     pub expected_tags: HashMap<u64, [u8; TAG_SIZE]>,
     /// Counter value used as the base for the currently precomputed tag window.
@@ -156,7 +155,7 @@ impl u256 {
         self.hi = (self.hi << shift) | (self.lo >> (128 - shift));
         self.lo <<= shift;
     }
-    
+
     pub fn get_bit(&self, bit: usize) -> bool {
         if bit < 128 {
             (self.lo & (1u128 << bit)) != 0
@@ -164,7 +163,7 @@ impl u256 {
             (self.hi & (1u128 << (bit - 128))) != 0
         }
     }
-    
+
     pub fn clear(&mut self) {
         self.lo = 0;
         self.hi = 0;
@@ -213,7 +212,7 @@ impl Session {
             pre_ratchet_expire: None,
         }
     }
-    
+
     /// Compute next nonce for encryption from send_counter (u64)
     /// Uses the same counter space as tag generation for consistency
     pub fn next_send_nonce(&mut self) -> ([u8; NONCE_SIZE], u64) {
@@ -223,13 +222,11 @@ impl Session {
         self.send_counter += 1;
         (nonce, counter)
     }
-    
+
     /// Update expected tags for validation window
     pub fn update_tag_window(&mut self) {
-        let time_window = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            DEFAULT_WINDOW_MS,
-        );
+        let time_window =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
 
         // Pre-compute tags for a bidirectional window around the highest
         // validated counter so minor UDP reordering does not fall out of the
@@ -241,15 +238,12 @@ impl Session {
         let window_end = self.counter.saturating_add(TAG_WINDOW_SIZE as u64 - 1);
 
         for counter_val in window_start..=window_end {
-            let tag = crypto::generate_resonance_tag(
-                &self.keys.tag_secret,
-                counter_val,
-                time_window,
-            );
+            let tag =
+                crypto::generate_resonance_tag(&self.keys.tag_secret, counter_val, time_window);
             self.expected_tags.insert(counter_val, tag);
         }
     }
-    
+
     /// Validate received tag (constant-time)
     /// Returns (counter, is_ratcheted_tag) if valid.
     /// Checks the current time window first, then adjacent windows (±1)
@@ -278,17 +272,12 @@ impl Session {
             }
         }
         // Check adjacent time windows (±1) on-the-fly for clock skew
-        let current_tw = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            DEFAULT_WINDOW_MS,
-        );
+        let current_tw =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
         for tw_offset in [current_tw.wrapping_sub(1), current_tw.wrapping_add(1)] {
             for counter_val in window_start..=window_end {
-                let expected = crypto::generate_resonance_tag(
-                    &self.keys.tag_secret,
-                    counter_val,
-                    tw_offset,
-                );
+                let expected =
+                    crypto::generate_resonance_tag(&self.keys.tag_secret, counter_val, tw_offset);
                 if bool::from(expected.ct_eq(tag)) {
                     if is_replay(counter_val) {
                         return None;
@@ -337,7 +326,7 @@ impl Session {
         }
         None
     }
-    
+
     /// Mark tag as received
     pub fn mark_tag_received(&mut self, counter: u64) {
         if counter > self.counter {
@@ -353,21 +342,21 @@ impl Session {
             self.received_bitmap.set_bit(bit_index);
         }
     }
-    
+
     /// Get next sequence number for inner header
     pub fn next_seq(&mut self) -> u32 {
         let seq = self.send_seq;
         self.send_seq = self.send_seq.wrapping_add(1);
         seq
     }
-    
+
     /// Update FSM state
     pub fn update_fsm(&mut self) {
         if let Some(mask) = &self.mask {
             let duration_ms = self.fsm_state_start.elapsed().as_millis() as u64;
-            let (new_state, _size_override, _iat_override, _padding_override) = 
+            let (new_state, _size_override, _iat_override, _padding_override) =
                 mask.process_transition(self.fsm_state, self.fsm_packets, duration_ms);
-            
+
             if new_state != self.fsm_state {
                 self.fsm_state = new_state;
                 self.fsm_packets = 0;
@@ -376,12 +365,12 @@ impl Session {
         }
         self.fsm_packets += 1;
     }
-    
+
     /// Check if session is idle
     pub fn is_idle(&self) -> bool {
         self.last_seen.elapsed() > IDLE_TIMEOUT
     }
-    
+
     /// Check if session is expired
     pub fn is_expired(&self) -> bool {
         self.created_at.elapsed() > HARD_TIMEOUT
@@ -390,10 +379,8 @@ impl Session {
     /// Pre-compute tags for ratcheted keys
     pub fn update_ratcheted_tag_window(&mut self) {
         if let Some(ratcheted_keys) = &self.ratcheted_keys {
-            let time_window = crypto::compute_time_window(
-                crypto::current_timestamp_ms(),
-                DEFAULT_WINDOW_MS,
-            );
+            let time_window =
+                crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
             self.ratcheted_expected_tags.clear();
             // Ratcheted counter starts at 0
             for i in 0..TAG_WINDOW_SIZE {
@@ -507,7 +494,7 @@ impl SessionManager {
             idle_timeout,
         }
     }
-    
+
     /// Create new session from initial packet.
     /// NOTE: Does NOT remove old sessions for the same client IP.
     /// The caller must call `cleanup_old_sessions_for_ip()` after
@@ -522,7 +509,9 @@ impl SessionManager {
         // Look for a reusable VPN IP from an existing session for the same
         // client IP, but do NOT remove the old session yet — the caller
         // will do that only after the handshake tag validates.
-        let reused_vpn_ip: Option<Ipv4Addr> = self.sessions.iter()
+        let reused_vpn_ip: Option<Ipv4Addr> = self
+            .sessions
+            .iter()
             .filter_map(|entry| {
                 let session = entry.value().lock();
                 if session.client_addr.ip() == client_addr.ip() {
@@ -536,9 +525,11 @@ impl SessionManager {
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(Error::Session("Max sessions reached".into()));
         }
-        
+
         // MED-6: Per-IP session limit (max 5 sessions per IP)
-        let ip_count = self.sessions.iter()
+        let ip_count = self
+            .sessions
+            .iter()
             .filter(|e| e.value().lock().client_addr.ip() == client_addr.ip())
             .count();
         if ip_count >= 5 {
@@ -551,7 +542,9 @@ impl SessionManager {
         // while remaining within the per-IP limit.
         if let std::net::IpAddr::V4(v4) = client_addr.ip() {
             let subnet24 = u32::from(v4) >> 8;
-            let subnet_count = self.sessions.iter()
+            let subnet_count = self
+                .sessions
+                .iter()
                 .filter(|e| {
                     if let std::net::IpAddr::V4(ip) = e.value().lock().client_addr.ip() {
                         (u32::from(ip) >> 8) == subnet24
@@ -561,47 +554,48 @@ impl SessionManager {
                 })
                 .count();
             if subnet_count >= 10 {
-                return Err(Error::Session("Per-subnet (/24) session limit reached".into()));
+                return Err(Error::Session(
+                    "Per-subnet (/24) session limit reached".into(),
+                ));
             }
         }
 
         // DH1: server_static * client_eph → initial keys (0-RTT)
         let dh1 = self.server_keys.compute_shared(&eph_pub)?;
         trace!("Server DH result: {}", hex::encode(&dh1));
-        trace!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
-        trace!("Server PSK: {:?}", preshared_key.as_ref().map(hex::encode));
-        let initial_keys = crypto::derive_session_keys(
-            &dh1,
-            preshared_key.as_ref(),
-            &eph_pub,
+        trace!(
+            "Server eph_pub (after deobfuscation): {}",
+            hex::encode(&eph_pub)
         );
-        trace!("Server tag_secret: {}", hex::encode(&initial_keys.tag_secret));
-        
+        trace!("Server PSK: {:?}", preshared_key.as_ref().map(hex::encode));
+        let initial_keys = crypto::derive_session_keys(&dh1, preshared_key.as_ref(), &eph_pub);
+        trace!(
+            "Server tag_secret: {}",
+            hex::encode(&initial_keys.tag_secret)
+        );
+
         // --- CRIT-3 + HIGH-6: PFS ratchet preparation ---
         // Generate server ephemeral keypair
         let server_eph_kp = crypto::KeyPair::generate();
         let server_eph_pub = server_eph_kp.public_key_bytes();
-        
+
         // DH2: server_eph * client_eph → PFS keys
         let dh2 = server_eph_kp.compute_shared(&eph_pub)?;
         // Use initial session_key as PSK for domain separation
-        let ratcheted_keys = crypto::derive_session_keys(
-            &dh2,
-            Some(&initial_keys.session_key),
-            &eph_pub,
-        );
-        
+        let ratcheted_keys =
+            crypto::derive_session_keys(&dh2, Some(&initial_keys.session_key), &eph_pub);
+
         // Sign (server_eph_pub || client_eph_pub) for server authentication (HIGH-6)
         use ed25519_dalek::Signer;
         let mut sign_message = Vec::with_capacity(64);
         sign_message.extend_from_slice(&server_eph_pub);
         sign_message.extend_from_slice(&eph_pub);
         let signature = self.signing_key.sign(&sign_message).to_bytes();
-        
+
         // Generate session ID
         let mut session_id = [0u8; 16];
         OsRng.fill_bytes(&mut session_id);
-        
+
         // Create session with initial (DH1) keys
         let session = Arc::new(Mutex::new(Session::new(
             session_id,
@@ -609,33 +603,33 @@ impl SessionManager {
             initial_keys,
             eph_pub,
         )));
-        
+
         // Setup ratchet state + populate tag maps
         {
             let mut sess = session.lock();
             sess.state = SessionState::Active;
-            
+
             // Store ratchet data
             sess.server_eph_pub = Some(server_eph_pub);
             sess.server_hello_signature = Some(signature);
             sess.ratcheted_keys = Some(ratcheted_keys);
-            
+
             // Compute initial tags
             sess.update_tag_window();
             for tag in sess.expected_tags.values() {
                 self.tag_map.insert(*tag, session_id);
             }
-            
+
             // Pre-compute ratcheted tags (for when client switches to PFS keys)
             sess.update_ratcheted_tag_window();
             for tag in sess.ratcheted_expected_tags.values() {
                 self.tag_map.insert(*tag, session_id);
             }
         }
-        
+
         // Insert into session map
         self.sessions.insert(session_id, session.clone());
-        
+
         // Assign VPN IP and register mapping.
         // Priority: 1) static IP from client config, 2) reused IP, 3) auto-assign
         let vpn_ip = if let Some(ip) = static_vpn_ip.or(reused_vpn_ip) {
@@ -644,7 +638,10 @@ impl SessionManager {
             Some(ip)
         } else {
             // Allocate the lowest available IP from the pool
-            self.ip_pool.lock().pop_first().map(|octet| Ipv4Addr::new(10, 0, 0, octet))
+            self.ip_pool
+                .lock()
+                .pop_first()
+                .map(|octet| Ipv4Addr::new(10, 0, 0, octet))
         };
 
         if let Some(vpn_ip) = vpn_ip {
@@ -652,7 +649,7 @@ impl SessionManager {
             self.vpn_ip_map.insert(vpn_ip, session_id);
             debug!("Assigned VPN IP {} to session", vpn_ip);
         }
-        
+
         Ok(session)
     }
 
@@ -664,7 +661,9 @@ impl SessionManager {
         ip: &std::net::IpAddr,
         keep_session_id: &[u8; 16],
     ) -> Vec<[u8; 16]> {
-        let to_remove: Vec<[u8; 16]> = self.sessions.iter()
+        let to_remove: Vec<[u8; 16]> = self
+            .sessions
+            .iter()
             .filter_map(|entry| {
                 let session = entry.value().lock();
                 if session.client_addr.ip() == *ip && entry.key() != keep_session_id {
@@ -677,7 +676,10 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for session_id in to_remove {
-            info!("Removing stale session for IP {} after successful re-handshake", ip);
+            info!(
+                "Removing stale session for IP {} after successful re-handshake",
+                ip
+            );
             if self.remove_session(&session_id).is_some() {
                 removed.push(session_id);
             }
@@ -694,7 +696,9 @@ impl SessionManager {
         vpn_ip: &Ipv4Addr,
         keep_session_id: &[u8; 16],
     ) -> Vec<[u8; 16]> {
-        let to_remove: Vec<[u8; 16]> = self.sessions.iter()
+        let to_remove: Vec<[u8; 16]> = self
+            .sessions
+            .iter()
             .filter_map(|entry| {
                 let session = entry.value().lock();
                 if session.vpn_ip == Some(*vpn_ip) && entry.key() != keep_session_id {
@@ -707,7 +711,10 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for session_id in to_remove {
-            info!("Removing stale session for VPN IP {} after successful re-handshake", vpn_ip);
+            info!(
+                "Removing stale session for VPN IP {} after successful re-handshake",
+                vpn_ip
+            );
             if self.remove_session(&session_id).is_some() {
                 removed.push(session_id);
             }
@@ -719,7 +726,9 @@ impl SessionManager {
     /// Restores vpn_ip_map to the old session that still owns that IP.
     pub fn rollback_failed_session(&self, session_id: &[u8; 16]) {
         // Grab the VPN IP before removal so we can restore the old mapping.
-        let vpn_ip = self.sessions.get(session_id)
+        let vpn_ip = self
+            .sessions
+            .get(session_id)
             .map(|e| e.value().lock().vpn_ip)
             .flatten();
 
@@ -755,7 +764,7 @@ impl SessionManager {
                 && sess.last_seen.elapsed() <= max_age
         })
     }
-    
+
     /// Get session by tag (O(1) lookup)
     pub fn get_session_by_tag(&self, tag: &[u8; TAG_SIZE]) -> Option<Arc<Mutex<Session>>> {
         if let Some(entry) = self.tag_map.get(tag) {
@@ -769,7 +778,10 @@ impl SessionManager {
 
     /// Refresh tag windows for all sessions (time window may have advanced)
     /// and try to find a session matching the given tag.
-    pub fn refresh_and_find_by_tag(&self, tag: &[u8; TAG_SIZE]) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
+    pub fn refresh_and_find_by_tag(
+        &self,
+        tag: &[u8; TAG_SIZE],
+    ) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
         for entry in self.sessions.iter() {
             let session = entry.value().clone();
             let session_id = *entry.key();
@@ -786,7 +798,8 @@ impl SessionManager {
             }
 
             // Refresh ratcheted key tags
-            let old_ratcheted: Vec<[u8; TAG_SIZE]> = sess.ratcheted_expected_tags.values().cloned().collect();
+            let old_ratcheted: Vec<[u8; TAG_SIZE]> =
+                sess.ratcheted_expected_tags.values().cloned().collect();
             for old_tag in &old_ratcheted {
                 self.tag_map.remove(old_tag);
             }
@@ -813,10 +826,8 @@ impl SessionManager {
         tag: &[u8; TAG_SIZE],
         client_ip: &std::net::IpAddr,
     ) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
-        let current_tw = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            DEFAULT_WINDOW_MS,
-        );
+        let current_tw =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
         // Search up to 65536 counters ahead from the session's last known counter
         const RECOVERY_RANGE: u64 = 65536;
 
@@ -862,12 +873,12 @@ impl SessionManager {
         }
         None
     }
-    
+
     /// Get session by ID
     pub fn get_session(&self, session_id: &[u8; 16]) -> Option<Arc<Mutex<Session>>> {
         self.sessions.get(session_id).map(|e| e.clone())
     }
-    
+
     /// Get session by VPN IP (for routing TUN responses back to clients)
     pub fn get_session_by_vpn_ip(&self, vpn_ip: &Ipv4Addr) -> Option<Arc<Mutex<Session>>> {
         if let Some(entry) = self.vpn_ip_map.get(vpn_ip) {
@@ -878,7 +889,7 @@ impl SessionManager {
             None
         }
     }
-    
+
     /// Remove session and return its ID if it existed.
     /// The returned session_id can be used to stop active recording.
     pub fn remove_session(&self, session_id: &[u8; 16]) -> Option<[u8; 16]> {
@@ -894,7 +905,11 @@ impl SessionManager {
             // Remove VPN IP mapping only if it still points to THIS session.
             // A newer session may have already claimed the same VPN IP.
             if let Some(vpn_ip) = sess.vpn_ip {
-                if self.vpn_ip_map.remove_if(&vpn_ip, |_, sid| sid == session_id).is_some() {
+                if self
+                    .vpn_ip_map
+                    .remove_if(&vpn_ip, |_, sid| sid == session_id)
+                    .is_some()
+                {
                     // No other session owns this IP — return it to the free pool
                     let octet = vpn_ip.octets()[3];
                     if octet >= 2 {
@@ -907,7 +922,7 @@ impl SessionManager {
             None
         }
     }
-    
+
     /// Refresh tag_map after session's tag window has been updated
     pub fn refresh_session_tags(&self, session_id: &[u8; 16]) {
         if let Some(session) = self.sessions.get(session_id) {
@@ -923,7 +938,7 @@ impl SessionManager {
             }
         }
     }
-    
+
     /// Complete PFS ratchet for a session: switch to ratcheted keys, remove old tags
     pub fn complete_session_ratchet(&self, session_id: &[u8; 16]) {
         if let Some(session) = self.sessions.get(session_id) {
@@ -940,11 +955,12 @@ impl SessionManager {
             }
         }
     }
-    
+
     /// Cleanup expired sessions and return list of removed session IDs.
     /// The returned IDs can be used to stop active recordings.
     pub fn cleanup_expired(&self) -> Vec<[u8; 16]> {
-        let expired: Vec<[u8; 16]> = self.sessions
+        let expired: Vec<[u8; 16]> = self
+            .sessions
             .iter()
             .filter(|e| {
                 let sess = e.value().lock();
@@ -954,7 +970,7 @@ impl SessionManager {
             })
             .map(|e| *e.key())
             .collect();
-        
+
         let mut removed = Vec::new();
         for session_id in expired {
             if self.remove_session(&session_id).is_some() {
@@ -963,7 +979,7 @@ impl SessionManager {
         }
         removed
     }
-    
+
     /// Get active session count
     pub fn session_count(&self) -> usize {
         self.sessions.len()
@@ -972,14 +988,21 @@ impl SessionManager {
     /// Log diagnostic information about all sessions and tag state
     pub fn log_session_diagnostics(&self, incoming_tag: &[u8; TAG_SIZE]) {
         let tag_map_size = self.tag_map.len();
-        let current_tw = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            DEFAULT_WINDOW_MS,
+        let current_tw =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
+        info!(
+            "DIAG: tag_map_size={}, current_tw={}",
+            tag_map_size, current_tw
         );
-        info!("DIAG: tag_map_size={}, current_tw={}", tag_map_size, current_tw);
         for entry in self.sessions.iter() {
             let sess = entry.value().lock();
-            let sid_hex = format!("{:02x}{:02x}{:02x}{:02x}", entry.key()[0], entry.key()[1], entry.key()[2], entry.key()[3]);
+            let sid_hex = format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                entry.key()[0],
+                entry.key()[1],
+                entry.key()[2],
+                entry.key()[3]
+            );
             let is_ratcheted = sess.is_ratcheted;
             let counter = sess.counter;
             let expected_count = sess.expected_tags.len();
@@ -990,7 +1013,10 @@ impl SessionManager {
             for (c, t) in &sess.expected_tags {
                 if t == incoming_tag {
                     found = true;
-                    info!("DIAG: Session {} — expected tag MATCHES at counter {}", sid_hex, c);
+                    info!(
+                        "DIAG: Session {} — expected tag MATCHES at counter {}",
+                        sid_hex, c
+                    );
                     break;
                 }
             }
@@ -1000,24 +1026,24 @@ impl SessionManager {
             );
         }
     }
-    
+
     /// Get server public key
     pub fn server_public_key(&self) -> [u8; X25519_PUBLIC_KEY_SIZE] {
         self.server_keys.public_key_bytes()
     }
-    
+
     /// Sign mask data
     pub fn sign_mask(&self, mask_data: &[u8]) -> [u8; 64] {
         use ed25519_dalek::Signer;
         let signature = self.signing_key.sign(mask_data);
         signature.to_bytes()
     }
-    
+
     /// Iterate over all sessions (for neural resonance checks)
     pub fn iter_sessions(&self) -> dashmap::iter::Iter<'_, [u8; 16], Arc<Mutex<Session>>> {
         self.sessions.iter()
     }
-    
+
     /// Schedule a deferred mask switch for a session.
     /// The MaskUpdate control message has already been sent to the client;
     /// we store the new mask in `pending_mask` and let it activate after a
@@ -1031,8 +1057,12 @@ impl SessionManager {
             let client_addr;
             {
                 let mut sess = session.lock();
-                info!("Session mask scheduled: {} → {} (grace period 500ms)", 
-                    sess.mask.as_ref().map(|m| m.mask_id.as_str()).unwrap_or("default"),
+                info!(
+                    "Session mask scheduled: {} → {} (grace period 500ms)",
+                    sess.mask
+                        .as_ref()
+                        .map(|m| m.mask_id.as_str())
+                        .unwrap_or("default"),
                     new_mask.mask_id
                 );
                 // Don't switch immediately — store as pending
@@ -1063,7 +1093,10 @@ impl SessionManager {
         let signature = self.sign_mask(&mask_data);
 
         // Build control payload
-        let control = ControlPayload::MaskUpdate { mask_data, signature };
+        let control = ControlPayload::MaskUpdate {
+            mask_data,
+            signature,
+        };
         let encoded = control.encode()?;
 
         let mut sess = session.lock();
@@ -1091,15 +1124,9 @@ impl SessionManager {
         let ciphertext = encrypt_payload(&sess.keys.session_key, &nonce, &padded)?;
 
         // Generate tag
-        let time_window = crypto::compute_time_window(
-            crypto::current_timestamp_ms(),
-            DEFAULT_WINDOW_MS,
-        );
-        let tag = crypto::generate_resonance_tag(
-            &sess.keys.tag_secret,
-            counter,
-            time_window,
-        );
+        let time_window =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
+        let tag = crypto::generate_resonance_tag(&sess.keys.tag_secret, counter, time_window);
 
         // Wrap MaskUpdate in the session's current mask. The switch to `new_mask`
         // happens only after the packet is successfully delivered.

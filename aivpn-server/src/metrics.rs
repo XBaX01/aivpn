@@ -11,9 +11,9 @@
 //! - DPI attack detection
 
 #[cfg(feature = "metrics")]
-use std::sync::Arc;
+use prometheus::{Counter, Encoder, Gauge, Histogram, HistogramOpts, Opts, Registry, TextEncoder};
 #[cfg(feature = "metrics")]
-use prometheus::{Registry, Counter, Gauge, Histogram, HistogramOpts, Opts, TextEncoder, Encoder};
+use std::sync::Arc;
 #[cfg(feature = "metrics")]
 use tracing::warn;
 
@@ -72,88 +72,111 @@ impl MetricsCollector {
             // Session metrics
             let sessions_total = Gauge::with_opts(Opts::new(
                 "aivpn_sessions_total",
-                "Total number of sessions"
-            )).unwrap();
+                "Total number of sessions",
+            ))
+            .unwrap();
             registry.register(Box::new(sessions_total.clone())).unwrap();
 
             let sessions_active = Gauge::with_opts(Opts::new(
                 "aivpn_sessions_active",
-                "Number of active sessions"
-            )).unwrap();
-            registry.register(Box::new(sessions_active.clone())).unwrap();
+                "Number of active sessions",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(sessions_active.clone()))
+                .unwrap();
 
             // Packet metrics
             let packets_received = Counter::with_opts(Opts::new(
                 "aivpn_packets_received_total",
-                "Total packets received"
-            )).unwrap();
-            registry.register(Box::new(packets_received.clone())).unwrap();
+                "Total packets received",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(packets_received.clone()))
+                .unwrap();
 
-            let packets_sent = Counter::with_opts(Opts::new(
-                "aivpn_packets_sent_total",
-                "Total packets sent"
-            )).unwrap();
+            let packets_sent =
+                Counter::with_opts(Opts::new("aivpn_packets_sent_total", "Total packets sent"))
+                    .unwrap();
             registry.register(Box::new(packets_sent.clone())).unwrap();
 
             // Bandwidth metrics
             let bytes_received = Counter::with_opts(Opts::new(
                 "aivpn_bytes_received_total",
-                "Total bytes received"
-            )).unwrap();
+                "Total bytes received",
+            ))
+            .unwrap();
             registry.register(Box::new(bytes_received.clone())).unwrap();
 
-            let bytes_sent = Counter::with_opts(Opts::new(
-                "aivpn_bytes_sent_total",
-                "Total bytes sent"
-            )).unwrap();
+            let bytes_sent =
+                Counter::with_opts(Opts::new("aivpn_bytes_sent_total", "Total bytes sent"))
+                    .unwrap();
             registry.register(Box::new(bytes_sent.clone())).unwrap();
 
             // Performance metrics.
             // HistogramOpts is required here — Histogram::with_opts does not accept plain Opts.
             let packet_processing_time = Histogram::with_opts(HistogramOpts::new(
                 "aivpn_packet_processing_seconds",
-                "Packet processing time"
-            )).unwrap();
-            registry.register(Box::new(packet_processing_time.clone())).unwrap();
+                "Packet processing time",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(packet_processing_time.clone()))
+                .unwrap();
 
             let tag_validation_time = Histogram::with_opts(HistogramOpts::new(
                 "aivpn_tag_validation_seconds",
-                "Tag validation time"
-            )).unwrap();
-            registry.register(Box::new(tag_validation_time.clone())).unwrap();
+                "Tag validation time",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(tag_validation_time.clone()))
+                .unwrap();
 
             // Rotation metrics
             let mask_rotations = Counter::with_opts(Opts::new(
                 "aivpn_mask_rotations_total",
-                "Total mask rotations"
-            )).unwrap();
+                "Total mask rotations",
+            ))
+            .unwrap();
             registry.register(Box::new(mask_rotations.clone())).unwrap();
 
             let key_rotations = Counter::with_opts(Opts::new(
                 "aivpn_key_rotations_total",
-                "Total key rotations"
-            )).unwrap();
+                "Total key rotations",
+            ))
+            .unwrap();
             registry.register(Box::new(key_rotations.clone())).unwrap();
 
             // Neural module metrics
             let neural_checks_total = Counter::with_opts(Opts::new(
                 "aivpn_neural_checks_total",
-                "Total neural resonance checks"
-            )).unwrap();
-            registry.register(Box::new(neural_checks_total.clone())).unwrap();
+                "Total neural resonance checks",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(neural_checks_total.clone()))
+                .unwrap();
 
             let neural_checks_failed = Counter::with_opts(Opts::new(
                 "aivpn_neural_checks_failed_total",
-                "Failed neural resonance checks"
-            )).unwrap();
-            registry.register(Box::new(neural_checks_failed.clone())).unwrap();
+                "Failed neural resonance checks",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(neural_checks_failed.clone()))
+                .unwrap();
 
             // Security metrics
             let dpi_attacks_detected = Counter::with_opts(Opts::new(
                 "aivpn_dpi_attacks_detected_total",
-                "DPI attacks detected"
-            )).unwrap();
-            registry.register(Box::new(dpi_attacks_detected.clone())).unwrap();
+                "DPI attacks detected",
+            ))
+            .unwrap();
+            registry
+                .register(Box::new(dpi_attacks_detected.clone()))
+                .unwrap();
 
             Self {
                 registry,
@@ -276,7 +299,9 @@ impl MetricsCollector {
             let metric_families = self.registry.gather();
             // encode() writes to impl Write; use a Vec<u8> buffer then convert to String.
             let mut buf = Vec::new();
-            encoder.encode(&metric_families, &mut buf).unwrap_or_default();
+            encoder
+                .encode(&metric_families, &mut buf)
+                .unwrap_or_default();
             String::from_utf8(buf).unwrap_or_default()
         }
 

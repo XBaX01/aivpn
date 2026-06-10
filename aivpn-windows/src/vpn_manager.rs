@@ -29,8 +29,8 @@ pub enum RecordingState {
     Recording(String),
     Stopping(String),
     Analyzing(String),
-    Success(String, Option<String>),   // service, mask_id
-    Failed(String, String),            // service, reason
+    Success(String, Option<String>), // service, mask_id
+    Failed(String, String),          // service, reason
 }
 
 #[derive(Debug, Clone)]
@@ -331,7 +331,10 @@ impl VpnManager {
         self.recording_capability_known = snapshot.can_record.is_some();
         self.can_record_masks = snapshot.can_record.unwrap_or(false);
 
-        let service = snapshot.service.clone().unwrap_or_else(|| "mask".to_string());
+        let service = snapshot
+            .service
+            .clone()
+            .unwrap_or_else(|| "mask".to_string());
         match snapshot.state.as_str() {
             "recording" => {
                 self.recording_state = RecordingState::Recording(service);
@@ -343,8 +346,7 @@ impl VpnManager {
                 self.recording_state = RecordingState::Analyzing(service);
             }
             "success" => {
-                self.recording_state =
-                    RecordingState::Success(service, snapshot.mask_id.clone());
+                self.recording_state = RecordingState::Success(service, snapshot.mask_id.clone());
                 let details = if let Some(ref mask_id) = snapshot.mask_id {
                     format!("Mask saved. ID: {}", mask_id)
                 } else {

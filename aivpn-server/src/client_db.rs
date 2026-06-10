@@ -90,9 +90,7 @@ impl ClientDatabase {
             ClientDbFile::default()
         };
 
-        let last_mtime = Mutex::new(
-            std::fs::metadata(file_path).and_then(|m| m.modified()).ok()
-        );
+        let last_mtime = Mutex::new(std::fs::metadata(file_path).and_then(|m| m.modified()).ok());
 
         Ok(Self {
             data: RwLock::new(data),
@@ -141,7 +139,10 @@ impl ClientDatabase {
         chacha20poly1305::aead::OsRng.fill_bytes(&mut id_bytes);
         chacha20poly1305::aead::OsRng.fill_bytes(&mut psk);
 
-        let id = id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let id = id_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
         let client = ClientConfig {
             id,
@@ -251,7 +252,10 @@ impl ClientDatabase {
             Ok(changed) => {
                 *self.last_mtime.lock() = current_mtime;
                 if changed {
-                    info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
+                    info!(
+                        "Client database reloaded from disk ({} clients)",
+                        self.list_clients().len()
+                    );
                 }
                 changed
             }
@@ -275,14 +279,17 @@ impl ClientDatabase {
         // Check if anything actually changed in the client configuration.
         // PSK must be part of the signature so secret rotation takes effect
         // without requiring a full server restart.
-        let old_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = data.clients
+        let old_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = data
+            .clients
             .iter()
             .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
             .collect();
-        let new_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = new_data.clients
-            .iter()
-            .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
-            .collect();
+        let new_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> =
+            new_data
+                .clients
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
+                .collect();
         let changed = old_sig != new_sig;
 
         if !changed {
@@ -290,18 +297,23 @@ impl ClientDatabase {
         }
 
         // Build a map of existing stats by client ID
-        let mut stats_map: std::collections::HashMap<String, ClientStats> = std::collections::HashMap::new();
+        let mut stats_map: std::collections::HashMap<String, ClientStats> =
+            std::collections::HashMap::new();
         for client in &data.clients {
             stats_map.insert(client.id.clone(), client.stats.clone());
         }
 
         // Replace clients list, preserving stats for existing clients
-        data.clients = new_data.clients.into_iter().map(|mut c| {
-            if let Some(saved_stats) = stats_map.get(&c.id) {
-                c.stats = saved_stats.clone();
-            }
-            c
-        }).collect();
+        data.clients = new_data
+            .clients
+            .into_iter()
+            .map(|mut c| {
+                if let Some(saved_stats) = stats_map.get(&c.id) {
+                    c.stats = saved_stats.clone();
+                }
+                c
+            })
+            .collect();
         data.next_host_offset = new_data.next_host_offset;
 
         Ok(true)
@@ -310,7 +322,9 @@ impl ClientDatabase {
     fn allocate_vpn_ip(&self, data: &mut ClientDbFile) -> Result<Ipv4Addr> {
         let max_host_offset = self.network_config.max_host_offset();
         if max_host_offset < 1 {
-            return Err(Error::Session("Configured VPN subnet has no usable host addresses".into()));
+            return Err(Error::Session(
+                "Configured VPN subnet has no usable host addresses".into(),
+            ));
         }
 
         let mut candidate_offset = if data.next_host_offset == 0 {
@@ -321,7 +335,10 @@ impl ClientDatabase {
 
         for _ in 0..max_host_offset {
             if let Some(candidate_ip) = self.network_config.ip_for_host_offset(candidate_offset) {
-                let already_used = data.clients.iter().any(|client| client.vpn_ip == candidate_ip);
+                let already_used = data
+                    .clients
+                    .iter()
+                    .any(|client| client.vpn_ip == candidate_ip);
                 if candidate_ip != self.network_config.server_vpn_ip && !already_used {
                     data.next_host_offset = if candidate_offset >= max_host_offset {
                         1
@@ -339,7 +356,9 @@ impl ClientDatabase {
             };
         }
 
-        Err(Error::Session("No more VPN IPs available in configured subnet".into()))
+        Err(Error::Session(
+            "No more VPN IPs available in configured subnet".into(),
+        ))
     }
 }
 
@@ -347,13 +366,18 @@ impl ClientDatabase {
 mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8; 32], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        bytes: &[u8; 32],
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         b64.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<[u8; 32], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<[u8; 32], D::Error> {
         use base64::Engine;
         let s = String::deserialize(deserializer)?;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -395,10 +419,8 @@ mod tests {
 
         db.record_traffic(&client.id, 111, 222);
 
-        let mut on_disk: ClientDbFile = serde_json::from_str(
-            &std::fs::read_to_string(&db_path).unwrap(),
-        )
-        .unwrap();
+        let mut on_disk: ClientDbFile =
+            serde_json::from_str(&std::fs::read_to_string(&db_path).unwrap()).unwrap();
         let new_psk = [0xAB; 32];
         on_disk.clients[0].psk = new_psk;
 
@@ -414,12 +436,20 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(60));
         }
-        assert!(mtime_changed, "test setup failed to advance client DB mtime");
+        assert!(
+            mtime_changed,
+            "test setup failed to advance client DB mtime"
+        );
 
         assert!(db.reload_if_changed(), "PSK rotation must trigger reload");
-        assert!(db.find_by_psk(&old_psk).is_none(), "old PSK must stop authenticating after reload");
+        assert!(
+            db.find_by_psk(&old_psk).is_none(),
+            "old PSK must stop authenticating after reload"
+        );
 
-        let reloaded = db.find_by_psk(&new_psk).expect("new PSK must authenticate after reload");
+        let reloaded = db
+            .find_by_psk(&new_psk)
+            .expect("new PSK must authenticate after reload");
         assert_eq!(reloaded.id, client.id);
         assert_eq!(reloaded.stats.bytes_in, 111);
         assert_eq!(reloaded.stats.bytes_out, 222);

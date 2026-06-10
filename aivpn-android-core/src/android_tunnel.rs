@@ -7,8 +7,8 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use jni::objects::GlobalRef;
@@ -22,9 +22,7 @@ use aivpn_common::client_wire::{
     build_inner_packet, build_random_mdh_packet, decode_packet_with_mdh_len,
     obfuscate_client_eph_pub, process_server_hello_with_mdh_len, RecvWindow,
 };
-use aivpn_common::crypto::{
-    derive_session_keys, KeyPair, SessionKeys,
-};
+use aivpn_common::crypto::{derive_session_keys, KeyPair, SessionKeys};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::protocol::{ControlPayload, InnerType};
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
@@ -34,8 +32,8 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);  // closer to WireGuard roaming behavior
-const RX_SILENCE: Duration = Duration::from_secs(120);         // backup watchdog; network callback already handles real link loss
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15); // closer to WireGuard roaming behavior
+const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
 // detector responsive, but avoid tearing down an otherwise healthy session
@@ -145,7 +143,11 @@ pub fn get_active_upload_bytes() -> u64 {
     ACTIVE_SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|s| s.upload_bytes.load(Ordering::Relaxed)))
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|s| s.upload_bytes.load(Ordering::Relaxed))
+        })
         .unwrap_or(0)
 }
 
@@ -153,7 +155,11 @@ pub fn get_active_download_bytes() -> u64 {
     ACTIVE_SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|s| s.download_bytes.load(Ordering::Relaxed)))
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|s| s.download_bytes.load(Ordering::Relaxed))
+        })
         .unwrap_or(0)
 }
 
@@ -214,15 +220,13 @@ pub async fn run_tunnel_android(
     let keepalive = ControlPayload::Keepalive.encode()?;
     let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
 
-    let send_handshake = |keys: &SessionKeys,
-                          send_counter: &mut u64,
-                          send_seq: &mut u16|
-     -> Result<Vec<u8>> {
-        let inner = build_inner_packet(InnerType::Control, *send_seq, &keepalive);
-        let pkt = build_random_mdh_packet(keys, send_counter, &inner, Some(&obf_pub), mdh_len)?;
-        *send_seq = send_seq.wrapping_add(1);
-        Ok(pkt)
-    };
+    let send_handshake =
+        |keys: &SessionKeys, send_counter: &mut u64, send_seq: &mut u16| -> Result<Vec<u8>> {
+            let inner = build_inner_packet(InnerType::Control, *send_seq, &keepalive);
+            let pkt = build_random_mdh_packet(keys, send_counter, &inner, Some(&obf_pub), mdh_len)?;
+            *send_seq = send_seq.wrapping_add(1);
+            Ok(pkt)
+        };
 
     let init_pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
     udp.send(&init_pkt).await?;
@@ -236,7 +240,10 @@ pub async fn run_tunnel_android(
             return Err(Error::Session("Handshake timeout (10 s)".into()));
         }
 
-        let wait = std::cmp::min(HANDSHAKE_RETRY_INTERVAL, handshake_deadline.saturating_duration_since(now));
+        let wait = std::cmp::min(
+            HANDSHAKE_RETRY_INTERVAL,
+            handshake_deadline.saturating_duration_since(now),
+        );
         let retry = time::sleep(wait);
         tokio::pin!(retry);
 
@@ -333,7 +340,10 @@ pub async fn run_tunnel_android(
             fn encrypt_data(&mut self, payload: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_data(payload)
             }
-            fn encrypt_control(&mut self, payload: &aivpn_common::protocol::ControlPayload) -> aivpn_common::error::Result<Vec<u8>> {
+            fn encrypt_control(
+                &mut self,
+                payload: &aivpn_common::protocol::ControlPayload,
+            ) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_control(payload)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
@@ -355,7 +365,9 @@ pub async fn run_tunnel_android(
             ..Default::default()
         };
 
-        if let Err(e) = upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &config).await {
+        if let Err(e) =
+            upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &config).await
+        {
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
     });
@@ -568,7 +580,9 @@ fn create_protected_udp_socket(
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).
     let SocketAddr::V4(v4) = dest else {
         unsafe { libc::close(fd) };
-        return Err(Error::Session("Only IPv4 server addresses are supported".into()));
+        return Err(Error::Session(
+            "Only IPv4 server addresses are supported".into(),
+        ));
     };
     let sa = to_sockaddr_in(&v4);
     let rc = unsafe {

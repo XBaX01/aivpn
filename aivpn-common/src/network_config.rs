@@ -43,10 +43,15 @@ impl Default for VpnNetworkConfig {
 impl VpnNetworkConfig {
     pub fn validate(&self) -> Result<()> {
         if !(1..=30).contains(&self.prefix_len) {
-            return Err(Error::InvalidPacket("VPN prefix length must be in range 1..=30"));
+            return Err(Error::InvalidPacket(
+                "VPN prefix length must be in range 1..=30",
+            ));
         }
-        if self.server_vpn_ip == self.network_addr() || self.server_vpn_ip == self.broadcast_addr() {
-            return Err(Error::InvalidPacket("Server VPN IP must be a usable host address"));
+        if self.server_vpn_ip == self.network_addr() || self.server_vpn_ip == self.broadcast_addr()
+        {
+            return Err(Error::InvalidPacket(
+                "Server VPN IP must be a usable host address",
+            ));
         }
         Ok(())
     }
@@ -101,10 +106,14 @@ impl VpnNetworkConfig {
 
     pub fn client_config(&self, client_ip: Ipv4Addr) -> Result<ClientNetworkConfig> {
         if !self.is_usable_host(client_ip) {
-            return Err(Error::InvalidPacket("Client VPN IP is outside configured VPN subnet"));
+            return Err(Error::InvalidPacket(
+                "Client VPN IP is outside configured VPN subnet",
+            ));
         }
         if client_ip == self.server_vpn_ip {
-            return Err(Error::InvalidPacket("Client VPN IP cannot equal server VPN IP"));
+            return Err(Error::InvalidPacket(
+                "Client VPN IP cannot equal server VPN IP",
+            ));
         }
         Ok(ClientNetworkConfig {
             client_ip,
@@ -142,7 +151,9 @@ pub struct ClientNetworkConfig {
     pub mdh_len: u16,
 }
 
-fn default_mdh_len() -> u16 { 20 }
+fn default_mdh_len() -> u16 {
+    20
+}
 
 impl ClientNetworkConfig {
     pub const WIRE_SIZE: usize = 12;
@@ -182,10 +193,14 @@ impl ClientNetworkConfig {
 
     pub fn decode_wire(data: &[u8]) -> Result<Self> {
         if data.len() != Self::WIRE_SIZE {
-            return Err(Error::InvalidPacket("Client network config has invalid wire length"));
+            return Err(Error::InvalidPacket(
+                "Client network config has invalid wire length",
+            ));
         }
         if data[0] != Self::WIRE_VERSION {
-            return Err(Error::InvalidPacket("Unsupported client network config wire version"));
+            return Err(Error::InvalidPacket(
+                "Unsupported client network config wire version",
+            ));
         }
 
         let config = Self {

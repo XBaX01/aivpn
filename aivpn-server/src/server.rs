@@ -1,13 +1,13 @@
 //! AIVPN Server
-//! 
+//!
 //! Main server entry point
 
 use tracing_subscriber::{self, EnvFilter};
 
 use clap::Parser;
 
-use aivpn_common::error::Result;
 use crate::gateway::{Gateway, GatewayConfig};
+use aivpn_common::error::Result;
 
 /// AIVPN Server - Censorship-resistant VPN gateway
 #[derive(Parser, Debug)]
@@ -95,7 +95,7 @@ pub fn init_logging() {
         .with_env_filter(
             EnvFilter::from_default_env()
                 .add_directive("aivpn_server=debug".parse().unwrap())
-                .add_directive("aivpn_common=debug".parse().unwrap())
+                .add_directive("aivpn_common=debug".parse().unwrap()),
         )
         .init();
 }

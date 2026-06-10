@@ -2,11 +2,11 @@
 //!
 //! Dark theme, compact, 360×480 window.
 
-use eframe::egui::{self, Color32, CornerRadius, RichText, Vec2};
-use crate::vpn_manager::{ConnectionState, RecordingState, format_bytes};
-use crate::localization::{Lang, t};
+use crate::localization::{t, Lang};
+use crate::vpn_manager::{format_bytes, ConnectionState, RecordingState};
 use crate::AivpnApp;
 use crate::APP_VERSION;
+use eframe::egui::{self, Color32, CornerRadius, RichText, Vec2};
 
 // Color palette
 const GREEN: Color32 = Color32::from_rgb(0x4C, 0xD9, 0x64);
@@ -41,10 +41,7 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
     draw_recording_result(ui, app);
 
     // Recording section (when connected and recording capable)
-    if app.vpn.is_connected()
-        && app.vpn.recording_capability_known
-        && app.vpn.can_record_masks
-    {
+    if app.vpn.is_connected() && app.vpn.recording_capability_known && app.vpn.can_record_masks {
         draw_recording_section(ui, app);
         ui.add_space(4.0);
     }
@@ -92,11 +89,7 @@ fn draw_header(ui: &mut egui::Ui, app: &mut AivpnApp) {
         ui.label(RichText::new("AIVPN").size(20.0).strong().color(PURPLE));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let lang_btn = ui.button(
-                RichText::new(app.lang.label())
-                    .size(12.0)
-                    .color(BLUE),
-            );
+            let lang_btn = ui.button(RichText::new(app.lang.label()).size(12.0).color(BLUE));
             if lang_btn.clicked() {
                 app.lang.toggle();
             }
@@ -146,35 +139,23 @@ fn draw_status_card(ui: &mut egui::Ui, app: &AivpnApp) {
 fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
     let stats = app.vpn.stats();
     let up_to_date = stats.bytes_sent > 0 || stats.bytes_received > 0;
-    
+
     egui::Frame::new()
         .fill(CARD_BG)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(12.0)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t(app.lang, "traffic"))
-                        .size(13.0)
-                        .color(DIM),
-                );
+                ui.label(RichText::new(t(app.lang, "traffic")).size(13.0).color(DIM));
                 if !up_to_date {
                     ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("waiting...")
-                            .size(11.0)
-                            .color(DIM),
-                    );
+                    ui.label(RichText::new("waiting...").size(11.0).color(DIM));
                 }
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 // Download - smooth arrow
-                ui.label(
-                    RichText::new("⬇")
-                        .size(18.0)
-                        .color(GREEN),
-                );
+                ui.label(RichText::new("⬇").size(18.0).color(GREEN));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format_bytes(stats.bytes_received))
@@ -182,15 +163,11 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                         .color(Color32::WHITE)
                         .strong(),
                 );
-                
+
                 ui.add_space(32.0);
-                
+
                 // Upload - smooth arrow
-                ui.label(
-                    RichText::new("⬆")
-                        .size(18.0)
-                        .color(BLUE),
-                );
+                ui.label(RichText::new("⬆").size(18.0).color(BLUE));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format_bytes(stats.bytes_sent))
@@ -234,23 +211,13 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                 ui.vertical(|ui| {
                     ui.allocate_ui(Vec2::new(ui.available_width(), 60.0), |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new("📋")
-                                    .size(28.0)
-                                    .color(DIM),
-                            );
+                            ui.label(RichText::new("📋").size(28.0).color(DIM));
                             ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(t(app.lang, "no_keys"))
-                                    .size(12.0)
-                                    .color(DIM),
-                            );
+                            ui.label(RichText::new(t(app.lang, "no_keys")).size(12.0).color(DIM));
                             ui.add_space(4.0);
                             if ui
                                 .button(
-                                    RichText::new(t(app.lang, "add_key"))
-                                        .size(12.0)
-                                        .color(BLUE),
+                                    RichText::new(t(app.lang, "add_key")).size(12.0).color(BLUE),
                                 )
                                 .clicked()
                             {
@@ -271,14 +238,14 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     .show(ui, |ui| {
                         for (idx, key) in app.keys.keys.iter().enumerate() {
                             let is_selected = selected == Some(idx);
-                            
+
                             // Allocate space for the row
                             let desired_height = if key.full_tunnel { 44.0 } else { 36.0 };
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), desired_height),
                                 egui::Sense::click(),
                             );
-                            
+
                             // Draw background
                             let connected = app.vpn.is_connected();
                             let bg_fill = if is_selected {
@@ -295,43 +262,75 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                                     bg_fill,
                                 );
                             }
-                            
+
                             // Handle click for selection (only when disconnected)
                             if response.clicked() && !app.vpn.is_connected() {
                                 action = Some(KeyAction::Select(idx));
                             }
-                            
+
                             // Draw content manually with painter
-                            let text_color = if is_selected { Color32::WHITE } else { Color32::from_rgb(0xC0, 0xC0, 0xC0) };
-                            let name_font_id = egui::FontId::new(13.0, egui::FontFamily::Proportional);
-                            let addr_font_id = egui::FontId::new(10.0, egui::FontFamily::Proportional);
-                            
+                            let text_color = if is_selected {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(0xC0, 0xC0, 0xC0)
+                            };
+                            let name_font_id =
+                                egui::FontId::new(13.0, egui::FontFamily::Proportional);
+                            let addr_font_id =
+                                egui::FontId::new(10.0, egui::FontFamily::Proportional);
+
                             // Key name
                             let name_pos = rect.left_top() + Vec2::new(8.0, 6.0);
-                            ui.painter().text(name_pos, egui::Align2::LEFT_TOP, &key.name, name_font_id, text_color);
-                            
+                            ui.painter().text(
+                                name_pos,
+                                egui::Align2::LEFT_TOP,
+                                &key.name,
+                                name_font_id,
+                                text_color,
+                            );
+
                             // Full tunnel indicator
                             if key.full_tunnel {
                                 let ft_pos = rect.left_top() + Vec2::new(8.0, 22.0);
-                                ui.painter().text(ft_pos, egui::Align2::LEFT_TOP, t(app.lang, "full_tunnel"), egui::FontId::new(9.0, egui::FontFamily::Proportional), GREEN);
+                                ui.painter().text(
+                                    ft_pos,
+                                    egui::Align2::LEFT_TOP,
+                                    t(app.lang, "full_tunnel"),
+                                    egui::FontId::new(9.0, egui::FontFamily::Proportional),
+                                    GREEN,
+                                );
                             }
-                            
+
                             // Server address
                             if !key.server_addr.is_empty() {
                                 let addr_y = if key.full_tunnel { 32.0 } else { 22.0 };
                                 let addr_pos = rect.left_top() + Vec2::new(8.0, addr_y);
-                                ui.painter().text(addr_pos, egui::Align2::LEFT_TOP, &key.server_addr, addr_font_id, DIM);
+                                ui.painter().text(
+                                    addr_pos,
+                                    egui::Align2::LEFT_TOP,
+                                    &key.server_addr,
+                                    addr_font_id,
+                                    DIM,
+                                );
                             }
-                            
+
                             // Edit button (right side)
                             let edit_text = t(app.lang, "edit");
                             let edit_btn_rect = egui::Rect::from_min_size(
                                 rect.right_top() - Vec2::new(80.0, 0.0),
                                 Vec2::new(36.0, 20.0),
                             );
-                            let edit_btn_response = ui.interact(edit_btn_rect, ui.id().with(("edit", idx)), egui::Sense::click());
+                            let edit_btn_response = ui.interact(
+                                edit_btn_rect,
+                                ui.id().with(("edit", idx)),
+                                egui::Sense::click(),
+                            );
                             if edit_btn_response.hovered() {
-                                ui.painter().rect_filled(edit_btn_rect, egui::CornerRadius::same(3), Color32::from_rgb(0x50, 0x50, 0x55));
+                                ui.painter().rect_filled(
+                                    edit_btn_rect,
+                                    egui::CornerRadius::same(3),
+                                    Color32::from_rgb(0x50, 0x50, 0x55),
+                                );
                             }
                             if edit_btn_response.clicked() {
                                 action = Some(KeyAction::Edit(idx));
@@ -343,16 +342,24 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                                 egui::FontId::new(11.0, egui::FontFamily::Proportional),
                                 ORANGE,
                             );
-                            
+
                             // Delete button
                             let del_text = t(app.lang, "delete");
                             let del_btn_rect = egui::Rect::from_min_size(
                                 rect.right_top() - Vec2::new(40.0, 0.0),
                                 Vec2::new(36.0, 20.0),
                             );
-                            let del_btn_response = ui.interact(del_btn_rect, ui.id().with(("del", idx)), egui::Sense::click());
+                            let del_btn_response = ui.interact(
+                                del_btn_rect,
+                                ui.id().with(("del", idx)),
+                                egui::Sense::click(),
+                            );
                             if del_btn_response.hovered() {
-                                ui.painter().rect_filled(del_btn_rect, egui::CornerRadius::same(3), Color32::from_rgb(0x50, 0x30, 0x30));
+                                ui.painter().rect_filled(
+                                    del_btn_rect,
+                                    egui::CornerRadius::same(3),
+                                    Color32::from_rgb(0x50, 0x30, 0x30),
+                                );
                             }
                             if del_btn_response.clicked() {
                                 action = Some(KeyAction::Delete(idx));
@@ -410,7 +417,11 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
             );
 
             ui.add_space(4.0);
-            ui.label(RichText::new(t(app.lang, "key_value")).size(11.0).color(DIM));
+            ui.label(
+                RichText::new(t(app.lang, "key_value"))
+                    .size(11.0)
+                    .color(DIM),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut app.new_key_value)
                     .desired_width(f32::INFINITY)
@@ -420,7 +431,11 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut app.new_key_full_tunnel, "");
-                ui.label(RichText::new(t(app.lang, "full_tunnel")).size(12.0).color(Color32::from_rgb(0x90, 0xEE, 0x90)));
+                ui.label(
+                    RichText::new(t(app.lang, "full_tunnel"))
+                        .size(12.0)
+                        .color(Color32::from_rgb(0x90, 0xEE, 0x90)),
+                );
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -560,7 +575,11 @@ fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(6.0);
 
             // Service name input
-            ui.label(RichText::new(t(app.lang, "record_service_name")).size(11.0).color(DIM));
+            ui.label(
+                RichText::new(t(app.lang, "record_service_name"))
+                    .size(11.0)
+                    .color(DIM),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut app.recording_service_name)
                     .desired_width(f32::INFINITY)
@@ -612,7 +631,8 @@ fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(4.0);
 
             // Status text
-            let (status_text, status_color) = recording_status_display(&app.vpn.recording_state, app.lang);
+            let (status_text, status_color) =
+                recording_status_display(&app.vpn.recording_state, app.lang);
             ui.label(RichText::new(status_text).size(11.0).color(status_color));
         });
 }

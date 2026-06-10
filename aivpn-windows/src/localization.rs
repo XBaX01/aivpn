@@ -146,6 +146,6 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::Ru, "dismiss") => "Закрыть",
 
         // Default fallback
-        (_, _) => "???"
+        (_, _) => "???",
     }
 }

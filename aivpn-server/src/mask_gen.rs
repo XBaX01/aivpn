@@ -10,18 +10,20 @@
 // signing key is plumbed through. Reject the build in production-secure mode
 // to prevent unsigned masks from reaching end users.
 #[cfg(feature = "production-secure")]
-compile_error!("mask_gen produces MaskProfile with signature=[0u8;64]. \
-    Wire up a real Ed25519 signing key before enabling production-secure.");
+compile_error!(
+    "mask_gen produces MaskProfile with signature=[0u8;64]. \
+    Wire up a real Ed25519 signing key before enabling production-secure."
+);
 
 use std::sync::Arc;
 
-use tracing::{info, error};
+use tracing::{error, info};
 
-use aivpn_common::mask::*;
-use aivpn_common::recording::{PacketMetadata, Direction};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::*;
+use aivpn_common::recording::{Direction, PacketMetadata};
 
-use crate::mask_store::{MaskStore, MaskEntry, MaskStats};
+use crate::mask_store::{MaskEntry, MaskStats, MaskStore};
 
 // ─── Analysis Result ─────────────────────────────────────────────────────────
 
@@ -109,9 +111,7 @@ fn self_test_passes(
         && ks_uplink_iat < 0.45
         && (!downlink_required || (ks_downlink_size < 0.45 && ks_downlink_iat < 0.45));
 
-    let structural_ok = header_match >= 0.55
-        && fsm_score >= 0.40
-        && entropy_penalty < 0.5;
+    let structural_ok = header_match >= 0.55 && fsm_score >= 0.40 && entropy_penalty < 0.5;
 
     ks_ok && structural_ok
 }
@@ -280,7 +280,11 @@ fn analyze_direction(packets: &[&PacketMetadata]) -> DirectionalAnalysis {
 
 fn find_modes_histogram(sizes: &[u16], num_bins: usize) -> Vec<Mode> {
     if sizes.is_empty() {
-        return vec![Mode { center: 64.0, std_dev: 32.0, weight: 1.0 }];
+        return vec![Mode {
+            center: 64.0,
+            std_dev: 32.0,
+            weight: 1.0,
+        }];
     }
 
     let min = *sizes.iter().min().unwrap_or(&0);
@@ -311,8 +315,16 @@ fn find_modes_histogram(sizes: &[u16], num_bins: usize) -> Vec<Mode> {
                     count += bin_count;
                 }
             }
-            let std_dev = if count > 0 { (sum_sq / count as f32).sqrt() } else { bin_width };
-            modes.push(Mode { center, std_dev, weight });
+            let std_dev = if count > 0 {
+                (sum_sq / count as f32).sqrt()
+            } else {
+                bin_width
+            };
+            modes.push(Mode {
+                center,
+                std_dev,
+                weight,
+            });
         }
     }
 
@@ -320,7 +332,11 @@ fn find_modes_histogram(sizes: &[u16], num_bins: usize) -> Vec<Mode> {
     if modes.is_empty() {
         let mean = mean_u16(sizes);
         let std = std_dev_u16(sizes);
-        modes.push(Mode { center: mean, std_dev: std, weight: 1.0 });
+        modes.push(Mode {
+            center: mean,
+            std_dev: std,
+            weight: 1.0,
+        });
     }
 
     modes
@@ -379,10 +395,13 @@ fn find_periods(iats: &[f64]) -> Vec<Period> {
 
 fn build_fsm_from_sizes(sizes: &[u16]) -> (Vec<FSMState>, u16) {
     if sizes.len() < 50 {
-        return (vec![FSMState {
-            state_id: 0,
-            transitions: vec![],
-        }], 0);
+        return (
+            vec![FSMState {
+                state_id: 0,
+                transitions: vec![],
+            }],
+            0,
+        );
     }
 
     // 1. Detect change points (mean shift > 2σ in window of 20)
@@ -449,9 +468,15 @@ fn build_fsm_from_sizes(sizes: &[u16]) -> (Vec<FSMState>, u16) {
     let mut transitions: Vec<Vec<(u16, u32)>> = vec![vec![]; clusters.len()];
     for i in 0..segments.len().saturating_sub(1) {
         let from = clusters.iter().position(|c| c.contains(&i)).unwrap_or(0) as u16;
-        let to = clusters.iter().position(|c| c.contains(&(i + 1))).unwrap_or(0) as u16;
+        let to = clusters
+            .iter()
+            .position(|c| c.contains(&(i + 1)))
+            .unwrap_or(0) as u16;
         if (from as usize) < clusters.len() && (to as usize) < clusters.len() {
-            if let Some(e) = transitions[from as usize].iter_mut().find(|(s, _)| *s == to) {
+            if let Some(e) = transitions[from as usize]
+                .iter_mut()
+                .find(|(s, _)| *s == to)
+            {
                 e.1 += 1;
             } else {
                 transitions[from as usize].push((to, 1));
@@ -562,13 +587,13 @@ fn infer_header_spec(headers: &[Vec<u8>]) -> (Option<HeaderSpec>, f32) {
     if headers.is_empty() {
         return (None, 0.0);
     }
-    
+
     // Analyze byte consistency at each position
     let max_len = headers.iter().map(|h| h.len()).max().unwrap_or(0).min(20);
     if max_len < 4 {
-        return (None, 0.0);  // Not enough data
+        return (None, 0.0); // Not enough data
     }
-    
+
     // Calculate consistency ratio for each byte position
     let mut consistency: Vec<f32> = Vec::with_capacity(max_len);
     for i in 0..max_len {
@@ -582,7 +607,7 @@ fn infer_header_spec(headers: &[Vec<u8>]) -> (Option<HeaderSpec>, f32) {
         let ratio = max_count as f32 / headers.len() as f32;
         consistency.push(ratio);
     }
-    
+
     let candidates = [
         score_stun(headers, &consistency),
         score_quic(headers, &consistency),
@@ -603,12 +628,13 @@ fn infer_header_spec(headers: &[Vec<u8>]) -> (Option<HeaderSpec>, f32) {
     // Fallback: use RawPrefix with randomization for variable bytes
     if headers.len() >= 4 {
         let template = headers[0].clone();
-        let randomize_indices: Vec<usize> = consistency.iter()
+        let randomize_indices: Vec<usize> = consistency
+            .iter()
             .enumerate()
-            .filter(|(_, &c)| c < 0.7)  // Randomize positions with <70% consistency
+            .filter(|(_, &c)| c < 0.7) // Randomize positions with <70% consistency
             .map(|(i, _)| i)
             .collect();
-        
+
         if !randomize_indices.is_empty() && randomize_indices.len() < template.len() {
             return (
                 Some(HeaderSpec::RawPrefix {
@@ -619,20 +645,41 @@ fn infer_header_spec(headers: &[Vec<u8>]) -> (Option<HeaderSpec>, f32) {
             );
         }
     }
-    
+
     // No pattern detected
     (None, 0.0)
 }
 
 fn score_stun(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f32)> {
-    if headers.is_empty() || headers.iter().filter(|h| h.len() >= 20).count() * 10 < headers.len() * 7 {
+    if headers.is_empty()
+        || headers.iter().filter(|h| h.len() >= 20).count() * 10 < headers.len() * 7
+    {
         return None;
     }
 
-    let type_ratio = headers.iter().filter(|h| h.len() >= 2 && h[0..2] == [0x00, 0x01]).count() as f32 / headers.len() as f32;
-    let cookie_ratio = headers.iter().filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42]).count() as f32 / headers.len() as f32;
-    let len_sane_ratio = headers.iter().filter(|h| h.len() >= 4 && h[2] & 0b1100_0000 == 0).count() as f32 / headers.len() as f32;
-    let penalty = if headers.iter().any(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0])) { 0.15 } else { 0.0 };
+    let type_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 2 && h[0..2] == [0x00, 0x01])
+        .count() as f32
+        / headers.len() as f32;
+    let cookie_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42])
+        .count() as f32
+        / headers.len() as f32;
+    let len_sane_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 4 && h[2] & 0b1100_0000 == 0)
+        .count() as f32
+        / headers.len() as f32;
+    let penalty = if headers
+        .iter()
+        .any(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0]))
+    {
+        0.15
+    } else {
+        0.0
+    };
 
     let score = (0.35 * type_ratio
         + 0.35 * cookie_ratio
@@ -655,10 +702,28 @@ fn score_quic(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f
         return None;
     }
 
-    let long_header_ratio = headers.iter().filter(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0])).count() as f32 / headers.len() as f32;
-    let version_ratio = headers.iter().filter(|h| h.len() >= 5 && h[1..5] == [0x00, 0x00, 0x00, 0x01]).count() as f32 / headers.len() as f32;
-    let dcid_len_ratio = headers.iter().filter(|h| h.len() >= 6 && (8..=20).contains(&h[5])).count() as f32 / headers.len() as f32;
-    let penalty = if headers.iter().filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42]).count() as f32 / headers.len() as f32 > 0.2 {
+    let long_header_ratio = headers
+        .iter()
+        .filter(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0]))
+        .count() as f32
+        / headers.len() as f32;
+    let version_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 5 && h[1..5] == [0x00, 0x00, 0x00, 0x01])
+        .count() as f32
+        / headers.len() as f32;
+    let dcid_len_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 6 && (8..=20).contains(&h[5]))
+        .count() as f32
+        / headers.len() as f32;
+    let penalty = if headers
+        .iter()
+        .filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42])
+        .count() as f32
+        / headers.len() as f32
+        > 0.2
+    {
         0.2
     } else {
         0.0
@@ -680,14 +745,36 @@ fn score_quic(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f
 }
 
 fn score_dns(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f32)> {
-    if headers.is_empty() || headers.iter().filter(|h| h.len() >= 12).count() * 10 < headers.len() * 7 {
+    if headers.is_empty()
+        || headers.iter().filter(|h| h.len() >= 12).count() * 10 < headers.len() * 7
+    {
         return None;
     }
 
-    let flags_ratio = headers.iter().filter(|h| h.len() >= 4 && h[2..4] == [0x01, 0x00]).count() as f32 / headers.len() as f32;
-    let counts_ratio = headers.iter().filter(|h| h.len() >= 12 && h[4..12] == [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).count() as f32 / headers.len() as f32;
-    let txid_variability = 1.0 - consistency.get(0).copied().unwrap_or(1.0).min(consistency.get(1).copied().unwrap_or(1.0));
-    let penalty = if headers.iter().any(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0])) { 0.15 } else { 0.0 };
+    let flags_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 4 && h[2..4] == [0x01, 0x00])
+        .count() as f32
+        / headers.len() as f32;
+    let counts_ratio = headers
+        .iter()
+        .filter(|h| h.len() >= 12 && h[4..12] == [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        .count() as f32
+        / headers.len() as f32;
+    let txid_variability = 1.0
+        - consistency
+            .get(0)
+            .copied()
+            .unwrap_or(1.0)
+            .min(consistency.get(1).copied().unwrap_or(1.0));
+    let penalty = if headers
+        .iter()
+        .any(|h| !h.is_empty() && (0xC0..=0xCF).contains(&h[0]))
+    {
+        0.15
+    } else {
+        0.0
+    };
     let score = (0.35 * flags_ratio
         + 0.35 * counts_ratio
         + 0.20 * txid_variability
@@ -695,30 +782,42 @@ fn score_dns(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f3
         - penalty;
 
     if score > 0.45 {
-        Some((
-            HeaderSpec::dns_query(0x0100),
-            score.clamp(0.0, 1.0),
-        ))
+        Some((HeaderSpec::dns_query(0x0100), score.clamp(0.0, 1.0)))
     } else {
         None
     }
 }
 
 fn score_tls(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f32)> {
-    if headers.is_empty() || headers.iter().filter(|h| h.len() >= 5).count() * 10 < headers.len() * 7 {
+    if headers.is_empty()
+        || headers.iter().filter(|h| h.len() >= 5).count() * 10 < headers.len() * 7
+    {
         return None;
     }
 
     let content_ratio = headers
         .iter()
         .filter(|h| h.len() >= 1 && matches!(h[0], 0x14 | 0x15 | 0x16 | 0x17))
-        .count() as f32 / headers.len() as f32;
+        .count() as f32
+        / headers.len() as f32;
     let version_ratio = headers
         .iter()
         .filter(|h| h.len() >= 3 && matches!(h[1..3], [0x03, 0x01] | [0x03, 0x02] | [0x03, 0x03]))
-        .count() as f32 / headers.len() as f32;
-    let len_variability = 1.0 - consistency.get(3).copied().unwrap_or(1.0).min(consistency.get(4).copied().unwrap_or(1.0));
-    let penalty = if headers.iter().filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42]).count() as f32 / headers.len() as f32 > 0.2 {
+        .count() as f32
+        / headers.len() as f32;
+    let len_variability = 1.0
+        - consistency
+            .get(3)
+            .copied()
+            .unwrap_or(1.0)
+            .min(consistency.get(4).copied().unwrap_or(1.0));
+    let penalty = if headers
+        .iter()
+        .filter(|h| h.len() >= 8 && h[4..8] == [0x21, 0x12, 0xA4, 0x42])
+        .count() as f32
+        / headers.len() as f32
+        > 0.2
+    {
         0.15
     } else {
         0.0
@@ -730,8 +829,14 @@ fn score_tls(headers: &[Vec<u8>], consistency: &[f32]) -> Option<(HeaderSpec, f3
         - penalty;
 
     if score > 0.45 {
-        let content_type = if headers.iter().filter(|h| !h.is_empty() && h[0] == 0x17).count()
-            >= headers.iter().filter(|h| !h.is_empty() && h[0] == 0x16).count()
+        let content_type = if headers
+            .iter()
+            .filter(|h| !h.is_empty() && h[0] == 0x17)
+            .count()
+            >= headers
+                .iter()
+                .filter(|h| !h.is_empty() && h[0] == 0x16)
+                .count()
         {
             0x17
         } else {
@@ -761,17 +866,25 @@ fn compute_confidence(
     let max_dir = uplink_packets.max(downlink_packets).max(1) as f32;
     let direction_balance = min_dir / max_dir;
 
-    if total_packets >= 10_000 { score += 0.3; }
-    else if total_packets >= 5_000 { score += 0.25; }
-    else if total_packets >= 1_000 { score += 0.2; }
-    else if total_packets >= 500 { score += 0.15; }
+    if total_packets >= 10_000 {
+        score += 0.3;
+    } else if total_packets >= 5_000 {
+        score += 0.25;
+    } else if total_packets >= 1_000 {
+        score += 0.2;
+    } else if total_packets >= 500 {
+        score += 0.15;
+    }
 
     score += 0.2 * direction_balance.min(1.0);
     score += 0.2 * header_match_rate.min(1.0);
     score += 0.15 * spec_confidence.min(1.0);
 
-    if mean_entropy > 7.0 { score += 0.15; }
-    else if mean_entropy > 6.0 { score += 0.1; }
+    if mean_entropy > 7.0 {
+        score += 0.15;
+    } else if mean_entropy > 6.0 {
+        score += 0.1;
+    }
 
     score.min(1.0)
 }
@@ -796,18 +909,20 @@ fn build_mask_profile(service: &str, analysis: &AnalysisResult) -> Result<MaskPr
     } else {
         header_template.len().min(4) as u16
     };
-    
+
     // Determine spoof_protocol based on header_spec
-    let spoof_protocol = analysis.header.header_spec
+    let spoof_protocol = analysis
+        .header
+        .header_spec
         .as_ref()
         .map(header_spec_protocol)
         .unwrap_or(SpoofProtocol::QUIC);
-    
+
     let reverse_profile = build_reverse_profile(&mask_id, analysis);
 
     Ok(MaskProfile {
         mask_id,
-        version: 2,  // Version 2 for HeaderSpec support
+        version: 2, // Version 2 for HeaderSpec support
         created_at: current_unix_secs(),
         expires_at: current_unix_secs() + 365 * 24 * 3600, // 1 year
         spoof_protocol,
@@ -839,17 +954,27 @@ fn build_reverse_profile(mask_id: &str, analysis: &AnalysisResult) -> Option<Box
         version: 2,
         created_at: current_unix_secs(),
         expires_at: current_unix_secs() + 365 * 24 * 3600,
-        spoof_protocol: analysis.header.header_spec
+        spoof_protocol: analysis
+            .header
+            .header_spec
             .as_ref()
             .map(header_spec_protocol)
             .unwrap_or(SpoofProtocol::QUIC),
         header_template: analysis.header.template.clone(),
-        eph_pub_offset: analysis.header.header_spec.as_ref().map(|spec| spec.min_length() as u16).unwrap_or(analysis.header.template.len().min(4) as u16),
+        eph_pub_offset: analysis
+            .header
+            .header_spec
+            .as_ref()
+            .map(|spec| spec.min_length() as u16)
+            .unwrap_or(analysis.header.template.len().min(4) as u16),
         eph_pub_length: 32,
         size_distribution,
         iat_distribution,
         padding_strategy: PaddingStrategy::RandomUniform { min: 0, max: 64 },
-        fsm_states: vec![FSMState { state_id: 0, transitions: vec![] }],
+        fsm_states: vec![FSMState {
+            state_id: 0,
+            transitions: vec![],
+        }],
         fsm_initial_state: 0,
         signature_vector: vec![0.0; 64],
         reverse_profile: None,
@@ -916,8 +1041,8 @@ fn build_iat_distribution(direction: &DirectionalAnalysis) -> IATDistribution {
     let num_quantiles = 200usize.min(sorted.len());
     let mut quantile_values: Vec<f64> = Vec::with_capacity(num_quantiles);
     for i in 0..num_quantiles {
-        let idx = (i as f64 / (num_quantiles - 1).max(1) as f64 * (sorted.len() - 1) as f64)
-            .round() as usize;
+        let idx = (i as f64 / (num_quantiles - 1).max(1) as f64 * (sorted.len() - 1) as f64).round()
+            as usize;
         quantile_values.push(sorted[idx.min(sorted.len() - 1)]);
     }
 
@@ -1002,11 +1127,12 @@ fn self_test(profile: &MaskProfile, packets: &[PacketMetadata]) -> Result<SelfTe
     // KS tests
     let ks_uplink_size = ks_test(&synthetic_uplink_sizes, &real_uplink_sizes);
     let ks_uplink_iat = ks_test(&synthetic_uplink_iats, &real_uplink_iats);
-    let ks_downlink_size = if !real_downlink_sizes.is_empty() && !synthetic_downlink_sizes.is_empty() {
-        ks_test(&synthetic_downlink_sizes, &real_downlink_sizes)
-    } else {
-        1.0
-    };
+    let ks_downlink_size =
+        if !real_downlink_sizes.is_empty() && !synthetic_downlink_sizes.is_empty() {
+            ks_test(&synthetic_downlink_sizes, &real_downlink_sizes)
+        } else {
+            1.0
+        };
     let ks_downlink_iat = if !real_downlink_iats.is_empty() && !synthetic_downlink_iats.is_empty() {
         ks_test(&synthetic_downlink_iats, &real_downlink_iats)
     } else {
@@ -1049,14 +1175,13 @@ fn self_test(profile: &MaskProfile, packets: &[PacketMetadata]) -> Result<SelfTe
             0.25
         };
         let uplink_quality = 1.0 - ((ks_uplink_size + ks_uplink_iat) / 2.0 / ks_threshold).min(1.0);
-        (
-            0.45 * uplink_quality
+        (0.45 * uplink_quality
             + 0.20 * downlink_quality
             + 0.20 * header_match
             + 0.10 * fsm_score
             + 0.03 * direction_balance.min(1.0)
-            + 0.02 * (1.0 - entropy_penalty)
-        ).max(0.1)
+            + 0.02 * (1.0 - entropy_penalty))
+            .max(0.1)
     } else {
         0.0
     };
@@ -1091,10 +1216,19 @@ fn fsm_plausibility_score(profile: &MaskProfile, packets: &[PacketMetadata]) -> 
     let (observed_states, observed_initial) = build_fsm_from_sizes(&uplink_sizes);
     let observed_count = observed_states.len().max(1) as f32;
     let profile_count = profile.fsm_states.len().max(1) as f32;
-    let state_count_match = 1.0 - ((observed_count - profile_count).abs() / observed_count.max(profile_count));
+    let state_count_match =
+        1.0 - ((observed_count - profile_count).abs() / observed_count.max(profile_count));
 
-    let initial_match = if profile.fsm_initial_state == observed_initial { 1.0 } else { 0.5 };
-    let has_valid_initial = if profile.fsm_states.iter().any(|s| s.state_id == profile.fsm_initial_state) {
+    let initial_match = if profile.fsm_initial_state == observed_initial {
+        1.0
+    } else {
+        0.5
+    };
+    let has_valid_initial = if profile
+        .fsm_states
+        .iter()
+        .any(|s| s.state_id == profile.fsm_initial_state)
+    {
         1.0
     } else {
         0.0
@@ -1103,18 +1237,24 @@ fn fsm_plausibility_score(profile: &MaskProfile, packets: &[PacketMetadata]) -> 
         .fsm_states
         .iter()
         .map(|state| {
-            let sum: f32 = state.transitions.iter().map(|t| match t.condition {
-                TransitionCondition::Random(p) => p.max(0.0),
-                _ => 0.25,
-            }).sum();
+            let sum: f32 = state
+                .transitions
+                .iter()
+                .map(|t| match t.condition {
+                    TransitionCondition::Random(p) => p.max(0.0),
+                    _ => 0.25,
+                })
+                .sum();
             (1.0 - (sum - 1.0).abs()).clamp(0.0, 1.0)
         })
-        .sum::<f32>() / profile.fsm_states.len() as f32;
+        .sum::<f32>()
+        / profile.fsm_states.len() as f32;
 
     (0.40 * state_count_match.max(0.0)
         + 0.25 * initial_match
         + 0.20 * has_valid_initial
-        + 0.15 * transition_mass).clamp(0.0, 1.0)
+        + 0.15 * transition_mass)
+        .clamp(0.0, 1.0)
 }
 
 fn header_match_rate(spec: &HeaderSpec, headers: &[Vec<u8>]) -> f32 {
@@ -1144,13 +1284,16 @@ fn raw_prefix_match_rate(template: &[u8], randomize_indices: &[usize], headers: 
 
 fn header_matches_spec(spec: &HeaderSpec, header: &[u8]) -> bool {
     let fields = spec.fields();
-    let total_len: usize = fields.iter().map(|field| match field {
-        HeaderField::Fixed { bytes } => bytes.len(),
-        HeaderField::Random { len }
-        | HeaderField::Length { len, .. }
-        | HeaderField::Id { len, .. }
-        | HeaderField::CounterLike { len, .. } => *len,
-    }).sum();
+    let total_len: usize = fields
+        .iter()
+        .map(|field| match field {
+            HeaderField::Fixed { bytes } => bytes.len(),
+            HeaderField::Random { len }
+            | HeaderField::Length { len, .. }
+            | HeaderField::Id { len, .. }
+            | HeaderField::CounterLike { len, .. } => *len,
+        })
+        .sum();
     if header.len() < total_len {
         return false;
     }
@@ -1266,31 +1409,41 @@ fn ks_test(sample1: &[f64], sample2: &[f64]) -> f32 {
 // ─── Statistical Helpers ─────────────────────────────────────────────────────
 
 fn mean_u16(data: &[u16]) -> f32 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     data.iter().map(|&x| x as f32).sum::<f32>() / data.len() as f32
 }
 
 fn std_dev_u16(data: &[u16]) -> f32 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let m = mean_u16(data);
     let variance = data.iter().map(|&x| (x as f32 - m).powi(2)).sum::<f32>() / data.len() as f32;
     variance.sqrt()
 }
 
 fn mean_f64(data: &[f64]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     data.iter().sum::<f64>() / data.len() as f64
 }
 
 fn std_dev_f64(data: &[f64]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let m = mean_f64(data);
     let variance = data.iter().map(|x| (x - m).powi(2)).sum::<f64>() / data.len() as f64;
     variance.sqrt()
 }
 
 fn mean_f32(data: &[f32]) -> f32 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     data.iter().sum::<f32>() / data.len() as f32
 }
 
@@ -1303,7 +1456,10 @@ fn current_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_iat_distribution, entropy_penalty, header_consensus, header_match_rate, infer_header_spec, ks_test, self_test_passes, DirectionalAnalysis, Period};
+    use super::{
+        build_iat_distribution, entropy_penalty, header_consensus, header_match_rate,
+        infer_header_spec, ks_test, self_test_passes, DirectionalAnalysis, Period,
+    };
     use aivpn_common::mask::{HeaderSpec, IATDistType};
 
     #[test]
@@ -1334,8 +1490,16 @@ mod tests {
             iat_mean_ms: 52.0,
             iat_std_ms: 28.0,
             periods: vec![
-                Period { period_ms: 20.0, jitter_ms: 5.0, weight: 0.6 },
-                Period { period_ms: 100.0, jitter_ms: 30.0, weight: 0.4 },
+                Period {
+                    period_ms: 20.0,
+                    jitter_ms: 5.0,
+                    weight: 0.6,
+                },
+                Period {
+                    period_ms: 100.0,
+                    jitter_ms: 30.0,
+                    weight: 0.4,
+                },
             ],
             packet_count: 400,
             raw_sizes_sorted: vec![],
@@ -1384,14 +1548,7 @@ mod tests {
     #[test]
     fn self_test_still_rejects_broad_statistical_mismatch() {
         assert!(!self_test_passes(
-            0.310,
-            0.820,
-            0.610,
-            0.590,
-            1.000,
-            1.000,
-            0.000,
-            true,
+            0.310, 0.820, 0.610, 0.590, 1.000, 1.000, 0.000, true,
         ));
     }
 
@@ -1413,7 +1570,11 @@ mod tests {
         let s1: Vec<f64> = (0..1000).map(|i| (i as f64) * 1.5).collect();
         let s2: Vec<f64> = (0..1000).map(|i| (i as f64) * 1.5 + 0.1).collect();
         let ks = ks_test(&s1, &s2);
-        assert!(ks < 0.05, "KS for near-identical distributions should be small, got {}", ks);
+        assert!(
+            ks < 0.05,
+            "KS for near-identical distributions should be small, got {}",
+            ks
+        );
     }
 
     #[test]
@@ -1448,9 +1609,18 @@ mod tests {
     #[test]
     fn infer_header_spec_detects_stun_and_matches_headers() {
         let headers = vec![
-            vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            vec![0x00, 0x01, 0x00, 0x08, 0x21, 0x12, 0xA4, 0x42, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-            vec![0x00, 0x01, 0x00, 0x10, 0x21, 0x12, 0xA4, 0x42, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36],
+            vec![
+                0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                12,
+            ],
+            vec![
+                0x00, 0x01, 0x00, 0x08, 0x21, 0x12, 0xA4, 0x42, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                22, 23, 24,
+            ],
+            vec![
+                0x00, 0x01, 0x00, 0x10, 0x21, 0x12, 0xA4, 0x42, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+                34, 35, 36,
+            ],
         ];
         let (spec, confidence) = infer_header_spec(&headers);
         let spec = spec.expect("stun should be inferred");

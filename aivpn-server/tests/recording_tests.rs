@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use aivpn_common::recording::*;
 use aivpn_common::protocol::ControlPayload;
+use aivpn_common::recording::*;
 use aivpn_server::gateway::MaskCatalog;
-use aivpn_server::mask_store::{MaskStore, MaskEntry, MaskStats};
+use aivpn_server::mask_store::{MaskEntry, MaskStats, MaskStore};
 use aivpn_server::recording::{RecordingManager, RecordingStopOutcome};
 
 /// Generate realistic packet metadata that simulates a video call
@@ -111,7 +111,11 @@ fn test_recording_session_cap() {
     // But total_packets tracks the real count
     assert_eq!(session.total_packets, (MAX_RECORDING_PACKETS + 1000) as u64);
 
-    println!("✅ RecordingSession cap: stored={}, total={}", session.packets.len(), session.total_packets);
+    println!(
+        "✅ RecordingSession cap: stored={}, total={}",
+        session.packets.len(),
+        session.total_packets
+    );
 }
 
 // ─── Test: RunningStats ──────────────────────────────────────────────────────
@@ -130,7 +134,9 @@ fn test_running_stats_incremental() {
 
     println!(
         "✅ RunningStats: up={}, down={}, entropy={:.2}",
-        stats.uplink_count, stats.downlink_count, stats.mean_entropy()
+        stats.uplink_count,
+        stats.downlink_count,
+        stats.mean_entropy()
     );
 }
 
@@ -160,7 +166,10 @@ fn test_recording_control_roundtrip() {
     let encoded = ack.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
     match decoded {
-        ControlPayload::RecordingAck { session_id: sid, status } => {
+        ControlPayload::RecordingAck {
+            session_id: sid,
+            status,
+        } => {
             assert_eq!(sid, session_id);
             assert_eq!(status, "started");
         }
@@ -187,7 +196,11 @@ fn test_recording_control_roundtrip() {
     let encoded = complete.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
     match decoded {
-        ControlPayload::RecordingComplete { service, mask_id, confidence } => {
+        ControlPayload::RecordingComplete {
+            service,
+            mask_id,
+            confidence,
+        } => {
             assert_eq!(service, "zoom");
             assert_eq!(mask_id, "auto_zoom_v1");
             assert!((confidence - 0.87).abs() < 0.001);
@@ -216,7 +229,10 @@ fn test_recording_control_roundtrip() {
 #[test]
 fn test_recording_manager_lifecycle() {
     let catalog = Arc::new(MaskCatalog::new());
-    let store = Arc::new(MaskStore::new(catalog, std::path::PathBuf::from("/tmp/aivpn-test-masks")));
+    let store = Arc::new(MaskStore::new(
+        catalog,
+        std::path::PathBuf::from("/tmp/aivpn-test-masks"),
+    ));
     let manager = RecordingManager::new(store);
 
     let session_id = [3u8; 16];
@@ -261,7 +277,10 @@ fn test_recording_manager_lifecycle() {
 fn test_mask_store_crud() {
     let catalog = Arc::new(MaskCatalog::new());
     let initial_count = catalog.available_count();
-    let store = MaskStore::new(catalog.clone(), std::path::PathBuf::from("/tmp/aivpn-test-masks-crud"));
+    let store = MaskStore::new(
+        catalog.clone(),
+        std::path::PathBuf::from("/tmp/aivpn-test-masks-crud"),
+    );
 
     // Create a dummy mask entry
     let profile = aivpn_common::mask::preset_masks::quic_https_v2();
@@ -341,16 +360,19 @@ async fn test_full_mask_generation_pipeline() {
     println!("📊 Test data: {} packets", packets.len());
     println!(
         "   Uplink: {}, Downlink: {}",
-        packets.iter().filter(|p| p.direction == Direction::Uplink).count(),
-        packets.iter().filter(|p| p.direction == Direction::Downlink).count(),
+        packets
+            .iter()
+            .filter(|p| p.direction == Direction::Uplink)
+            .count(),
+        packets
+            .iter()
+            .filter(|p| p.direction == Direction::Downlink)
+            .count(),
     );
 
     // Run the generation pipeline
-    let result = aivpn_server::mask_gen::generate_and_store_mask(
-        "video_call_test",
-        &packets,
-        &store,
-    ).await;
+    let result =
+        aivpn_server::mask_gen::generate_and_store_mask("video_call_test", &packets, &store).await;
 
     match &result {
         Ok(mask_id) => {
@@ -363,10 +385,19 @@ async fn test_full_mask_generation_pipeline() {
 
             println!("   mask_id: {}", entry.profile.mask_id);
             println!("   spoof_protocol: {:?}", entry.profile.spoof_protocol);
-            println!("   header_template_len: {}", entry.profile.header_template.len());
+            println!(
+                "   header_template_len: {}",
+                entry.profile.header_template.len()
+            );
             println!("   fsm_states: {}", entry.profile.fsm_states.len());
-            println!("   size_dist_type: {:?}", entry.profile.size_distribution.dist_type);
-            println!("   iat_dist_type: {:?}", entry.profile.iat_distribution.dist_type);
+            println!(
+                "   size_dist_type: {:?}",
+                entry.profile.size_distribution.dist_type
+            );
+            println!(
+                "   iat_dist_type: {:?}",
+                entry.profile.iat_distribution.dist_type
+            );
             println!("   confidence: {:.2}", entry.stats.confidence);
             println!("   is_active: {}", entry.stats.is_active);
 
@@ -392,7 +423,10 @@ async fn test_full_mask_generation_pipeline() {
         Err(e) => {
             println!("❌ Mask generation failed: {}", e);
             // Print detailed diagnostics
-            let uplink_count = packets.iter().filter(|p| p.direction == Direction::Uplink).count();
+            let uplink_count = packets
+                .iter()
+                .filter(|p| p.direction == Direction::Uplink)
+                .count();
             println!("   Uplink packets: {} (need >= 100)", uplink_count);
             println!("   Total packets: {}", packets.len());
         }
@@ -402,7 +436,11 @@ async fn test_full_mask_generation_pipeline() {
     let _ = std::fs::remove_dir_all(&storage_dir);
 
     // Assert success
-    assert!(result.is_ok(), "Full mask generation pipeline should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Full mask generation pipeline should succeed: {:?}",
+        result.err()
+    );
 }
 
 // ─── Test: End-to-End with RecordingManager ──────────────────────────────────
@@ -429,7 +467,10 @@ async fn test_end_to_end_recording() {
     }
 
     let status = manager.status(&session_id).unwrap();
-    println!("📊 E2E recording status: {} packets, {}s", status.total_packets, status.duration_secs);
+    println!(
+        "📊 E2E recording status: {} packets, {}s",
+        status.total_packets, status.duration_secs
+    );
 
     // 3. Stop — this will fail has_enough_data because duration < 60s
     //    But we can test the direct pipeline
@@ -439,17 +480,22 @@ async fn test_end_to_end_recording() {
     // Since duration is < 60s, stop returns Incomplete
     println!(
         "   Stop result: {} (expected Incomplete due to short duration)",
-        if matches!(stopped, RecordingStopOutcome::Incomplete(_)) { "Incomplete" } else { "Other" }
+        if matches!(stopped, RecordingStopOutcome::Incomplete(_)) {
+            "Incomplete"
+        } else {
+            "Other"
+        }
     );
 
     // 4. Test direct pipeline instead (bypassing duration check)
-    let result = aivpn_server::mask_gen::generate_and_store_mask(
-        "e2e_test_service",
-        &packets,
-        &store,
-    ).await;
+    let result =
+        aivpn_server::mask_gen::generate_and_store_mask("e2e_test_service", &packets, &store).await;
 
-    assert!(result.is_ok(), "E2E pipeline should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "E2E pipeline should succeed: {:?}",
+        result.err()
+    );
     let mask_id = result.unwrap();
     println!("✅ E2E mask generated: '{}'", mask_id);
 

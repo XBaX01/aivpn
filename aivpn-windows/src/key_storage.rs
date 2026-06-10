@@ -16,25 +16,34 @@ use std::path::PathBuf;
 mod dpapi {
     use std::ptr;
     use winapi::um::dpapi::{CryptProtectData, CryptUnprotectData};
-    use winapi::um::wincrypt::DATA_BLOB;
     use winapi::um::winbase::LocalFree;
+    use winapi::um::wincrypt::DATA_BLOB;
 
     pub fn encrypt(plaintext: &[u8]) -> Option<Vec<u8>> {
         let mut input = DATA_BLOB {
             cbData: plaintext.len() as u32,
             pbData: plaintext.as_ptr() as *mut u8,
         };
-        let mut output = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: ptr::null_mut(),
+        };
         let ok = unsafe {
-            CryptProtectData(&mut input, ptr::null(), ptr::null_mut(),
-                             ptr::null_mut(), ptr::null_mut(), 0, &mut output)
+            CryptProtectData(
+                &mut input,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                &mut output,
+            )
         };
         if ok == 0 || output.pbData.is_null() {
             return None;
         }
-        let bytes = unsafe {
-            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
         unsafe { LocalFree(output.pbData as _) };
         Some(bytes)
     }
@@ -44,17 +53,26 @@ mod dpapi {
             cbData: ciphertext.len() as u32,
             pbData: ciphertext.as_ptr() as *mut u8,
         };
-        let mut output = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: ptr::null_mut(),
+        };
         let ok = unsafe {
-            CryptUnprotectData(&mut input, ptr::null_mut(), ptr::null_mut(),
-                               ptr::null_mut(), ptr::null_mut(), 0, &mut output)
+            CryptUnprotectData(
+                &mut input,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                &mut output,
+            )
         };
         if ok == 0 || output.pbData.is_null() {
             return None;
         }
-        let bytes = unsafe {
-            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
         unsafe { LocalFree(output.pbData as _) };
         Some(bytes)
     }
@@ -163,11 +181,15 @@ impl KeyStorage {
         }
         // Encrypt keys before writing to disk
         let on_disk = KeyStorage {
-            keys: self.keys.iter().map(|k| {
-                let mut k2 = k.clone();
-                k2.key = protect_key(&k.key);
-                k2
-            }).collect(),
+            keys: self
+                .keys
+                .iter()
+                .map(|k| {
+                    let mut k2 = k.clone();
+                    k2.key = protect_key(&k.key);
+                    k2
+                })
+                .collect(),
             selected: self.selected,
         };
         if let Ok(json) = serde_json::to_string_pretty(&on_disk) {
@@ -194,7 +216,13 @@ impl KeyStorage {
         Ok(())
     }
 
-    pub fn update_key(&mut self, idx: usize, name: &str, key: &str, full_tunnel: bool) -> Result<(), String> {
+    pub fn update_key(
+        &mut self,
+        idx: usize,
+        name: &str,
+        key: &str,
+        full_tunnel: bool,
+    ) -> Result<(), String> {
         if idx >= self.keys.len() {
             return Err("Invalid key index".to_string());
         }

@@ -11,16 +11,13 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use aivpn_common::crypto::{
-    self, KeyPair, SessionKeys, TAG_SIZE, NONCE_SIZE, CHACHA20_KEY_SIZE,
-    POLY1305_TAG_SIZE, X25519_PUBLIC_KEY_SIZE, DEFAULT_WINDOW_MS,
-    encrypt_payload, decrypt_payload, generate_resonance_tag,
-    derive_session_keys, compute_time_window, current_timestamp_ms,
-};
-use aivpn_common::protocol::{
-    InnerHeader, InnerType, ControlPayload, ControlSubtype, AivpnPacket,
+    self, compute_time_window, current_timestamp_ms, decrypt_payload, derive_session_keys,
+    encrypt_payload, generate_resonance_tag, KeyPair, SessionKeys, CHACHA20_KEY_SIZE,
+    DEFAULT_WINDOW_MS, NONCE_SIZE, POLY1305_TAG_SIZE, TAG_SIZE, X25519_PUBLIC_KEY_SIZE,
 };
 use aivpn_common::mask::preset_masks::{all as all_preset_masks, webrtc_zoom_v3};
 use aivpn_common::mask::MaskProfile;
+use aivpn_common::protocol::{AivpnPacket, ControlPayload, ControlSubtype, InnerHeader, InnerType};
 use subtle::ConstantTimeEq;
 
 // ============================================================================
@@ -85,7 +82,10 @@ fn battle_low_order_points_rejected() {
         let result = k.compute_shared(point);
         // It's OK if compute_shared returns Ok for non-zero results
         if let Ok(shared) = &result {
-            assert!(!bool::from(shared.ct_eq(&[0u8; 32])), "Zero shared secret must be rejected");
+            assert!(
+                !bool::from(shared.ct_eq(&[0u8; 32])),
+                "Zero shared secret must be rejected"
+            );
         }
     }
 }
@@ -210,7 +210,10 @@ fn battle_session_keys_psk_affects_output() {
     let psk = [0xEF; 32];
     let keys_no_psk = derive_session_keys(&dh, None, &eph);
     let keys_with_psk = derive_session_keys(&dh, Some(&psk), &eph);
-    assert_ne!(keys_no_psk.session_key, keys_with_psk.session_key, "PSK must affect derived keys");
+    assert_ne!(
+        keys_no_psk.session_key, keys_with_psk.session_key,
+        "PSK must affect derived keys"
+    );
 }
 
 #[test]
@@ -218,9 +221,18 @@ fn battle_session_keys_all_fields_differ() {
     let dh = [0xAB; 32];
     let eph = [0xCD; 32];
     let keys = derive_session_keys(&dh, None, &eph);
-    assert_ne!(keys.session_key, keys.tag_secret, "session_key and tag_secret must differ");
-    assert_ne!(keys.session_key, keys.prng_seed, "session_key and prng_seed must differ");
-    assert_ne!(keys.tag_secret, keys.prng_seed, "tag_secret and prng_seed must differ");
+    assert_ne!(
+        keys.session_key, keys.tag_secret,
+        "session_key and tag_secret must differ"
+    );
+    assert_ne!(
+        keys.session_key, keys.prng_seed,
+        "session_key and prng_seed must differ"
+    );
+    assert_ne!(
+        keys.tag_secret, keys.prng_seed,
+        "tag_secret and prng_seed must differ"
+    );
 }
 
 // ============================================================================
@@ -229,10 +241,18 @@ fn battle_session_keys_all_fields_differ() {
 
 #[test]
 fn battle_inner_header_roundtrip_all_types() {
-    let types = [InnerType::Data, InnerType::Control, InnerType::Fragment, InnerType::Ack];
+    let types = [
+        InnerType::Data,
+        InnerType::Control,
+        InnerType::Fragment,
+        InnerType::Ack,
+    ];
     for inner_type in types {
         for seq in [0u16, 1, 255, 65535] {
-            let hdr = InnerHeader { inner_type, seq_num: seq };
+            let hdr = InnerHeader {
+                inner_type,
+                seq_num: seq,
+            };
             let encoded = hdr.encode();
             let decoded = InnerHeader::decode(&encoded).unwrap();
             assert_eq!(decoded.inner_type, inner_type);
@@ -289,7 +309,9 @@ fn battle_control_payload_key_rotate_roundtrip() {
 
 #[test]
 fn battle_control_payload_time_sync_roundtrip() {
-    let payload = ControlPayload::TimeSync { server_ts_ms: 1700000000000 };
+    let payload = ControlPayload::TimeSync {
+        server_ts_ms: 1700000000000,
+    };
     let encoded = payload.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
     if let ControlPayload::TimeSync { server_ts_ms } = decoded {
@@ -321,7 +343,13 @@ fn battle_control_payload_telemetry_response_roundtrip() {
     };
     let encoded = payload.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
-    if let ControlPayload::TelemetryResponse { packet_loss, rtt_ms, jitter_ms, buffer_pct } = decoded {
+    if let ControlPayload::TelemetryResponse {
+        packet_loss,
+        rtt_ms,
+        jitter_ms,
+        buffer_pct,
+    } = decoded
+    {
         assert_eq!(packet_loss, 100);
         assert_eq!(rtt_ms, 50);
         assert_eq!(jitter_ms, 5);
@@ -339,7 +367,11 @@ fn battle_control_payload_ack_roundtrip() {
     };
     let encoded = payload.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
-    if let ControlPayload::ControlAck { ack_seq, ack_for_subtype } = decoded {
+    if let ControlPayload::ControlAck {
+        ack_seq,
+        ack_for_subtype,
+    } = decoded
+    {
         assert_eq!(ack_seq, 1234);
         assert_eq!(ack_for_subtype, ControlSubtype::Keepalive as u8);
     } else {
@@ -370,7 +402,9 @@ fn battle_wire_format_roundtrip() {
     // Setup: client and server derive same session keys
     let client_kp = KeyPair::generate();
     let server_kp = KeyPair::generate();
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
     // Client builds packet
@@ -424,7 +458,9 @@ fn battle_wire_format_roundtrip() {
 fn battle_wire_format_multiple_packets() {
     let client_kp = KeyPair::generate();
     let server_kp = KeyPair::generate();
-    let shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let keys = derive_session_keys(&shared, None, &client_kp.public_key_bytes());
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
 
@@ -522,9 +558,13 @@ fn battle_full_key_exchange_pipeline() {
     let server_kp = KeyPair::generate();
 
     // 3. Client computes shared secret using server's public key
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     // 4. Server computes shared secret using client's eph_pub
-    let server_shared = server_kp.compute_shared(&client_kp.public_key_bytes()).unwrap();
+    let server_shared = server_kp
+        .compute_shared(&client_kp.public_key_bytes())
+        .unwrap();
     assert_eq!(client_shared, server_shared);
 
     // 5. Both derive identical session keys
@@ -552,11 +592,17 @@ fn battle_full_key_exchange_with_psk() {
     let server_kp = KeyPair::generate();
     let psk = crypto::blake3_hash(b"shared-secret-psk");
 
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
-    let server_shared = server_kp.compute_shared(&client_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
+    let server_shared = server_kp
+        .compute_shared(&client_kp.public_key_bytes())
+        .unwrap();
 
-    let client_keys = derive_session_keys(&client_shared, Some(&psk), &client_kp.public_key_bytes());
-    let server_keys = derive_session_keys(&server_shared, Some(&psk), &client_kp.public_key_bytes());
+    let client_keys =
+        derive_session_keys(&client_shared, Some(&psk), &client_kp.public_key_bytes());
+    let server_keys =
+        derive_session_keys(&server_shared, Some(&psk), &client_kp.public_key_bytes());
 
     assert_eq!(client_keys.session_key, server_keys.session_key);
     assert_eq!(client_keys.tag_secret, server_keys.tag_secret);
@@ -569,12 +615,17 @@ fn battle_wrong_psk_different_keys() {
     let psk1 = [1u8; 32];
     let psk2 = [2u8; 32];
 
-    let shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
 
     let keys1 = derive_session_keys(&shared, Some(&psk1), &client_kp.public_key_bytes());
     let keys2 = derive_session_keys(&shared, Some(&psk2), &client_kp.public_key_bytes());
 
-    assert_ne!(keys1.session_key, keys2.session_key, "Different PSKs must produce different keys");
+    assert_ne!(
+        keys1.session_key, keys2.session_key,
+        "Different PSKs must produce different keys"
+    );
 }
 
 // ============================================================================
@@ -610,18 +661,42 @@ fn battle_all_preset_masks_valid() {
 
     let mut seen_ids = HashSet::new();
     for mask in masks {
-        assert!(seen_ids.insert(mask.mask_id.clone()), "duplicate preset mask_id: {}", mask.mask_id);
-        assert!(mask.version >= 2, "preset mask {} must use semantic header version", mask.mask_id);
-        assert!(!mask.header_template.is_empty(), "preset mask {} must have a non-empty header template", mask.mask_id);
-        assert!(mask.header_spec.is_some(), "preset mask {} must provide header_spec", mask.mask_id);
-        assert_eq!(mask.eph_pub_length, 32, "preset mask {} must keep 32-byte eph pub length", mask.mask_id);
-        assert!(!mask.fsm_states.is_empty(), "preset mask {} must have at least one FSM state", mask.mask_id);
+        assert!(
+            seen_ids.insert(mask.mask_id.clone()),
+            "duplicate preset mask_id: {}",
+            mask.mask_id
+        );
+        assert!(
+            mask.version >= 2,
+            "preset mask {} must use semantic header version",
+            mask.mask_id
+        );
+        assert!(
+            !mask.header_template.is_empty(),
+            "preset mask {} must have a non-empty header template",
+            mask.mask_id
+        );
+        assert!(
+            mask.header_spec.is_some(),
+            "preset mask {} must provide header_spec",
+            mask.mask_id
+        );
+        assert_eq!(
+            mask.eph_pub_length, 32,
+            "preset mask {} must keep 32-byte eph pub length",
+            mask.mask_id
+        );
+        assert!(
+            !mask.fsm_states.is_empty(),
+            "preset mask {} must have at least one FSM state",
+            mask.mask_id
+        );
     }
 }
 
 #[test]
 fn battle_mask_signature_verification() {
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     let mut mask = webrtc_zoom_v3();
 
@@ -643,12 +718,14 @@ fn battle_mask_signature_verification() {
 
     // Verify with wrong key rejects
     let wrong_key = SigningKey::from_bytes(&[0x99u8; 32]);
-    assert!(!mask.verify_signature(&wrong_key.verifying_key().to_bytes()).unwrap());
+    assert!(!mask
+        .verify_signature(&wrong_key.verifying_key().to_bytes())
+        .unwrap());
 }
 
 #[test]
 fn battle_mask_signature_tamper_detected() {
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     let mut mask = webrtc_zoom_v3();
     let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);

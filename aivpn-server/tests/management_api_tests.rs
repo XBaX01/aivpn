@@ -75,7 +75,13 @@ async fn spawn_server_with_key(
     let db_clone = db.clone();
     let path_clone = socket_path.clone();
     tokio::spawn(async move {
-        management_api::serve(Some(db_clone), Some(path_clone), server_pub_key, server_addr).await;
+        management_api::serve(
+            Some(db_clone),
+            Some(path_clone),
+            server_pub_key,
+            server_addr,
+        )
+        .await;
     });
 
     // Wait until the socket exists (up to 2 s)
@@ -89,9 +95,7 @@ async fn spawn_server_with_key(
 }
 
 /// Open a persistent hyper HTTP/1.1 connection over a Unix socket.
-async fn connect(
-    socket_path: &str,
-) -> hyper::client::conn::http1::SendRequest<Full<Bytes>> {
+async fn connect(socket_path: &str) -> hyper::client::conn::http1::SendRequest<Full<Bytes>> {
     let stream = UnixStream::connect(socket_path)
         .await
         .expect("connect to unix socket");
@@ -110,9 +114,7 @@ async fn send(
     path: &str,
     body: Option<&str>,
 ) -> (StatusCode, Value) {
-    let body_bytes = body
-        .map(|s| Bytes::from(s.to_owned()))
-        .unwrap_or_default();
+    let body_bytes = body.map(|s| Bytes::from(s.to_owned())).unwrap_or_default();
 
     let req = Request::builder()
         .method(method)
@@ -125,7 +127,12 @@ async fn send(
 
     let res = sender.send_request(req).await.expect("send request");
     let status = res.status();
-    let bytes = res.into_body().collect().await.expect("collect body").to_bytes();
+    let bytes = res
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
     let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
@@ -143,8 +150,16 @@ async fn test_get_status_returns_200() {
     let (status, body) = send(&mut sender, Method::GET, "/api/v1/status", None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(body["version"].is_string(), "version must be a string: {:?}", body);
-    assert!(body["uptime_secs"].is_number(), "uptime_secs must be a number: {:?}", body);
+    assert!(
+        body["version"].is_string(),
+        "version must be a string: {:?}",
+        body
+    );
+    assert!(
+        body["uptime_secs"].is_number(),
+        "uptime_secs must be a number: {:?}",
+        body
+    );
 }
 
 /// GET /api/v1/clients on an empty database returns 200 and an empty array.
@@ -174,17 +189,39 @@ async fn test_add_client_returns_201_without_psk() {
     let payload = r#"{"name": "alice"}"#;
     let (status, body) = send(&mut sender, Method::POST, "/api/v1/clients", Some(payload)).await;
 
-    assert_eq!(status, StatusCode::CREATED, "expected 201, got {:?}: {:?}", status, body);
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "expected 201, got {:?}: {:?}",
+        status,
+        body
+    );
 
     // Required fields present
-    assert!(body["id"].is_string(),         "id must be string: {:?}", body);
-    assert!(body["name"].is_string(),       "name must be string: {:?}", body);
-    assert!(body["vpn_ip"].is_string(),     "vpn_ip must be string: {:?}", body);
-    assert!(body["enabled"].is_boolean(),   "enabled must be bool: {:?}", body);
-    assert!(body["created_at"].is_string(), "created_at must be string: {:?}", body);
+    assert!(body["id"].is_string(), "id must be string: {:?}", body);
+    assert!(body["name"].is_string(), "name must be string: {:?}", body);
+    assert!(
+        body["vpn_ip"].is_string(),
+        "vpn_ip must be string: {:?}",
+        body
+    );
+    assert!(
+        body["enabled"].is_boolean(),
+        "enabled must be bool: {:?}",
+        body
+    );
+    assert!(
+        body["created_at"].is_string(),
+        "created_at must be string: {:?}",
+        body
+    );
 
     // PSK must NOT be in the response
-    assert!(body.get("psk").is_none(), "PSK must not appear in API response: {:?}", body);
+    assert!(
+        body.get("psk").is_none(),
+        "PSK must not appear in API response: {:?}",
+        body
+    );
 
     // Name matches what we sent
     assert_eq!(body["name"], "alice");
@@ -208,8 +245,17 @@ async fn test_add_client_duplicate_returns_409() {
     // Second creation with same name — open a new connection
     let mut sender2 = connect(&sock).await;
     let (s2, body) = send(&mut sender2, Method::POST, "/api/v1/clients", Some(payload)).await;
-    assert_eq!(s2, StatusCode::CONFLICT, "duplicate name must return 409: {:?}", body);
-    assert!(body["error"].is_string(), "error field expected: {:?}", body);
+    assert_eq!(
+        s2,
+        StatusCode::CONFLICT,
+        "duplicate name must return 409: {:?}",
+        body
+    );
+    assert!(
+        body["error"].is_string(),
+        "error field expected: {:?}",
+        body
+    );
 }
 
 /// GET /api/v1/clients/:id returns 200 with the correct client, without PSK.
@@ -221,7 +267,13 @@ async fn test_get_client_by_id() {
 
     // Create a client
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"charlie"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"charlie"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Fetch by ID
@@ -243,10 +295,20 @@ async fn test_get_client_not_found_returns_404() {
     spawn_server(db, sock.clone()).await;
 
     let mut sender = connect(&sock).await;
-    let (status, body) = send(&mut sender, Method::GET, "/api/v1/clients/nonexistent", None).await;
+    let (status, body) = send(
+        &mut sender,
+        Method::GET,
+        "/api/v1/clients/nonexistent",
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].is_string(), "error field expected: {:?}", body);
+    assert!(
+        body["error"].is_string(),
+        "error field expected: {:?}",
+        body
+    );
 }
 
 /// DELETE /api/v1/clients/:id removes the client and returns 204 No Content.
@@ -258,7 +320,13 @@ async fn test_delete_client_returns_204() {
 
     // Create client
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"dave"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"dave"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Delete
@@ -270,7 +338,11 @@ async fn test_delete_client_returns_204() {
     // Verify it's gone
     let mut sender3 = connect(&sock).await;
     let (status2, _) = send(&mut sender3, Method::GET, &path, None).await;
-    assert_eq!(status2, StatusCode::NOT_FOUND, "deleted client must return 404");
+    assert_eq!(
+        status2,
+        StatusCode::NOT_FOUND,
+        "deleted client must return 404"
+    );
 }
 
 /// DELETE /api/v1/clients/:id for a non-existent ID returns 404.
@@ -281,10 +353,20 @@ async fn test_delete_nonexistent_client_returns_404() {
     spawn_server(db, sock.clone()).await;
 
     let mut sender = connect(&sock).await;
-    let (status, body) = send(&mut sender, Method::DELETE, "/api/v1/clients/no-such-id", None).await;
+    let (status, body) = send(
+        &mut sender,
+        Method::DELETE,
+        "/api/v1/clients/no-such-id",
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].is_string(), "error field expected: {:?}", body);
+    assert!(
+        body["error"].is_string(),
+        "error field expected: {:?}",
+        body
+    );
 }
 
 /// POST /api/v1/reload returns 200 with `reloaded` boolean field.
@@ -298,7 +380,11 @@ async fn test_reload_endpoint() {
     let (status, body) = send(&mut sender, Method::POST, "/api/v1/reload", None).await;
 
     assert_eq!(status, StatusCode::OK, "reload must return 200: {:?}", body);
-    assert!(body["reloaded"].is_boolean(), "`reloaded` must be a bool: {:?}", body);
+    assert!(
+        body["reloaded"].is_boolean(),
+        "`reloaded` must be a bool: {:?}",
+        body
+    );
 }
 
 /// GET /api/v1/clients returns all clients added so far.
@@ -321,11 +407,21 @@ async fn test_list_clients_after_add() {
     let (status, body) = send(&mut sender, Method::GET, "/api/v1/clients", None).await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().expect("body must be array");
-    assert_eq!(arr.len(), 2, "expected 2 clients, got {}: {:?}", arr.len(), body);
+    assert_eq!(
+        arr.len(),
+        2,
+        "expected 2 clients, got {}: {:?}",
+        arr.len(),
+        body
+    );
 
     // PSK must not appear in any item
     for item in arr {
-        assert!(item.get("psk").is_none(), "PSK must not appear in list: {:?}", item);
+        assert!(
+            item.get("psk").is_none(),
+            "PSK must not appear in list: {:?}",
+            item
+        );
         assert!(item["id"].is_string());
         assert!(item["name"].is_string());
         assert!(item["vpn_ip"].is_string());
@@ -340,7 +436,13 @@ async fn test_client_response_has_stats() {
     spawn_server(db, sock.clone()).await;
 
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"grace"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"grace"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     let mut sender2 = connect(&sock).await;
@@ -350,9 +452,13 @@ async fn test_client_response_has_stats() {
     assert_eq!(status, StatusCode::OK);
     let stats = &body["stats"];
     assert!(stats.is_object(), "stats must be an object: {:?}", body);
-    assert!(stats["bytes_in"].is_number(),          "bytes_in: {:?}", stats);
-    assert!(stats["bytes_out"].is_number(),         "bytes_out: {:?}", stats);
-    assert!(stats["total_connections"].is_number(), "total_connections: {:?}", stats);
+    assert!(stats["bytes_in"].is_number(), "bytes_in: {:?}", stats);
+    assert!(stats["bytes_out"].is_number(), "bytes_out: {:?}", stats);
+    assert!(
+        stats["total_connections"].is_number(),
+        "total_connections: {:?}",
+        stats
+    );
 }
 
 /// Confirm the PSK field is absent even when it is stored in the DB.
@@ -364,17 +470,31 @@ async fn test_psk_never_exposed() {
     spawn_server(db, sock.clone()).await;
 
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"henry"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"henry"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Check PSK not in POST response
-    assert!(created.get("psk").is_none(), "PSK in POST response: {:?}", created);
+    assert!(
+        created.get("psk").is_none(),
+        "PSK in POST response: {:?}",
+        created
+    );
 
     // Check PSK not in GET single
     let mut s2 = connect(&sock).await;
     let path = format!("/api/v1/clients/{}", id);
     let (_, single) = send(&mut s2, Method::GET, &path, None).await;
-    assert!(single.get("psk").is_none(), "PSK in GET single: {:?}", single);
+    assert!(
+        single.get("psk").is_none(),
+        "PSK in GET single: {:?}",
+        single
+    );
 
     // Check PSK not in GET list
     let mut s3 = connect(&sock).await;
@@ -394,15 +514,30 @@ async fn test_connection_key_without_server_config_returns_503() {
     spawn_server(db, sock.clone()).await;
 
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"ivan"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"ivan"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     let mut s2 = connect(&sock).await;
     let path = format!("/api/v1/clients/{}/connection-key", id);
     let (status, body) = send(&mut s2, Method::GET, &path, None).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "expected 503: {:?}", body);
-    assert!(body["error"].is_string(), "error field expected: {:?}", body);
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503: {:?}",
+        body
+    );
+    assert!(
+        body["error"].is_string(),
+        "error field expected: {:?}",
+        body
+    );
 }
 
 /// GET /api/v1/clients/:id/connection-key returns 200 with a valid aivpn:// string
@@ -419,7 +554,13 @@ async fn test_connection_key_returns_aivpn_url() {
 
     // Create client
     let mut sender = connect(&sock).await;
-    let (_, created) = send(&mut sender, Method::POST, "/api/v1/clients", Some(r#"{"name":"judy"}"#)).await;
+    let (_, created) = send(
+        &mut sender,
+        Method::POST,
+        "/api/v1/clients",
+        Some(r#"{"name":"judy"}"#),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
     // Get connection key
@@ -428,11 +569,23 @@ async fn test_connection_key_returns_aivpn_url() {
     let (status, body) = send(&mut s2, Method::GET, &path, None).await;
 
     assert_eq!(status, StatusCode::OK, "expected 200: {:?}", body);
-    let key = body["connection_key"].as_str().expect("connection_key must be a string");
-    assert!(key.starts_with("aivpn://"), "key must start with aivpn://: {}", key);
+    let key = body["connection_key"]
+        .as_str()
+        .expect("connection_key must be a string");
+    assert!(
+        key.starts_with("aivpn://"),
+        "key must start with aivpn://: {}",
+        key
+    );
 
     // connection-key for non-existent client must return 404
     let mut s3 = connect(&sock).await;
-    let (status404, _) = send(&mut s3, Method::GET, "/api/v1/clients/no-such-id/connection-key", None).await;
+    let (status404, _) = send(
+        &mut s3,
+        Method::GET,
+        "/api/v1/clients/no-such-id/connection-key",
+        None,
+    )
+    .await;
     assert_eq!(status404, StatusCode::NOT_FOUND);
 }

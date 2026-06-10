@@ -16,9 +16,9 @@
 //! Low MSE → traffic matches the mask → healthy
 //! High MSE → traffic deviates from mask signature → DPI compromise detected
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug};
+use std::collections::HashMap;
+use tracing::{debug, info};
 
 use aivpn_common::mask::MaskProfile;
 
@@ -122,22 +122,24 @@ const FEAT_DIM: usize = 64;
 ///
 /// Memory: (64*H + H + H*64 + 64) * 4 bytes ≈ 66 KB for H=128
 pub struct BakedMaskEncoder {
-    w1: Vec<f32>,       // [hidden × FEAT_DIM] row-major
-    b1: Vec<f32>,       // [hidden]
-    w2: Vec<f32>,       // [FEAT_DIM × hidden] row-major
-    b2: Vec<f32>,       // [FEAT_DIM]
+    w1: Vec<f32>, // [hidden × FEAT_DIM] row-major
+    b1: Vec<f32>, // [hidden]
+    w2: Vec<f32>, // [FEAT_DIM × hidden] row-major
+    b2: Vec<f32>, // [FEAT_DIM]
     hidden: usize,
 }
 
 impl BakedMaskEncoder {
     /// Bake an encoder from a mask's signature vector.
     pub fn from_signature(signature: &[f32], hidden: usize) -> Self {
-        assert!(signature.len() >= FEAT_DIM, "signature must have at least {} floats", FEAT_DIM);
+        assert!(
+            signature.len() >= FEAT_DIM,
+            "signature must have at least {} floats",
+            FEAT_DIM
+        );
 
         // Deterministic seed from signature for mixing
-        let sig_bytes: Vec<u8> = signature.iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let sig_bytes: Vec<u8> = signature.iter().flat_map(|f| f.to_le_bytes()).collect();
         let seed = blake3::hash(&sig_bytes);
         let seed_bytes = seed.as_bytes();
 
@@ -167,7 +169,13 @@ impl BakedMaskEncoder {
             b2[j] = signature[j] * 0.01;
         }
 
-        Self { w1, b1, w2, b2, hidden }
+        Self {
+            w1,
+            b1,
+            w2,
+            b2,
+            hidden,
+        }
     }
 
     /// Forward pass: x → Linear → ReLU → Linear → output
@@ -242,12 +250,23 @@ pub fn encode_features(stats: &TrafficStats) -> [f32; FEAT_DIM] {
     if !stats.inter_arrivals.is_empty() {
         let n = stats.inter_arrivals.len() as f64;
         let mean = stats.inter_arrivals.iter().sum::<f64>() / n;
-        let variance = stats.inter_arrivals.iter()
+        let variance = stats
+            .inter_arrivals
+            .iter()
             .map(|&x| (x - mean).powi(2))
-            .sum::<f64>() / n;
+            .sum::<f64>()
+            / n;
         let std_dev = variance.sqrt();
-        let max_val = stats.inter_arrivals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_val = stats.inter_arrivals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = stats
+            .inter_arrivals
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_val = stats
+            .inter_arrivals
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
 
         features[16] = (mean / 100.0) as f32;
         features[17] = (std_dev / 100.0) as f32;
@@ -259,20 +278,35 @@ pub fn encode_features(stats: &TrafficStats) -> [f32; FEAT_DIM] {
         features[20] = (sorted[sorted.len() / 4] / 100.0) as f32;
         features[21] = (sorted[sorted.len() / 2] / 100.0) as f32;
         features[22] = (sorted[sorted.len() * 3 / 4] / 100.0) as f32;
-        features[23] = if mean > 0.0 { (std_dev / mean) as f32 } else { 0.0 };
+        features[23] = if mean > 0.0 {
+            (std_dev / mean) as f32
+        } else {
+            0.0
+        };
     }
 
     // Block 3 (32–47): Entropy features
     if !stats.entropy_samples.is_empty() {
         let n = stats.entropy_samples.len() as f64;
         let mean = stats.entropy_samples.iter().sum::<f64>() / n;
-        let variance = stats.entropy_samples.iter()
+        let variance = stats
+            .entropy_samples
+            .iter()
             .map(|&x| (x - mean).powi(2))
-            .sum::<f64>() / n;
+            .sum::<f64>()
+            / n;
         features[32] = (mean / 8.0) as f32;
         features[33] = (variance.sqrt() / 8.0) as f32;
-        let max_val = stats.entropy_samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_val = stats.entropy_samples.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = stats
+            .entropy_samples
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_val = stats
+            .entropy_samples
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
         features[34] = (max_val / 8.0) as f32;
         features[35] = (min_val / 8.0) as f32;
     }
@@ -284,9 +318,12 @@ pub fn encode_features(stats: &TrafficStats) -> [f32; FEAT_DIM] {
         let n = stats.packet_sizes.len() as f32;
         let mean_size: f32 = stats.packet_sizes.iter().map(|&s| s as f32).sum::<f32>() / n;
         features[50] = mean_size / 1500.0;
-        let var: f32 = stats.packet_sizes.iter()
+        let var: f32 = stats
+            .packet_sizes
+            .iter()
             .map(|&s| (s as f32 - mean_size).powi(2))
-            .sum::<f32>() / n;
+            .sum::<f32>()
+            / n;
         features[51] = var.sqrt() / 1500.0;
     }
 
@@ -314,26 +351,37 @@ impl AnomalyDetector {
     }
 
     pub fn record_metrics(&mut self, mask_id: &str, packet_loss: f64, rtt_ms: f64) {
-        let losses = self.mask_packet_loss.entry(mask_id.to_string()).or_default();
+        let losses = self
+            .mask_packet_loss
+            .entry(mask_id.to_string())
+            .or_default();
         losses.push(packet_loss);
-        if losses.len() > 100 { losses.remove(0); }
+        if losses.len() > 100 {
+            losses.remove(0);
+        }
 
         let rtts = self.mask_rtt.entry(mask_id.to_string()).or_default();
         rtts.push(rtt_ms);
-        if rtts.len() > 100 { rtts.remove(0); }
+        if rtts.len() > 100 {
+            rtts.remove(0);
+        }
     }
 
     pub fn is_anomalous(&self, mask_id: &str) -> bool {
         if let Some(losses) = self.mask_packet_loss.get(mask_id) {
             if losses.len() >= 10 {
                 let avg = losses.iter().sum::<f64>() / losses.len() as f64;
-                if avg > self.baseline_loss * 5.0 { return true; }
+                if avg > self.baseline_loss * 5.0 {
+                    return true;
+                }
             }
         }
         if let Some(rtts) = self.mask_rtt.get(mask_id) {
             if rtts.len() >= 10 {
                 let avg = rtts.iter().sum::<f64>() / rtts.len() as f64;
-                if avg > self.baseline_rtt * 3.0 { return true; }
+                if avg > self.baseline_rtt * 3.0 {
+                    return true;
+                }
             }
         }
         false
@@ -408,7 +456,8 @@ impl NeuralResonanceModule {
         info!(
             "Baked Mask Encoder ready (hidden={}, ~{}KB per mask)",
             self.config.hidden_size,
-            (FEAT_DIM * self.config.hidden_size * 2 + self.config.hidden_size + FEAT_DIM) * 4 / 1024
+            (FEAT_DIM * self.config.hidden_size * 2 + self.config.hidden_size + FEAT_DIM) * 4
+                / 1024
         );
         Ok(())
     }
@@ -418,16 +467,17 @@ impl NeuralResonanceModule {
         if mask.signature_vector.len() < FEAT_DIM {
             return Err(format!(
                 "Mask '{}' signature_vector too short: {} < {}",
-                mask.mask_id, mask.signature_vector.len(), FEAT_DIM
+                mask.mask_id,
+                mask.signature_vector.len(),
+                FEAT_DIM
             ));
         }
-        let encoder = BakedMaskEncoder::from_signature(
-            &mask.signature_vector,
-            self.config.hidden_size,
-        );
+        let encoder =
+            BakedMaskEncoder::from_signature(&mask.signature_vector, self.config.hidden_size);
         debug!(
             "Baked encoder for mask '{}' ({} bytes)",
-            mask.mask_id, encoder.memory_bytes()
+            mask.mask_id,
+            encoder.memory_bytes()
         );
         self.encoders.insert(mask.mask_id.clone(), encoder);
         Ok(())
@@ -482,13 +532,18 @@ impl NeuralResonanceModule {
             ResonanceStatus::Healthy
         };
 
-        Ok(ResonanceResult { mse, status, message: None })
+        Ok(ResonanceResult {
+            mse,
+            status,
+            message: None,
+        })
     }
 
     /// Record telemetry for anomaly detection
     pub fn record_telemetry(&mut self, mask_id: &str, packet_loss: f64, rtt_ms: f64) {
         if self.config.enable_anomaly_detection {
-            self.anomaly_detector.record_metrics(mask_id, packet_loss, rtt_ms);
+            self.anomaly_detector
+                .record_metrics(mask_id, packet_loss, rtt_ms);
         }
     }
 
@@ -499,7 +554,10 @@ impl NeuralResonanceModule {
 
     /// Get or create session stats
     pub fn get_or_create_stats(&self, session_id: [u8; 16]) -> TrafficStats {
-        self.session_stats.entry(session_id).or_insert_with(TrafficStats::new).clone()
+        self.session_stats
+            .entry(session_id)
+            .or_insert_with(TrafficStats::new)
+            .clone()
     }
 
     /// Cleanup old session stats

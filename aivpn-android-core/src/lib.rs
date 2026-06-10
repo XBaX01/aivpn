@@ -9,10 +9,10 @@
 
 mod android_tunnel;
 
+use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 use android_tunnel::{
     get_active_download_bytes, get_active_upload_bytes, run_tunnel_android, stop_active_tunnel,
 };
-use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jint, jlong, jstring};
@@ -58,7 +58,12 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
             arr.copy_from_slice(&b);
             arr
         }
-        Ok(b) => return make_str(&mut env, &format!("server_key must be 32 bytes, got {}", b.len())),
+        Ok(b) => {
+            return make_str(
+                &mut env,
+                &format!("server_key must be 32 bytes, got {}", b.len()),
+            )
+        }
         Err(e) => return make_str(&mut env, &format!("bad server_key: {e}")),
     };
 
@@ -127,10 +132,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
 // ──────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopTunnel(
-    _env: JNIEnv,
-    _class: JClass,
-) {
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopTunnel(_env: JNIEnv, _class: JClass) {
     stop_active_tunnel();
 }
 

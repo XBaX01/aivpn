@@ -16,8 +16,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use hyper_util::rt::TokioIo;
+use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tower::util::ServiceExt;
 
@@ -77,7 +77,9 @@ struct ErrorResponse {
 }
 
 fn err(msg: impl ToString) -> Json<ErrorResponse> {
-    Json(ErrorResponse { error: msg.to_string() })
+    Json(ErrorResponse {
+        error: msg.to_string(),
+    })
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -90,7 +92,12 @@ async fn get_status(State(state): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn list_clients(State(state): State<ApiState>) -> impl IntoResponse {
-    let clients: Vec<ClientResponse> = state.db.list_clients().into_iter().map(Into::into).collect();
+    let clients: Vec<ClientResponse> = state
+        .db
+        .list_clients()
+        .into_iter()
+        .map(Into::into)
+        .collect();
     Json(clients)
 }
 
@@ -107,20 +114,18 @@ async fn add_client(
     }
 }
 
-async fn get_client(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn get_client(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
     match state.db.find_by_id(&id) {
         Some(client) => Json(ClientResponse::from(client)).into_response(),
-        None => (StatusCode::NOT_FOUND, err(format!("Client '{}' not found", id))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            err(format!("Client '{}' not found", id)),
+        )
+            .into_response(),
     }
 }
 
-async fn remove_client(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn remove_client(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
     let db = state.db.clone();
     match tokio::task::spawn_blocking(move || db.remove_client(&id)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -143,15 +148,24 @@ async fn get_connection_key(
 ) -> impl IntoResponse {
     let (pub_key, server_addr) = match (&state.server_pub_key, &state.server_addr) {
         (Some(k), Some(a)) => (k, a.as_str()),
-        _ => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            err("--server-ip or --key-file not configured; cannot build connection key"),
-        ).into_response(),
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                err("--server-ip or --key-file not configured; cannot build connection key"),
+            )
+                .into_response()
+        }
     };
 
     let client = match state.db.find_by_id(&id) {
         Some(c) => c,
-        None => return (StatusCode::NOT_FOUND, err(format!("Client '{}' not found", id))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                err(format!("Client '{}' not found", id)),
+            )
+                .into_response()
+        }
     };
 
     let client_net_cfg = match state.db.network_config().client_config(client.vpn_ip) {
@@ -184,7 +198,10 @@ fn router(state: ApiState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/clients", get(list_clients).post(add_client))
         .route("/api/v1/clients/:id", get(get_client).delete(remove_client))
-        .route("/api/v1/clients/:id/connection-key", get(get_connection_key))
+        .route(
+            "/api/v1/clients/:id/connection-key",
+            get(get_connection_key),
+        )
         .route("/api/v1/reload", post(reload))
         .with_state(state)
 }
@@ -212,14 +229,22 @@ pub async fn serve(
     // Remove stale socket from a previous run
     if let Err(e) = std::fs::remove_file(&path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("Management API: could not remove existing socket '{}': {}", path, e);
+            tracing::warn!(
+                "Management API: could not remove existing socket '{}': {}",
+                path,
+                e
+            );
         }
     }
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&path).parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("Management API: cannot create socket directory '{}': {}", parent.display(), e);
+            tracing::warn!(
+                "Management API: cannot create socket directory '{}': {}",
+                parent.display(),
+                e
+            );
             return;
         }
     }
@@ -233,7 +258,9 @@ pub async fn serve(
     };
 
     // Restrict socket to owner only (prevents other local users from calling the API)
-    if let Err(e) = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)) {
+    if let Err(e) =
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+    {
         tracing::warn!("Management API: failed to set socket permissions: {}", e);
     }
 

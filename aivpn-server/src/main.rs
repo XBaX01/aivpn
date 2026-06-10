@@ -1,19 +1,19 @@
 //! AIVPN Server Binary
 
-use aivpn_server::{AivpnServer, ServerArgs, ClientDatabase};
-use aivpn_server::gateway::GatewayConfig;
-use aivpn_server::neural::NeuralConfig;
 use aivpn_common::crypto;
 use aivpn_common::mask::MaskProfile;
 use aivpn_common::network_config::{
-    netmask_to_prefix_len, ClientNetworkConfig, DEFAULT_VPN_MTU, VpnNetworkConfig,
+    netmask_to_prefix_len, ClientNetworkConfig, VpnNetworkConfig, DEFAULT_VPN_MTU,
 };
-use tracing::{info, error};
+use aivpn_server::gateway::GatewayConfig;
+use aivpn_server::neural::NeuralConfig;
+use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
 use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::{error, info};
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/aivpn/server.json";
 const LOCAL_SERVER_CONFIG_PATH: &str = "config/server.json";
@@ -80,7 +80,7 @@ async fn main() {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("aivpn_server=debug".parse().unwrap())
-                .add_directive("aivpn_common=debug".parse().unwrap())
+                .add_directive("aivpn_common=debug".parse().unwrap()),
         )
         .init();
 
@@ -97,11 +97,10 @@ async fn main() {
 
     // Load server private key from file if provided (HIGH-11)
     let server_private_key = if let Some(ref key_file) = args.key_file {
-        let key_data = std::fs::read(key_file)
-            .unwrap_or_else(|e| {
-                error!("Failed to read key file '{}': {}", key_file, e);
-                std::process::exit(1);
-            });
+        let key_data = std::fs::read(key_file).unwrap_or_else(|e| {
+            error!("Failed to read key file '{}': {}", key_file, e);
+            std::process::exit(1);
+        });
         if key_data.len() != 32 {
             error!("Key file must be exactly 32 bytes, got {}", key_data.len());
             std::process::exit(1);
@@ -111,7 +110,13 @@ async fn main() {
         info!("Loaded server key from file");
         let kp = crypto::KeyPair::from_private_key(key);
         let pub_bytes = kp.public_key_bytes();
-        info!("Server public key (hex): {}", pub_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        info!(
+            "Server public key (hex): {}",
+            pub_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
         key
     } else {
         info!("No --key-file provided, server key will be ephemeral");
@@ -119,10 +124,18 @@ async fn main() {
     };
 
     // Generate random TUN name if not specified (MED-1: avoids fingerprinting)
-    let tun_name = args.tun_name.clone().or_else(|| file_config.as_ref().and_then(|config| config.tun_name.clone())).unwrap_or_else(|| {
-        use rand::Rng;
-        format!("tun{:04x}", rand::thread_rng().gen::<u16>())
-    });
+    let tun_name = args
+        .tun_name
+        .clone()
+        .or_else(|| {
+            file_config
+                .as_ref()
+                .and_then(|config| config.tun_name.clone())
+        })
+        .unwrap_or_else(|| {
+            use rand::Rng;
+            format!("tun{:04x}", rand::thread_rng().gen::<u16>())
+        });
 
     let listen_addr = resolve_listen_addr(&args, file_config.as_ref());
 
@@ -142,7 +155,10 @@ async fn main() {
         if ip.parse::<SocketAddr>().is_ok() {
             ip.clone()
         } else {
-            let port = listen_addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(443);
+            let port = listen_addr
+                .parse::<SocketAddr>()
+                .map(|a| a.port())
+                .unwrap_or(443);
             format!("{}:{}", ip, port)
         }
     });
@@ -174,7 +190,13 @@ async fn main() {
             let db = mgmt_db.clone();
             let socket = mgmt_socket.clone();
             let handle = tokio::spawn(async move {
-                aivpn_server::management_api::serve(Some(db), socket, mgmt_pub_key, mgmt_server_addr).await;
+                aivpn_server::management_api::serve(
+                    Some(db),
+                    socket,
+                    mgmt_pub_key,
+                    mgmt_server_addr,
+                )
+                .await;
             });
             // Keep handle alive; log if the task exits unexpectedly
             tokio::spawn(async move {
@@ -225,7 +247,9 @@ async fn main() {
 fn load_server_public_key(args: &ServerArgs) -> Option<[u8; 32]> {
     args.key_file.as_ref().and_then(|key_file| {
         let key_data = std::fs::read(key_file).ok()?;
-        if key_data.len() != 32 { return None; }
+        if key_data.len() != 32 {
+            return None;
+        }
         let mut key = [0u8; 32];
         key.copy_from_slice(&key_data);
         let kp = crypto::KeyPair::from_private_key(key);
@@ -287,7 +311,13 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
 
             if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
+                let conn_key = build_connection_key(
+                    args,
+                    server_ip,
+                    &pub_b64,
+                    &psk_b64,
+                    client_network_config,
+                );
                 println!("══ Connection Key (paste into app) ══");
                 println!();
                 println!("{}", conn_key);
@@ -311,21 +341,20 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
 
 fn handle_remove_client(db: &ClientDatabase, id: &str) {
     // Allow removal by name too
-    let actual_id = db.list_clients()
+    let actual_id = db
+        .list_clients()
         .iter()
         .find(|c| c.id == id || c.name == id)
         .map(|c| c.id.clone());
 
     match actual_id {
-        Some(cid) => {
-            match db.remove_client(&cid) {
-                Ok(()) => println!("✅ Client '{}' removed.", id),
-                Err(e) => {
-                    eprintln!("❌ Failed to remove: {}", e);
-                    std::process::exit(1);
-                }
+        Some(cid) => match db.remove_client(&cid) {
+            Ok(()) => println!("✅ Client '{}' removed.", id),
+            Err(e) => {
+                eprintln!("❌ Failed to remove: {}", e);
+                std::process::exit(1);
             }
-        }
+        },
         None => {
             eprintln!("❌ Client '{}' not found.", id);
             std::process::exit(1);
@@ -338,31 +367,40 @@ fn handle_list_clients(db: &ClientDatabase) {
     if clients.is_empty() {
         println!("No registered clients.");
         println!();
-        println!("Add a client: aivpn-server --add-client \"Phone\" --key-file /etc/aivpn/server.key");
+        println!(
+            "Add a client: aivpn-server --add-client \"Phone\" --key-file /etc/aivpn/server.key"
+        );
         return;
     }
 
-    println!("{:<18} {:<20} {:<12} {:<8} {:<12} {:<12} {}",
-        "ID", "NAME", "VPN IP", "STATUS", "UPLOAD", "DOWNLOAD", "LAST SEEN");
+    println!(
+        "{:<18} {:<20} {:<12} {:<8} {:<12} {:<12} {}",
+        "ID", "NAME", "VPN IP", "STATUS", "UPLOAD", "DOWNLOAD", "LAST SEEN"
+    );
     println!("{}", "-".repeat(100));
 
     for client in &clients {
         let status = if client.enabled { "active" } else { "disabled" };
         let upload = format_bytes(client.stats.bytes_out);
         let download = format_bytes(client.stats.bytes_in);
-        let last_seen = client.stats.last_connected
+        let last_seen = client
+            .stats
+            .last_connected
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "never".to_string());
 
-        println!("{:<18} {:<20} {:<12} {:<8} {:<12} {:<12} {}",
-            client.id, client.name, client.vpn_ip, status, upload, download, last_seen);
+        println!(
+            "{:<18} {:<20} {:<12} {:<8} {:<12} {:<12} {}",
+            client.id, client.name, client.vpn_ip, status, upload, download, last_seen
+        );
     }
     println!();
     println!("Total: {} client(s)", clients.len());
 }
 
 fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
-    let client = db.list_clients()
+    let client = db
+        .list_clients()
         .into_iter()
         .find(|c| c.id == id || c.name == id);
 
@@ -375,21 +413,37 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
 
             println!("Client: {} ({})", client.name, client.id);
             println!("  VPN IP:      {}", client.vpn_ip);
-            println!("  Status:      {}", if client.enabled { "active" } else { "disabled" });
-            println!("  Created:     {}", client.created_at.format("%Y-%m-%d %H:%M"));
+            println!(
+                "  Status:      {}",
+                if client.enabled { "active" } else { "disabled" }
+            );
+            println!(
+                "  Created:     {}",
+                client.created_at.format("%Y-%m-%d %H:%M")
+            );
             println!("  Connections: {}", client.stats.total_connections);
             println!("  Upload:      {}", format_bytes(client.stats.bytes_out));
             println!("  Download:    {}", format_bytes(client.stats.bytes_in));
-            println!("  Last seen:   {}",
-                client.stats.last_connected
+            println!(
+                "  Last seen:   {}",
+                client
+                    .stats
+                    .last_connected
                     .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_else(|| "never".to_string()));
+                    .unwrap_or_else(|| "never".to_string())
+            );
 
             if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 match client_network_config {
                     Ok(client_network_config) => {
                         let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                        let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
+                        let conn_key = build_connection_key(
+                            args,
+                            server_ip,
+                            &pub_b64,
+                            &psk_b64,
+                            client_network_config,
+                        );
                         println!();
                         println!("══ Connection Key ══");
                         println!();
@@ -399,7 +453,10 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
                     Err(err) => {
                         eprintln!("⚠  Cannot generate connection key for this client under the current VPN subnet: {}", err);
                         eprintln!("   Client VPN IP: {}", client.vpn_ip);
-                        eprintln!("   Current server subnet: {}", db.network_config().cidr_string());
+                        eprintln!(
+                            "   Current server subnet: {}",
+                            db.network_config().cidr_string()
+                        );
                         eprintln!("   Reissue this client in the active subnet to get a new key.");
                     }
                 }
@@ -450,7 +507,9 @@ fn resolve_config_path(args: &ServerArgs) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-fn resolve_network_config(file_config: Option<&ServerFileConfig>) -> aivpn_common::error::Result<VpnNetworkConfig> {
+fn resolve_network_config(
+    file_config: Option<&ServerFileConfig>,
+) -> aivpn_common::error::Result<VpnNetworkConfig> {
     let config = if let Some(file_config) = file_config {
         if let Some(network_config) = file_config.network_config {
             network_config
@@ -458,7 +517,9 @@ fn resolve_network_config(file_config: Option<&ServerFileConfig>) -> aivpn_commo
             VpnNetworkConfig {
                 server_vpn_ip: file_config.tun_addr.unwrap_or(Ipv4Addr::new(10, 0, 0, 1)),
                 prefix_len: netmask_to_prefix_len(
-                    file_config.tun_netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
+                    file_config
+                        .tun_netmask
+                        .unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
                 )?,
                 mtu: DEFAULT_VPN_MTU,
             }
@@ -481,37 +542,41 @@ fn resolve_listen_addr(args: &ServerArgs, file_config: Option<&ServerFileConfig>
     }
 }
 
-fn load_bootstrap_masks(file_config: Option<&ServerFileConfig>) -> Result<Vec<MaskProfile>, String> {
+fn load_bootstrap_masks(
+    file_config: Option<&ServerFileConfig>,
+) -> Result<Vec<MaskProfile>, String> {
     let Some(files) = file_config.and_then(|config| config.bootstrap_mask_files.clone()) else {
         return Ok(Vec::new());
     };
 
     let mut masks = Vec::new();
     for file in files {
-        let content = std::fs::read_to_string(&file)
-            .map_err(|e| format!("{}: {}", file, e))?;
-        
+        let content = std::fs::read_to_string(&file).map_err(|e| format!("{}: {}", file, e))?;
+
         // Trim whitespace to check if file is empty
         let trimmed = content.trim();
         if trimmed.is_empty() {
             // Skip empty files silently
             continue;
         }
-        
+
         // Try to parse as a single MaskProfile first
         if let Ok(mask) = serde_json::from_str::<MaskProfile>(trimmed) {
             masks.push(mask);
             continue;
         }
-        
+
         // Try to parse as an array of MaskProfile
         if let Ok(arr) = serde_json::from_str::<Vec<MaskProfile>>(trimmed) {
             masks.extend(arr);
             continue;
         }
-        
+
         // If both fail, return an error
-        return Err(format!("{}: invalid JSON format, expected MaskProfile object or array of MaskProfile objects", file));
+        return Err(format!(
+            "{}: invalid JSON format, expected MaskProfile object or array of MaskProfile objects",
+            file
+        ));
     }
     Ok(masks)
 }
@@ -558,13 +623,19 @@ mod tests {
     #[test]
     fn build_connection_server_addr_keeps_explicit_port() {
         let args = test_args("0.0.0.0:443");
-        assert_eq!(build_connection_server_addr(&args, "203.0.113.10:8443"), "203.0.113.10:8443");
+        assert_eq!(
+            build_connection_server_addr(&args, "203.0.113.10:8443"),
+            "203.0.113.10:8443"
+        );
     }
 
     #[test]
     fn build_connection_server_addr_adds_listen_port_once() {
         let args = test_args("0.0.0.0:443");
-        assert_eq!(build_connection_server_addr(&args, "203.0.113.10"), "203.0.113.10:443");
+        assert_eq!(
+            build_connection_server_addr(&args, "203.0.113.10"),
+            "203.0.113.10:443"
+        );
     }
 
     #[test]
@@ -621,10 +692,13 @@ mod tests {
         use std::io::Write;
         let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let empty_file = temp_dir.join("empty.json");
-        std::fs::File::create(&empty_file).unwrap().write_all(b"").unwrap();
-        
+        std::fs::File::create(&empty_file)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+
         let file_config = ServerFileConfig {
             listen_addr: None,
             tun_name: None,
@@ -636,11 +710,11 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
         };
-        
+
         let result = load_bootstrap_masks(Some(&file_config));
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
@@ -649,10 +723,13 @@ mod tests {
         use std::io::Write;
         let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let array_file = temp_dir.join("array.json");
-        std::fs::File::create(&array_file).unwrap().write_all(b"[]").unwrap();
-        
+        std::fs::File::create(&array_file)
+            .unwrap()
+            .write_all(b"[]")
+            .unwrap();
+
         let file_config = ServerFileConfig {
             listen_addr: None,
             tun_name: None,
@@ -664,11 +741,11 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
         };
-        
+
         let result = load_bootstrap_masks(Some(&file_config));
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
@@ -677,7 +754,7 @@ mod tests {
         use std::io::Write;
         let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let single_file = temp_dir.join("single.json");
         // Use a real mask profile from mask-assets (simplified but valid)
         let mask_json = r#"{
@@ -716,8 +793,11 @@ mod tests {
                 ]
             }
         }"#;
-        std::fs::File::create(&single_file).unwrap().write_all(mask_json.as_bytes()).unwrap();
-        
+        std::fs::File::create(&single_file)
+            .unwrap()
+            .write_all(mask_json.as_bytes())
+            .unwrap();
+
         let file_config = ServerFileConfig {
             listen_addr: None,
             tun_name: None,
@@ -729,13 +809,13 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
         };
-        
+
         let result = load_bootstrap_masks(Some(&file_config));
         assert!(result.is_ok());
         let masks = result.unwrap();
         assert_eq!(masks.len(), 1);
         assert_eq!(masks[0].mask_id, "test_mask");
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
@@ -744,7 +824,7 @@ mod tests {
         use std::io::Write;
         let temp_dir = std::env::temp_dir().join("aivpn_test_bootstrap");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let array_file = temp_dir.join("array.json");
         // Use a real mask profile from mask-assets (simplified but valid)
         let mask_json = r#"[
@@ -811,8 +891,11 @@ mod tests {
                 "header_spec": null
             }
         ]"#;
-        std::fs::File::create(&array_file).unwrap().write_all(mask_json.as_bytes()).unwrap();
-        
+        std::fs::File::create(&array_file)
+            .unwrap()
+            .write_all(mask_json.as_bytes())
+            .unwrap();
+
         let file_config = ServerFileConfig {
             listen_addr: None,
             tun_name: None,
@@ -824,14 +907,14 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
         };
-        
+
         let result = load_bootstrap_masks(Some(&file_config));
         assert!(result.is_ok());
         let masks = result.unwrap();
         assert_eq!(masks.len(), 2);
         assert_eq!(masks[0].mask_id, "mask1");
         assert_eq!(masks[1].mask_id, "mask2");
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

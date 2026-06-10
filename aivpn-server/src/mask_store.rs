@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use aivpn_common::mask::MaskProfile;
 use aivpn_common::error::Result;
+use aivpn_common::mask::MaskProfile;
 
 use crate::gateway::MaskCatalog;
 
@@ -68,7 +68,10 @@ impl MaskStore {
     /// Add a new mask entry
     pub fn add_mask(&self, entry: MaskEntry) -> Result<()> {
         let mask_id = entry.stats.mask_id.clone();
-        info!("Storing mask '{}' (confidence: {:.2})", mask_id, entry.stats.confidence);
+        info!(
+            "Storing mask '{}' (confidence: {:.2})",
+            mask_id, entry.stats.confidence
+        );
 
         // Save to disk
         self.save_to_disk(&mask_id, &entry);
@@ -247,7 +250,11 @@ impl MaskStore {
                         last_used: None,
                     });
 
-                info!("Loaded mask '{}' from disk (success: {:.1}%)", mask_id, stats.success_rate * 100.0);
+                info!(
+                    "Loaded mask '{}' from disk (success: {:.1}%)",
+                    mask_id,
+                    stats.success_rate * 100.0
+                );
 
                 // Register only active masks in the live catalog
                 if stats.is_active {

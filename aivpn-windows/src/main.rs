@@ -17,18 +17,18 @@
 //! calls Win32 ShowWindow directly to wake up eframe, and communicates
 //! the action type via an atomic flag.
 
-mod vpn_manager;
 mod key_storage;
 mod localization;
 mod tray;
 mod ui;
+mod vpn_manager;
 
 use eframe::egui;
 use key_storage::KeyStorage;
 use localization::Lang;
-use vpn_manager::VpnManager;
 use std::fs;
 use std::path::PathBuf;
+use vpn_manager::VpnManager;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const WINDOW_WIDTH: f32 = 360.0;
@@ -107,7 +107,10 @@ fn main() -> eframe::Result<()> {
                                 return Ok(adapter.clone());
                             }
                         }
-                        adapters.first().cloned().ok_or_else(|| "No adapters found".to_string())
+                        adapters
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| "No adapters found".to_string())
                     },
                 )),
                 ..Default::default()
@@ -130,7 +133,8 @@ fn main() -> eframe::Result<()> {
                 tray_icon_h,
                 localization::t(lang, "show"),
                 localization::t(lang, "quit"),
-            ).ok();
+            )
+            .ok();
 
             if tray_mgr.is_none() {
                 eprintln!("Warning: failed to create tray icon");

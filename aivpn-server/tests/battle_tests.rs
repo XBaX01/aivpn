@@ -3,23 +3,21 @@
 //! Tests session management, gateway packet handling,
 //! and full client→server crypto pipeline simulation
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::collections::HashSet;
 
 use aivpn_common::crypto::{
-    self, KeyPair, SessionKeys, TAG_SIZE, NONCE_SIZE, CHACHA20_KEY_SIZE,
-    X25519_PUBLIC_KEY_SIZE, DEFAULT_WINDOW_MS,
-    encrypt_payload, decrypt_payload, generate_resonance_tag,
-    derive_session_keys, compute_time_window, current_timestamp_ms,
+    self, compute_time_window, current_timestamp_ms, decrypt_payload, derive_session_keys,
+    encrypt_payload, generate_resonance_tag, KeyPair, SessionKeys, CHACHA20_KEY_SIZE,
+    DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE, X25519_PUBLIC_KEY_SIZE,
 };
-use aivpn_common::protocol::{InnerHeader, InnerType, ControlPayload};
 use aivpn_common::mask::preset_masks::webrtc_zoom_v3;
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 use subtle::ConstantTimeEq;
 
 use aivpn_server::session::{
-    SessionManager, Session, SessionState, u256,
-    TAG_WINDOW_SIZE, MAX_SESSIONS, IDLE_TIMEOUT,
+    u256, Session, SessionManager, SessionState, IDLE_TIMEOUT, MAX_SESSIONS, TAG_WINDOW_SIZE,
 };
 
 fn make_session_manager() -> (SessionManager, KeyPair) {
@@ -105,7 +103,9 @@ fn battle_session_creation() {
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
 
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(addr, client_kp.public_key_bytes(), None, None)
+        .unwrap();
     let sess = session.lock();
     assert_eq!(sess.state, SessionState::Active);
     assert_eq!(sess.client_addr, addr);
@@ -124,7 +124,8 @@ fn battle_session_count() {
 
     for i in 0..10 {
         let kp = KeyPair::generate();
-        mgr.create_session(make_unique_addr(i), kp.public_key_bytes(), None, None).unwrap();
+        mgr.create_session(make_unique_addr(i), kp.public_key_bytes(), None, None)
+            .unwrap();
     }
     assert_eq!(mgr.session_count(), 10);
 }
@@ -138,7 +139,9 @@ fn battle_session_tag_lookup() {
 
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(addr, client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Get one of the expected tags
     let tag = {
@@ -160,10 +163,14 @@ fn battle_session_tag_validation() {
 
     let client_kp = KeyPair::generate();
     let addr = make_addr(10000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(addr, client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Client derives same keys
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
     // Generate tag as client would
@@ -187,9 +194,13 @@ fn battle_session_anti_replay() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let tag = generate_resonance_tag(&client_keys.tag_secret, 0, tw);
@@ -221,7 +232,9 @@ fn battle_session_removal() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     let session_id = session.lock().session_id;
     assert!(mgr.get_session(&session_id).is_some());
@@ -239,7 +252,9 @@ fn battle_session_remove_clears_tags() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Capture a tag before removal
     let tag = {
@@ -268,9 +283,13 @@ fn battle_session_multiple_clients() {
     for i in 0..50 {
         let client_kp = KeyPair::generate();
         let addr = make_unique_addr(i);
-        let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
+        let session = mgr
+            .create_session(addr, client_kp.public_key_bytes(), None, None)
+            .unwrap();
 
-        let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+        let client_shared = client_kp
+            .compute_shared(&server_kp.public_key_bytes())
+            .unwrap();
         let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
         sessions.push(session);
@@ -296,7 +315,9 @@ fn battle_session_send_counter() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // next_send_nonce should increment counter
     let mut sess = session.lock();
@@ -318,7 +339,9 @@ fn battle_session_seq_wrapping() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     let mut sess = session.lock();
     // Set seq near u32 max
@@ -339,7 +362,9 @@ fn battle_session_idle_detection() {
     let mgr = SessionManager::new(server_kp, signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Freshly created session is not idle
     assert!(!session.lock().is_idle());
@@ -362,19 +387,19 @@ fn battle_full_pipeline_data_packet() {
 
     // 2. Client generates ephemeral keypair and derives keys
     let client_kp = KeyPair::generate();
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
     // 3. Server creates session (normally triggered by CRIT-4 session establishment)
-    let _session = mgr.create_session(
-        make_addr(10000),
-        client_kp.public_key_bytes(),
-        None,
-        None,
-    ).unwrap();
+    let _session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // 4. Client builds a data packet (simulating mimicry.build_packet)
-    let ip_payload = b"\x45\x00\x00\x1c\x00\x01\x00\x00\x40\x11\x00\x00\x0a\x00\x00\x02\x08\x08\x08\x08"; // Fake IPv4
+    let ip_payload =
+        b"\x45\x00\x00\x1c\x00\x01\x00\x00\x40\x11\x00\x00\x0a\x00\x00\x02\x08\x08\x08\x08"; // Fake IPv4
     let inner_header = InnerHeader {
         inner_type: InnerType::Data,
         seq_num: 0,
@@ -451,10 +476,14 @@ fn battle_full_pipeline_100_packets() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask.clone());
 
     let client_kp = KeyPair::generate();
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
 
     for counter in 0u64..100 {
@@ -493,7 +522,11 @@ fn battle_full_pipeline_100_packets() {
         let hdr = InnerHeader::decode(data).unwrap();
         assert_eq!(hdr.inner_type, InnerType::Data);
         let recovered = &data[4..];
-        assert_eq!(recovered, payload.as_bytes(), "Counter {counter}: payload mismatch");
+        assert_eq!(
+            recovered,
+            payload.as_bytes(),
+            "Counter {counter}: payload mismatch"
+        );
 
         // Mark received
         let mut sess = session.lock();
@@ -510,18 +543,26 @@ fn battle_full_pipeline_control_messages() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask.clone());
 
     let client_kp = KeyPair::generate();
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
 
-    let _session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let _session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Test each control message type
     let controls = vec![
         ControlPayload::Keepalive,
         ControlPayload::Shutdown { reason: 1 },
         ControlPayload::TelemetryRequest { metric_flags: 0xFF },
-        ControlPayload::TimeSync { server_ts_ms: current_timestamp_ms() },
-        ControlPayload::KeyRotate { new_eph_pub: [0xAA; 32] },
+        ControlPayload::TimeSync {
+            server_ts_ms: current_timestamp_ms(),
+        },
+        ControlPayload::KeyRotate {
+            new_eph_pub: [0xAA; 32],
+        },
     ];
 
     for (i, control) in controls.iter().enumerate() {
@@ -555,19 +596,28 @@ fn battle_full_pipeline_control_messages() {
         let ctrl = ControlPayload::decode(&data[4..]).unwrap();
         // Verify type matches
         match (control, &ctrl) {
-            (ControlPayload::Keepalive, ControlPayload::Keepalive) => {},
+            (ControlPayload::Keepalive, ControlPayload::Keepalive) => {}
             (ControlPayload::Shutdown { reason: r1 }, ControlPayload::Shutdown { reason: r2 }) => {
                 assert_eq!(r1, r2);
-            },
-            (ControlPayload::TelemetryRequest { metric_flags: f1 }, ControlPayload::TelemetryRequest { metric_flags: f2 }) => {
+            }
+            (
+                ControlPayload::TelemetryRequest { metric_flags: f1 },
+                ControlPayload::TelemetryRequest { metric_flags: f2 },
+            ) => {
                 assert_eq!(f1, f2);
-            },
-            (ControlPayload::TimeSync { server_ts_ms: t1 }, ControlPayload::TimeSync { server_ts_ms: t2 }) => {
+            }
+            (
+                ControlPayload::TimeSync { server_ts_ms: t1 },
+                ControlPayload::TimeSync { server_ts_ms: t2 },
+            ) => {
                 assert_eq!(t1, t2);
-            },
-            (ControlPayload::KeyRotate { new_eph_pub: k1 }, ControlPayload::KeyRotate { new_eph_pub: k2 }) => {
+            }
+            (
+                ControlPayload::KeyRotate { new_eph_pub: k1 },
+                ControlPayload::KeyRotate { new_eph_pub: k2 },
+            ) => {
                 assert_eq!(k1, k2);
-            },
+            }
             _ => panic!("Control message type mismatch at index {i}"),
         }
     }
@@ -585,14 +635,22 @@ fn battle_cross_session_isolation() {
     let client1_kp = KeyPair::generate();
     let client2_kp = KeyPair::generate();
 
-    let session1 = mgr.create_session(make_addr(10000), client1_kp.public_key_bytes(), None, None).unwrap();
-    let session2 = mgr.create_session(make_addr(10001), client2_kp.public_key_bytes(), None, None).unwrap();
+    let session1 = mgr
+        .create_session(make_addr(10000), client1_kp.public_key_bytes(), None, None)
+        .unwrap();
+    let session2 = mgr
+        .create_session(make_addr(10001), client2_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Derive keys for both
-    let shared1 = client1_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let shared1 = client1_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let keys1 = derive_session_keys(&shared1, None, &client1_kp.public_key_bytes());
 
-    let shared2 = client2_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let shared2 = client2_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let keys2 = derive_session_keys(&shared2, None, &client2_kp.public_key_bytes());
 
     // Keys must be different
@@ -631,7 +689,7 @@ fn battle_server_mask_signing() {
     let sig = mgr.sign_mask(mask_data);
 
     // Verify signature
-    use ed25519_dalek::{Verifier, Signature};
+    use ed25519_dalek::{Signature, Verifier};
     let vk = signing_key.verifying_key();
     let result = vk.verify(mask_data, &Signature::from_bytes(&sig));
     assert!(result.is_ok());
@@ -653,9 +711,18 @@ fn battle_stress_100_sessions() {
 
     for i in 0..100 {
         let client_kp = KeyPair::generate();
-        let session = mgr.create_session(make_unique_addr(i), client_kp.public_key_bytes(), None, None).unwrap();
+        let session = mgr
+            .create_session(
+                make_unique_addr(i),
+                client_kp.public_key_bytes(),
+                None,
+                None,
+            )
+            .unwrap();
 
-        let shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+        let shared = client_kp
+            .compute_shared(&server_kp.public_key_bytes())
+            .unwrap();
         let keys = derive_session_keys(&shared, None, &client_kp.public_key_bytes());
 
         // Recompute time window (test may take >5s with 100 DH computations)
@@ -683,20 +750,37 @@ fn battle_ratchet_keys_created() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     let sess = session.lock();
     // Server should have generated ephemeral key and ratcheted keys
-    assert!(sess.server_eph_pub.is_some(), "server_eph_pub must be populated");
-    assert!(sess.server_hello_signature.is_some(), "signature must be populated");
-    assert!(sess.ratcheted_keys.is_some(), "ratcheted_keys must be populated");
+    assert!(
+        sess.server_eph_pub.is_some(),
+        "server_eph_pub must be populated"
+    );
+    assert!(
+        sess.server_hello_signature.is_some(),
+        "signature must be populated"
+    );
+    assert!(
+        sess.ratcheted_keys.is_some(),
+        "ratcheted_keys must be populated"
+    );
     assert!(!sess.is_ratcheted, "Session should not be ratcheted yet");
-    assert!(!sess.ratcheted_expected_tags.is_empty(), "Ratcheted tags must be pre-computed");
+    assert!(
+        !sess.ratcheted_expected_tags.is_empty(),
+        "Ratcheted tags must be pre-computed"
+    );
 
     // Ratcheted keys must differ from initial keys
     let initial_key = sess.keys.session_key;
     let ratcheted_key = sess.ratcheted_keys.as_ref().unwrap().session_key;
-    assert_ne!(initial_key, ratcheted_key, "Ratcheted keys must differ from initial");
+    assert_ne!(
+        initial_key, ratcheted_key,
+        "Ratcheted keys must differ from initial"
+    );
 }
 
 #[test]
@@ -707,7 +791,9 @@ fn battle_ratchet_tag_validation() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Generate tag using ratcheted keys (simulating client after receiving ServerHello)
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
@@ -738,7 +824,9 @@ fn battle_complete_ratchet() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Save initial and ratcheted key material
     let (initial_key, ratcheted_key, session_id, initial_tag_secret, ratcheted_tag_secret) = {
@@ -758,43 +846,68 @@ fn battle_complete_ratchet() {
     // After ratchet: keys should be the ratcheted keys
     let sess = session.lock();
     assert!(sess.is_ratcheted, "Session must be marked as ratcheted");
-    assert_eq!(sess.keys.session_key, ratcheted_key, "Keys must switch to ratcheted");
-    assert!(sess.ratcheted_keys.is_none(), "Ratcheted keys should be consumed");
-    assert!(sess.server_eph_pub.is_none(), "Ephemeral key should be cleared");
-    assert!(sess.ratcheted_expected_tags.is_empty(), "Ratcheted tags should be moved");
+    assert_eq!(
+        sess.keys.session_key, ratcheted_key,
+        "Keys must switch to ratcheted"
+    );
+    assert!(
+        sess.ratcheted_keys.is_none(),
+        "Ratcheted keys should be consumed"
+    );
+    assert!(
+        sess.server_eph_pub.is_none(),
+        "Ephemeral key should be cleared"
+    );
+    assert!(
+        sess.ratcheted_expected_tags.is_empty(),
+        "Ratcheted tags should be moved"
+    );
 
     // Initial key tags should no longer validate
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let old_tag = generate_resonance_tag(&initial_tag_secret, 0, tw);
-    assert!(sess.validate_tag(&old_tag).is_none(), "Old tags must be invalid after ratchet");
+    assert!(
+        sess.validate_tag(&old_tag).is_none(),
+        "Old tags must be invalid after ratchet"
+    );
 
     // Ratcheted tags should validate as normal (not ratcheted anymore, they're "initial" now)
     let new_tag = generate_resonance_tag(&ratcheted_tag_secret, 0, tw);
     let result = sess.validate_tag(&new_tag);
-    assert!(result.is_some(), "Ratcheted tags must validate after ratchet");
+    assert!(
+        result.is_some(),
+        "Ratcheted tags must validate after ratchet"
+    );
     let (counter, is_ratcheted) = result.unwrap();
     assert_eq!(counter, 0);
-    assert!(!is_ratcheted, "After ratchet, tags are 'initial' (active) keys");
+    assert!(
+        !is_ratcheted,
+        "After ratchet, tags are 'initial' (active) keys"
+    );
 }
 
 #[test]
 fn battle_server_hello_roundtrip() {
     use aivpn_common::protocol::ControlPayload;
-    
+
     let server_eph_pub = [0xABu8; 32];
     let signature = [0xCDu8; 64];
-    
+
     let hello = ControlPayload::ServerHello {
         server_eph_pub,
         signature,
         network_config: None,
     };
-    
+
     let encoded = hello.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
-    
+
     match decoded {
-        ControlPayload::ServerHello { server_eph_pub: pub_key, signature: sig, network_config } => {
+        ControlPayload::ServerHello {
+            server_eph_pub: pub_key,
+            signature: sig,
+            network_config,
+        } => {
             assert_eq!(pub_key, server_eph_pub);
             assert_eq!(sig, signature);
             assert!(network_config.is_none());
@@ -807,12 +920,12 @@ fn battle_server_hello_roundtrip() {
 fn battle_eph_pub_obfuscation() {
     let original = [0x42u8; 32];
     let server_pub = [0x99u8; 32];
-    
+
     // Obfuscate
     let mut obfuscated = original;
     crypto::obfuscate_eph_pub(&mut obfuscated, &server_pub);
     assert_ne!(obfuscated, original, "Obfuscated must differ from original");
-    
+
     // Deobfuscate (same operation — XOR is self-inverse)
     crypto::obfuscate_eph_pub(&mut obfuscated, &server_pub);
     assert_eq!(obfuscated, original, "Deobfuscation must recover original");
@@ -848,7 +961,9 @@ fn battle_refresh_session_tags() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Advance counter and update tag window
     let session_id = {
@@ -866,12 +981,17 @@ fn battle_refresh_session_tags() {
     mgr.refresh_session_tags(&session_id);
 
     // New tags (counter 10+) should be findable
-    let client_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
+    let client_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
     let client_keys = derive_session_keys(&client_shared, None, &client_kp.public_key_bytes());
     let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let tag = generate_resonance_tag(&client_keys.tag_secret, 10, tw);
     let found = mgr.get_session_by_tag(&tag);
-    assert!(found.is_some(), "Tag for counter 10 must be findable after refresh");
+    assert!(
+        found.is_some(),
+        "Tag for counter 10 must be findable after refresh"
+    );
 }
 
 #[test]
@@ -883,7 +1003,9 @@ fn battle_ratchet_full_crypto_pipeline() {
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
     let client_kp = KeyPair::generate();
-    let session = mgr.create_session(make_addr(10000), client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(make_addr(10000), client_kp.public_key_bytes(), None, None)
+        .unwrap();
 
     // Client-side: derive ratcheted keys (simulating ServerHello processing)
     let (server_eph_pub, server_hello_sig, initial_session_key) = {
@@ -897,21 +1019,29 @@ fn battle_ratchet_full_crypto_pipeline() {
 
     // Verify Ed25519 signature (HIGH-6: server auth)
     {
-        use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
         let vk = VerifyingKey::from(&signing_key);
         let mut message = Vec::new();
         message.extend_from_slice(&server_eph_pub);
         message.extend_from_slice(&client_kp.public_key_bytes());
         let sig = Signature::from_bytes(&server_hello_sig);
-        vk.verify(&message, &sig).expect("Server signature must verify");
+        vk.verify(&message, &sig)
+            .expect("Server signature must verify");
     }
 
     // Client computes DH2 and ratcheted keys
     let client_dh2 = client_kp.compute_shared(&server_eph_pub).unwrap();
-    let client_initial_shared = client_kp.compute_shared(&server_kp.public_key_bytes()).unwrap();
-    let client_initial_keys = derive_session_keys(&client_initial_shared, None, &client_kp.public_key_bytes());
-    let client_ratcheted = derive_session_keys(&client_dh2, Some(&client_initial_keys.session_key), &client_kp.public_key_bytes());
+    let client_initial_shared = client_kp
+        .compute_shared(&server_kp.public_key_bytes())
+        .unwrap();
+    let client_initial_keys =
+        derive_session_keys(&client_initial_shared, None, &client_kp.public_key_bytes());
+    let client_ratcheted = derive_session_keys(
+        &client_dh2,
+        Some(&client_initial_keys.session_key),
+        &client_kp.public_key_bytes(),
+    );
 
     // Encrypt a packet with ratcheted keys (as client would)
     let payload = b"PFS-protected data";
@@ -925,18 +1055,24 @@ fn battle_ratchet_full_crypto_pipeline() {
         sess.ratcheted_keys.as_ref().unwrap().session_key
     };
     let decrypted = decrypt_payload(&server_ratcheted_key, &nonce, &ciphertext).unwrap();
-    assert_eq!(&decrypted, payload, "PFS ratcheted encryption must round-trip");
+    assert_eq!(
+        &decrypted, payload,
+        "PFS ratcheted encryption must round-trip"
+    );
 
     // Complete ratchet and verify keys match
-    assert_eq!(client_ratcheted.session_key, server_ratcheted_key, "Client and server ratcheted keys must match");
+    assert_eq!(
+        client_ratcheted.session_key, server_ratcheted_key,
+        "Client and server ratcheted keys must match"
+    );
 }
 
 // ============================================================================
 // Neural Resonance Module Tests (Patent 1 — Signal Reconstruction Resonance)
 // ============================================================================
 
-use aivpn_server::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus, ResonanceResult};
 use aivpn_server::gateway::MaskCatalog;
+use aivpn_server::neural::{NeuralConfig, NeuralResonanceModule, ResonanceResult, ResonanceStatus};
 
 #[test]
 fn test_neural_module_init() {
@@ -972,7 +1108,11 @@ fn test_neural_record_traffic() {
         module.record_traffic(session_id, 128 + i, 12.5, 7.2);
     }
     let stats = module.get_or_create_stats(session_id);
-    assert_eq!(stats.packet_sizes.len(), 50, "Must have recorded 50 packets");
+    assert_eq!(
+        stats.packet_sizes.len(),
+        50,
+        "Must have recorded 50 packets"
+    );
 }
 
 #[test]
@@ -980,8 +1120,14 @@ fn test_neural_resonance_skip_no_model() {
     let config = NeuralConfig::default();
     let module = NeuralResonanceModule::new(config).unwrap();
     let session_id = [0xCDu8; 16];
-    let result = module.check_resonance(session_id, "webrtc_zoom_v3").unwrap();
-    assert_eq!(result.status, ResonanceStatus::Skip, "Must skip when model not loaded");
+    let result = module
+        .check_resonance(session_id, "webrtc_zoom_v3")
+        .unwrap();
+    assert_eq!(
+        result.status,
+        ResonanceStatus::Skip,
+        "Must skip when model not loaded"
+    );
 }
 
 #[test]
@@ -991,10 +1137,16 @@ fn test_neural_resonance_skip_no_stats() {
     module.load_model().unwrap();
     let mask = webrtc_zoom_v3();
     module.register_mask(&mask).unwrap();
-    
+
     let session_id = [0xEFu8; 16];
-    let result = module.check_resonance(session_id, "webrtc_zoom_v3").unwrap();
-    assert_eq!(result.status, ResonanceStatus::Skip, "Must skip with no traffic stats");
+    let result = module
+        .check_resonance(session_id, "webrtc_zoom_v3")
+        .unwrap();
+    assert_eq!(
+        result.status,
+        ResonanceStatus::Skip,
+        "Must skip with no traffic stats"
+    );
 }
 
 #[test]
@@ -1004,15 +1156,21 @@ fn test_neural_resonance_check_with_data() {
     module.load_model().unwrap();
     let mask = webrtc_zoom_v3();
     module.register_mask(&mask).unwrap();
-    
+
     let session_id = [0x11u8; 16];
     // Populate with traffic data
     for i in 0..100 {
         module.record_traffic(session_id, 64 + (i % 200), 10.0 + (i as f64 * 0.1), 7.5);
     }
-    
-    let result = module.check_resonance(session_id, "webrtc_zoom_v3").unwrap();
-    assert_ne!(result.status, ResonanceStatus::Skip, "Must not skip with sufficient data");
+
+    let result = module
+        .check_resonance(session_id, "webrtc_zoom_v3")
+        .unwrap();
+    assert_ne!(
+        result.status,
+        ResonanceStatus::Skip,
+        "Must not skip with sufficient data"
+    );
     assert!(result.mse >= 0.0, "MSE must be non-negative");
 }
 
@@ -1024,7 +1182,10 @@ fn test_neural_anomaly_detector_normal() {
     for _ in 0..20 {
         module.record_telemetry("webrtc_zoom_v3", 0.005, 30.0);
     }
-    assert!(!module.is_mask_anomalous("webrtc_zoom_v3"), "Normal traffic should not be anomalous");
+    assert!(
+        !module.is_mask_anomalous("webrtc_zoom_v3"),
+        "Normal traffic should not be anomalous"
+    );
 }
 
 #[test]
@@ -1035,7 +1196,10 @@ fn test_neural_anomaly_detector_high_loss() {
     for _ in 0..20 {
         module.record_telemetry("webrtc_zoom_v3", 0.10, 30.0);
     }
-    assert!(module.is_mask_anomalous("webrtc_zoom_v3"), "10% packet loss must trigger anomaly");
+    assert!(
+        module.is_mask_anomalous("webrtc_zoom_v3"),
+        "10% packet loss must trigger anomaly"
+    );
 }
 
 #[test]
@@ -1046,7 +1210,10 @@ fn test_neural_anomaly_detector_high_rtt() {
     for _ in 0..20 {
         module.record_telemetry("quic_https_v2", 0.001, 200.0);
     }
-    assert!(module.is_mask_anomalous("quic_https_v2"), "200ms RTT must trigger anomaly");
+    assert!(
+        module.is_mask_anomalous("quic_https_v2"),
+        "200ms RTT must trigger anomaly"
+    );
 }
 
 #[test]
@@ -1058,7 +1225,10 @@ fn test_neural_cleanup_stats() {
     module.cleanup_stats(session_id);
     // After cleanup, get_or_create_stats should return empty stats
     let stats = module.get_or_create_stats(session_id);
-    assert!(stats.packet_sizes.is_empty(), "Stats must be empty after cleanup");
+    assert!(
+        stats.packet_sizes.is_empty(),
+        "Stats must be empty after cleanup"
+    );
 }
 
 // ============================================================================
@@ -1068,7 +1238,11 @@ fn test_neural_cleanup_stats() {
 #[test]
 fn test_mask_catalog_init() {
     let catalog = MaskCatalog::new();
-    assert_eq!(catalog.available_count(), 0, "Catalog must start empty (masks loaded from disk)");
+    assert_eq!(
+        catalog.available_count(),
+        0,
+        "Catalog must start empty (masks loaded from disk)"
+    );
 }
 
 #[test]
@@ -1079,7 +1253,11 @@ fn test_mask_catalog_register() {
     let mut custom_mask = webrtc_zoom_v3();
     custom_mask.mask_id = "custom_dns_tunnel_v1".to_string();
     catalog.register_mask(custom_mask);
-    assert_eq!(catalog.available_count(), 2, "Catalog must have 2 masks after registration");
+    assert_eq!(
+        catalog.available_count(),
+        2,
+        "Catalog must have 2 masks after registration"
+    );
 }
 
 #[test]
@@ -1090,11 +1268,19 @@ fn test_mask_catalog_compromised() {
     let mask2 = aivpn_common::mask::preset_masks::quic_https_v2();
     catalog.register_mask(mask2);
     catalog.mark_compromised("webrtc_zoom_v3");
-    assert_eq!(catalog.available_count(), 1, "One mask left after compromise");
+    assert_eq!(
+        catalog.available_count(),
+        1,
+        "One mask left after compromise"
+    );
     // Compromised mask should not be re-registered
     let mask = webrtc_zoom_v3();
     catalog.register_mask(mask);
-    assert_eq!(catalog.available_count(), 1, "Compromised mask must not be re-registered");
+    assert_eq!(
+        catalog.available_count(),
+        1,
+        "Compromised mask must not be re-registered"
+    );
 }
 
 #[test]
@@ -1106,7 +1292,11 @@ fn test_mask_catalog_select_fallback() {
     catalog.register_mask(mask2);
     let fallback = catalog.select_fallback("webrtc_zoom_v3");
     assert!(fallback.is_some(), "Must have a fallback mask");
-    assert_eq!(fallback.unwrap().mask_id, "quic_https_v2", "Fallback must be the other mask");
+    assert_eq!(
+        fallback.unwrap().mask_id,
+        "quic_https_v2",
+        "Fallback must be the other mask"
+    );
 }
 
 #[test]
@@ -1132,17 +1322,19 @@ fn test_session_mask_update() {
     let (mgr, _) = make_session_manager();
     let client_kp = KeyPair::generate();
     let addr = make_addr(30000);
-    let session = mgr.create_session(addr, client_kp.public_key_bytes(), None, None).unwrap();
+    let session = mgr
+        .create_session(addr, client_kp.public_key_bytes(), None, None)
+        .unwrap();
     let session_id = session.lock().session_id;
-    
+
     // Initially no mask set
     assert!(session.lock().mask.is_none());
-    
+
     // Update mask
     use aivpn_common::mask::preset_masks::quic_https_v2;
     let new_mask = quic_https_v2();
     mgr.update_session_mask(&session_id, new_mask);
-    
+
     let sess = session.lock();
     assert!(sess.mask.is_some());
     assert_eq!(sess.mask.as_ref().unwrap().mask_id, "quic_https_v2");
@@ -1175,7 +1367,7 @@ fn test_metrics_collector() {
 // Key Rotation Tests
 // ============================================================================
 
-use aivpn_server::key_rotation::{KeyRotator, KeyRotationConfig};
+use aivpn_server::key_rotation::{KeyRotationConfig, KeyRotator};
 
 #[test]
 fn test_key_rotator_init() {
@@ -1192,13 +1384,19 @@ fn test_key_rotator_needs_rotation_data() {
         enable_auto_rotation: true,
     };
     let mut rotator = KeyRotator::new(config).unwrap();
-    assert!(!rotator.needs_rotation(), "Should not need rotation initially");
-    
+    assert!(
+        !rotator.needs_rotation(),
+        "Should not need rotation initially"
+    );
+
     rotator.record_bytes(50);
     assert!(!rotator.needs_rotation(), "50 < 100 threshold");
-    
+
     rotator.record_bytes(60);
-    assert!(rotator.needs_rotation(), "110 >= 100 threshold — rotation needed");
+    assert!(
+        rotator.needs_rotation(),
+        "110 >= 100 threshold — rotation needed"
+    );
 }
 
 #[test]
@@ -1206,26 +1404,33 @@ fn test_key_rotator_rotate() {
     let config = KeyRotationConfig::default();
     let mut rotator = KeyRotator::new(config).unwrap();
     let old_pub = rotator.current_public_key();
-    
+
     let event = rotator.rotate_keys().unwrap();
     assert_eq!(event.old_eph_pub, old_pub);
     assert_ne!(event.new_eph_pub, old_pub, "New key must differ from old");
-    
+
     // Commit rotation
     rotator.commit_rotation();
-    assert_eq!(rotator.current_public_key(), event.new_eph_pub, "Current key must be the new key after commit");
+    assert_eq!(
+        rotator.current_public_key(),
+        event.new_eph_pub,
+        "Current key must be the new key after commit"
+    );
 }
 
 // ============================================================================
 // Passive Mask Distribution Tests
 // ============================================================================
 
-use aivpn_server::passive_distribution::{PassiveMaskReceiver, PassiveDistributionConfig};
+use aivpn_server::passive_distribution::{PassiveDistributionConfig, PassiveMaskReceiver};
 
 #[test]
 fn test_passive_distribution_disabled() {
     let config = PassiveDistributionConfig::default();
-    assert!(!config.enable, "Passive distribution should be disabled by default");
+    assert!(
+        !config.enable,
+        "Passive distribution should be disabled by default"
+    );
     let receiver = PassiveMaskReceiver::new(config);
     assert!(receiver.get_all_masks().is_empty());
 }
@@ -1257,5 +1462,8 @@ fn test_gateway_creation_with_neural() {
     let mut config = GatewayConfig::default();
     config.mask_dir = mask_dir;
     let gateway = Gateway::new(config);
-    assert!(gateway.is_ok(), "Gateway must create successfully with neural module");
+    assert!(
+        gateway.is_ok(),
+        "Gateway must create successfully with neural module"
+    );
 }

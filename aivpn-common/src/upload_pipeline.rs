@@ -6,13 +6,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio::time;
 use crate::client_wire::{build_inner_packet, build_random_mdh_packet, DEFAULT_MDH_LEN};
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
 use crate::protocol::{ControlPayload, InnerType};
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::time;
 
 // ──────────── Configuration ────────────
 
@@ -67,11 +67,21 @@ pub struct ZeroMdhEncryptor {
 
 impl ZeroMdhEncryptor {
     pub fn new(keys: SessionKeys, counter: u64, seq: u16) -> Self {
-        Self { keys, counter, seq, mdh_len: DEFAULT_MDH_LEN }
+        Self {
+            keys,
+            counter,
+            seq,
+            mdh_len: DEFAULT_MDH_LEN,
+        }
     }
 
     pub fn with_mdh_len(keys: SessionKeys, counter: u64, seq: u16, mdh_len: usize) -> Self {
-        Self { keys, counter, seq, mdh_len }
+        Self {
+            keys,
+            counter,
+            seq,
+            mdh_len,
+        }
     }
 }
 

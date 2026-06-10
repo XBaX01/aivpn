@@ -88,7 +88,11 @@ impl RecordingManager {
         }
     }
 
-    fn stop_inner(&self, session_id: [u8; 16], reason: RecordingStopReason) -> RecordingStopOutcome {
+    fn stop_inner(
+        &self,
+        session_id: [u8; 16],
+        reason: RecordingStopReason,
+    ) -> RecordingStopOutcome {
         let session = match self.active.remove(&session_id) {
             Some((_, session)) => session,
             None => return RecordingStopOutcome::NotFound,
