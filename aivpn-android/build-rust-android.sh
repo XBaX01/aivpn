@@ -25,6 +25,14 @@
 
 set -euo pipefail
 
+# Ensure ~/.cargo/bin is in PATH so cargo / rustup / cargo-ndk are found
+# regardless of whether the caller sourced ~/.cargo/env beforehand.
+if [[ -f "${HOME}/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    source "${HOME}/.cargo/env"
+fi
+export PATH="${HOME}/.cargo/bin:${PATH}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CRATE_DIR="${REPO_ROOT}/aivpn-android-core"
