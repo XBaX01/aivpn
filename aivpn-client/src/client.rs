@@ -37,6 +37,17 @@ use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
 
+/// RAII guard that aborts a spawned task when dropped.
+/// Used to ensure the admin IPC socket task is cancelled when run() returns,
+/// so the next reconnect iteration can bind 127.0.0.1:44301 without
+/// "Address already in use".
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn packet_mdh_len_for_mask(mask: &MaskProfile) -> usize {
     mask.header_spec
         .as_ref()
@@ -273,8 +284,11 @@ impl AivpnClient {
         let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
         self.control_tx = Some(control_tx.clone());
 
-        // Spawn local IPC listener for CLI commands
-        tokio::spawn(async move {
+        // Spawn local IPC listener for CLI commands. Stored in AbortOnDrop so the task
+        // (and its bound UDP socket) is cancelled when run() returns. Without this,
+        // the orphaned task keeps 127.0.0.1:44301 bound across reconnect iterations,
+        // causing the next run() call to fail with "Address already in use".
+        let _admin_task = AbortOnDrop(tokio::spawn(async move {
             match tokio::net::UdpSocket::bind("127.0.0.1:44301").await {
                 Ok(socket) => {
                     let mut buf = [0u8; 1024];
@@ -290,7 +304,7 @@ impl AivpnClient {
                     error!("Failed to bind local admin UDP socket 127.0.0.1:44301: {}", e);
                 }
             }
-        });
+        }));
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
