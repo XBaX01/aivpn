@@ -331,13 +331,16 @@ class SplitTunnelActivity : AppCompatActivity() {
         override fun getItemCount() = excludedDomains.size
 
         override fun onBindViewHolder(holder: VH, position: Int) {
-            holder.domain.text = excludedDomains[position]
+            val domain = excludedDomains[position]
+            holder.domain.text = domain
             holder.delete.setOnClickListener {
-                val pos = holder.adapterPosition
-                if (pos >= 0 && pos < excludedDomains.size) {
-                    excludedDomains.removeAt(pos)
+                // Capture the domain value at bind time rather than reading adapterPosition
+                // in the click handler. adapterPosition can return -1 or a stale index
+                // while the RecyclerView is laying out (rapid taps, concurrent deletions),
+                // causing IndexOutOfBoundsException on excludedDomains.removeAt().
+                if (excludedDomains.remove(domain)) {
                     saveDomains()
-                    notifyItemRemoved(pos)
+                    notifyDataSetChanged()
                 }
             }
         }
