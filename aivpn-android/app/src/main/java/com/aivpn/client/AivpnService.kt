@@ -486,25 +486,12 @@ class AivpnService : VpnService() {
             }
         }
 
-        val excludedDomains = SecureStorage.loadExcludedDomains(this)
-        if (excludedDomains.isNotEmpty()) {
-            val excludedIPs = mutableSetOf<String>()
-            for (domain in excludedDomains) {
-                try {
-                    val addresses = java.net.InetAddress.getAllByName(domain)
-                    for (addr in addresses) {
-                        if (addr is java.net.Inet4Address) {
-                            excludedIPs.add(addr.hostAddress ?: continue)
-                        }
-                    }
-                } catch (_: Exception) {
-                    Log.d(TAG, "Failed to resolve excluded domain: $domain")
-                }
-            }
-            if (excludedIPs.isNotEmpty()) {
-                Log.d(TAG, "Excluded domain IPs: $excludedIPs")
-            }
-        }
+        // Domain-based split tunnel is not yet implemented.
+        // Resolving domains to static IPs at connect time is unreliable — IPs rotate,
+        // and CDNs serve different addresses per client. Full support requires a local
+        // DNS proxy that intercepts queries and adds per-query /32 exclusion routes
+        // dynamically (via VpnService.Builder addRoute exclusion on API 33+ or a custom
+        // DNS server running on the loopback). Tracked for future implementation.
 
         vpnInterface = builder.establish() ?: throw Exception("Failed to establish VPN interface")
     }
