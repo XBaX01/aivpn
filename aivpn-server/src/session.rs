@@ -113,6 +113,13 @@ pub struct Session {
     pub vpn_ip: Option<Ipv4Addr>,
     /// Registered client ID (from client_db) for traffic accounting
     pub client_id: Option<String>,
+
+    /// Pre-ratchet expected tags preserved for a 2-second grace window after
+    /// complete_ratchet() so client packets that were already in-flight with
+    /// the old keys are not silently dropped as unrecognised.
+    pub pre_ratchet_tags: HashMap<u64, [u8; TAG_SIZE]>,
+    /// Deadline until which pre_ratchet_tags are still accepted.
+    pub pre_ratchet_expire: Option<Instant>,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -202,6 +209,8 @@ impl Session {
             is_ratcheted: false,
             vpn_ip: None,
             client_id: None,
+            pre_ratchet_tags: HashMap::new(),
+            pre_ratchet_expire: None,
         }
     }
     
@@ -288,6 +297,21 @@ impl Session {
                 }
             }
         }
+        // Check pre-ratchet tags during grace window (in-flight packets from client
+        // that were encrypted with old keys before it switched to ratcheted ones).
+        if let Some(expire) = self.pre_ratchet_expire {
+            if Instant::now() < expire {
+                for (counter, expected) in &self.pre_ratchet_tags {
+                    if bool::from(expected.ct_eq(tag)) {
+                        if is_replay(*counter) {
+                            return None;
+                        }
+                        return Some((*counter, false));
+                    }
+                }
+            }
+        }
+
         // Check ratcheted keys (only during transition, before ratchet is complete)
         if !self.is_ratcheted {
             for (counter, expected) in &self.ratcheted_expected_tags {
@@ -386,6 +410,11 @@ impl Session {
     /// Complete PFS ratchet: switch to ratcheted keys, zeroize old ones
     pub fn complete_ratchet(&mut self) {
         if let Some(ratcheted_keys) = self.ratcheted_keys.take() {
+            // Preserve old expected_tags for 2 s so client packets that were
+            // already in-flight with the pre-ratchet keys are not dropped.
+            self.pre_ratchet_tags = std::mem::take(&mut self.expected_tags);
+            self.pre_ratchet_expire = Some(Instant::now() + Duration::from_secs(2));
+
             self.keys = ratcheted_keys;
             self.counter = 0;
             self.send_counter = 0;
@@ -515,7 +544,27 @@ impl SessionManager {
         if ip_count >= 5 {
             return Err(Error::Session("Per-IP session limit reached".into()));
         }
-        
+
+        // Prevent VPN IP pool exhaustion: cap concurrent sessions per /24 subnet.
+        // The per-IP cap of 5 alone is insufficient — a spoofed-source flood from
+        // 51 distinct IPs in one /24 can drain all 253 assignable VPN addresses
+        // while remaining within the per-IP limit.
+        if let std::net::IpAddr::V4(v4) = client_addr.ip() {
+            let subnet24 = u32::from(v4) >> 8;
+            let subnet_count = self.sessions.iter()
+                .filter(|e| {
+                    if let std::net::IpAddr::V4(ip) = e.value().lock().client_addr.ip() {
+                        (u32::from(ip) >> 8) == subnet24
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            if subnet_count >= 10 {
+                return Err(Error::Session("Per-subnet (/24) session limit reached".into()));
+            }
+        }
+
         // DH1: server_static * client_eph → initial keys (0-RTT)
         let dh1 = self.server_keys.compute_shared(&eph_pub)?;
         trace!("Server DH result: {}", hex::encode(&dh1));

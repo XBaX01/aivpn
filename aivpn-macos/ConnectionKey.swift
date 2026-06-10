@@ -7,17 +7,19 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
     let keyValue: String  // Сам ключ (без aivpn://)
     let serverAddress: String?  // Извлеченный адрес сервера
     let vpnIP: String?  // Извлеченный VPN IP
-    
+    let canRecord: Bool?  // Права на запись масок (из поля can_record в ключе)
+
     init(id: String = UUID().uuidString, name: String, keyValue: String) {
         self.id = id
         self.name = name
         self.keyValue = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
-        
+
         // Извлекаем данные из ключа (URL-safe base64 без padding)
         var server: String? = nil
         var ip: String? = nil
-        
+        var record: Bool? = nil
+
         // Convert URL-safe base64 to standard base64 for Foundation decoding
         var b64 = self.keyValue
             .replacingOccurrences(of: "-", with: "+")
@@ -27,15 +29,17 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
         if remainder > 0 {
             b64 += String(repeating: "=", count: 4 - remainder)
         }
-        
+
         if let data = Data(base64Encoded: b64),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             server = json["s"] as? String
             ip = json["i"] as? String
+            record = json["can_record"] as? Bool
         }
-        
+
         self.serverAddress = server
         self.vpnIP = ip
+        self.canRecord = record
     }
     
     /// Полный ключ с префиксом
@@ -52,8 +56,7 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
     }
 
     var isRecordingAdminKey: Bool {
-        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalizedName.hasPrefix("recording-admin") || normalizedName == "admin"
+        return canRecord ?? false
     }
 }
 

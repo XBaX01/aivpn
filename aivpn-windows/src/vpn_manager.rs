@@ -132,7 +132,9 @@ impl VpnManager {
         match cmd.spawn() {
             Ok(child) => {
                 self.child = Some(child);
-                self.state = ConnectionState::Connected;
+                // Stay in Connecting — poll_status() transitions to Connected once
+                // the process survives its first liveness check, preventing the UI
+                // from briefly showing Connected before the TUN device is up.
                 self.stats.bytes_sent = 0;
                 self.stats.bytes_received = 0;
                 // Request initial recording status

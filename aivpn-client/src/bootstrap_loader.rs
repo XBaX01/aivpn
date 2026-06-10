@@ -212,7 +212,7 @@ fn parse_descriptors_from_json(
     // Verify each descriptor
     let mut valid_descriptors = Vec::new();
     for descriptor in descriptors {
-        if store_verified_descriptor(descriptor.clone()).is_ok() {
+        if store_verified_descriptor(descriptor.clone(), None).is_ok() {
             valid_descriptors.push(descriptor);
         }
     }
@@ -278,14 +278,34 @@ pub async fn load_multi_channel(
     let mut channels: Vec<_> = config.channels.iter().collect();
     let mut rng = rand::thread_rng();
     channels.shuffle(&mut rng);
-    
-    let mut results = Vec::new();
+
+    // Race all channels concurrently — sequential probing with 10–15 s timeouts
+    // per channel could block startup for up to N×15 s when most channels are
+    // unreachable. Channels are cloned so each task owns its data ('static bound).
+    let tasks: Vec<_> = channels
+        .iter()
+        .map(|ch| {
+            let ch = (*ch).clone();
+            tokio::spawn(async move { load_from_channel(&ch).await })
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let r = task.await.unwrap_or_else(|e| ChannelLoadResult {
+            channel_name: "unknown".into(),
+            channel_type: "unknown".into(),
+            success: false,
+            descriptors_loaded: 0,
+            error: Some(format!("task panicked: {e}")),
+            latency_ms: 0,
+        });
+        results.push(r);
+    }
+
     let mut total_descriptors = 0;
-    
-    for channel in channels {
-        let result = load_from_channel(channel).await;
-        total_descriptors += result.descriptors_loaded;
-        results.push(result);
+    for r in &results {
+        total_descriptors += r.descriptors_loaded;
     }
     
     let successful_channels = results.iter().filter(|r| r.success).count();

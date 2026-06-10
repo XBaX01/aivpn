@@ -37,6 +37,17 @@ use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
 
+/// RAII guard that aborts a spawned task when dropped.
+/// Used to ensure the admin IPC socket task is cancelled when run() returns,
+/// so the next reconnect iteration can bind 127.0.0.1:44301 without
+/// "Address already in use".
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn packet_mdh_len_for_mask(mask: &MaskProfile) -> usize {
     mask.header_spec
         .as_ref()
@@ -203,7 +214,8 @@ impl AivpnClient {
             self.config.preshared_key.as_ref(),
             &self.keypair.public_key_bytes(),
         ));
-        let keys = self.session_keys.as_ref().unwrap();
+        let keys = self.session_keys.as_ref()
+            .ok_or(Error::Session("session_keys not set after derive".into()))?;
         debug!("Client tag_secret: {}", hex::encode(&keys.tag_secret));
         
         self.state = ClientState::Connected;
@@ -273,8 +285,11 @@ impl AivpnClient {
         let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
         self.control_tx = Some(control_tx.clone());
 
-        // Spawn local IPC listener for CLI commands
-        tokio::spawn(async move {
+        // Spawn local IPC listener for CLI commands. Stored in AbortOnDrop so the task
+        // (and its bound UDP socket) is cancelled when run() returns. Without this,
+        // the orphaned task keeps 127.0.0.1:44301 bound across reconnect iterations,
+        // causing the next run() call to fail with "Address already in use".
+        let _admin_task = AbortOnDrop(tokio::spawn(async move {
             match tokio::net::UdpSocket::bind("127.0.0.1:44301").await {
                 Ok(socket) => {
                     let mut buf = [0u8; 1024];
@@ -290,7 +305,7 @@ impl AivpnClient {
                     error!("Failed to bind local admin UDP socket 127.0.0.1:44301: {}", e);
                 }
             }
-        });
+        }));
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
@@ -331,7 +346,8 @@ impl AivpnClient {
         });
 
         // Spawn UDP reader task
-        let udp_socket = self.udp_socket.as_ref().unwrap().clone();
+        let udp_socket = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before run()".into()))?.clone();
         let udp_to_tun_tx_clone = udp_to_tun_tx.clone();
         let shutdown_for_tasks = shutdown.clone();
         let udp_task = tokio::spawn(async move {
@@ -409,7 +425,8 @@ impl AivpnClient {
         });
 
         // ── Spawn upload task using the shared pipeline ──
-        let upload_udp = self.udp_socket.as_ref().unwrap().clone();
+        let upload_udp = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before upload task".into()))?.clone();
         let upload_keys = self.session_keys.clone()
             .ok_or(Error::Session("No session keys".into()))?;
         let upload_engine = self.mimicry_engine.take()
@@ -554,7 +571,7 @@ impl AivpnClient {
         impl PacketEncryptor for MimicryEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let inner = build_inner_packet(InnerType::Data, state.seq, payload);
                 state.seq = state.seq.wrapping_add(1);
                 let keys = state.keys.clone();
@@ -565,7 +582,7 @@ impl AivpnClient {
 
             fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let bytes = payload.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &bytes);
                 state.seq = state.seq.wrapping_add(1);
@@ -575,7 +592,7 @@ impl AivpnClient {
 
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let keepalive = ControlPayload::Keepalive.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
                 state.seq = state.seq.wrapping_add(1);
@@ -684,7 +701,7 @@ impl AivpnClient {
             ControlPayload::BootstrapDescriptorUpdate { descriptor_data } => {
                 match rmp_serde::from_slice::<BootstrapDescriptor>(&descriptor_data) {
                     Ok(descriptor) => {
-                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor) {
+                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, None) {
                             warn!("Failed to store bootstrap descriptor: {}", e);
                         }
                     }
@@ -723,7 +740,7 @@ impl AivpnClient {
                 self.counter = 0;
                 self.recv_window.reset();
                 if let Some(upload_state) = &self.upload_state {
-                    let mut state = upload_state.lock().expect("upload state poisoned");
+                    let mut state = upload_state.lock().unwrap_or_else(|e| e.into_inner());
                     state.keys = self.session_keys.clone().expect("session keys set");
                     state.counter = 0;
                     info!("Outbound ratchet activated — upload switched to new keys");
@@ -792,7 +809,8 @@ impl AivpnClient {
             Some(&obf),
         )?;
         
-        let socket = self.udp_socket.as_ref().unwrap();
+        let socket = self.udp_socket.as_ref()
+            .ok_or(Error::Session("UDP socket not initialized before send_init".into()))?;
         socket.send(&aivpn_packet).await?;
         
         info!("Sent init handshake ({} bytes)", aivpn_packet.len());

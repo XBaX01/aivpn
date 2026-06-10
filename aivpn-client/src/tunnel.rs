@@ -27,6 +27,9 @@ pub struct TunnelConfig {
     pub mtu: u16,
     /// Route all traffic through VPN (full tunnel mode)
     pub full_tunnel: bool,
+    /// MDH (mask-defined header) byte count for the initial mask.
+    /// Must match the server's active mask to avoid packet decode failures on connect.
+    pub mdh_len: u16,
 }
 
 impl Default for TunnelConfig {
@@ -40,6 +43,7 @@ impl Default for TunnelConfig {
             prefix_len: 24,
             mtu: WAN_SAFE_TUN_MTU,
             full_tunnel: false,
+            mdh_len: 20u16,
         }
     }
 }
@@ -58,6 +62,7 @@ impl TunnelConfig {
             prefix_len: network_config.prefix_len,
             mtu: network_config.mtu,
             full_tunnel,
+            mdh_len: network_config.mdh_len,
         }
     }
 
@@ -69,7 +74,7 @@ impl TunnelConfig {
             server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
-            mdh_len: 20,
+            mdh_len: self.mdh_len,
         };
         network_config.validate()?;
         Ok(network_config)
@@ -111,9 +116,13 @@ pub struct Tunnel {
     server_ip: Option<String>,
     /// Active IPv6 interface name saved before we add the blackhole route.
     /// Used to restore the route on disconnect instead of guessing (e.g. hard-coding en0).
+    /// Only read in the macOS restore_ipv6 path; allow(dead_code) silences Linux build warnings.
+    #[allow(dead_code)]
     saved_ipv6_iface: Option<String>,
     /// Windows: wintun adapter interface index for explicit route binding.
     /// Without this, `route add` may bind VPN routes to the physical NIC.
+    /// Only read in Windows-gated code paths; allow(dead_code) silences Linux/macOS build warnings.
+    #[allow(dead_code)]
     wintun_if_index: Option<String>,
 }
 
@@ -219,7 +228,7 @@ impl Tunnel {
 
         #[cfg(target_os = "linux")]
         {
-            config_builder.name(&self.config.tun_name);
+            config_builder.tun_name(&self.config.tun_name);
             config_builder.platform_config(|config| {
                 config.ensure_root_privileges(true);
             });
@@ -267,7 +276,15 @@ impl Tunnel {
             if let Some(ref idx) = self.wintun_if_index {
                 info!("Wintun interface index: {}", idx);
             } else {
-                error!("Could not determine wintun interface index — routes may bind to wrong adapter");
+                // Without the interface index, configure_windows() would add VPN routes
+                // bound to the default gateway NIC instead of the wintun adapter, silently
+                // routing all traffic outside the tunnel. Fail hard so the user sees a
+                // clear error rather than a "connected" tunnel that leaks all traffic.
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Could not determine wintun interface index — cannot add routes safely. \
+                     Ensure Wintun is installed and the adapter name matches the config.",
+                )));
             }
             self.configure_windows()?;
         }
@@ -902,8 +919,10 @@ impl Drop for Tunnel {
             self.disable_full_tunnel();
         }
         
-        // Restore IPv6 on macOS
-        #[cfg(target_os = "macos")]
+        // Restore IPv6 blackhole route removed during full-tunnel setup.
+        // Must run on both macOS (saves/restores via saved_ipv6_iface) and Linux
+        // (removes the blackhole default route added in disable_ipv6).
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.restore_ipv6();
         
         if self.writer.is_some() || self.reader.is_some() {

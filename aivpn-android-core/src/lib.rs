@@ -65,6 +65,14 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     let psk: Option<[u8; 32]> = if psk_obj.is_null() {
         None
     } else {
+        // Verify the JObject is a byte array before the unsafe cast.
+        // An incorrect caller passing a non-byte-array would produce JVM type
+        // confusion; reject early with a clear error instead.
+        match env.is_instance_of(&psk_obj, "[B") {
+            Ok(true) => {}
+            Ok(false) => return make_str(&mut env, "psk must be a byte array (byte[])"),
+            Err(e) => return make_str(&mut env, &format!("psk type check failed: {e}")),
+        }
         let arr: JByteArray<'local> = unsafe { JByteArray::from_raw(psk_obj.as_raw()) };
         match env.convert_byte_array(&arr) {
             Ok(b) if b.len() == 32 => {

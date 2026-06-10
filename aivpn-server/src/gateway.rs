@@ -31,7 +31,7 @@ use aivpn_common::mask::{
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::VpnNetworkConfig;
 
-use crate::session::{SessionManager, Session};
+use crate::session::{SessionManager, Session, MAX_SESSIONS};
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
 use crate::metrics::MetricsCollector;
@@ -223,6 +223,10 @@ pub struct Gateway {
     /// Per-IP handshake failure cooldown: (failure_count, last_failure_time)
     /// Prevents rapid session-creation loops when client retries with stale keys
     handshake_cooldowns: Arc<DashMap<IpAddr, (u32, Instant)>>,
+    /// Per-IP handshake mutex: serializes concurrent handshakes arriving on
+    /// different source ports from the same client, preventing duplicate sessions
+    /// that compete for the same VPN IP and cause aead::Error on data packets.
+    handshake_locks: Arc<DashMap<IpAddr, Arc<tokio::sync::Mutex<()>>>>,
     /// Neural Resonance Module (Patent 1) — periodic traffic validation
     neural_module: Arc<parking_lot::Mutex<NeuralResonanceModule>>,
     /// Mask catalog for automatic rotation (Patent 3)
@@ -494,6 +498,7 @@ impl Gateway {
             tun_write_tx: None,
             rate_limits: Arc::new(DashMap::new()),
             handshake_cooldowns: Arc::new(DashMap::new()),
+            handshake_locks: Arc::new(DashMap::new()),
             neural_module: Arc::new(parking_lot::Mutex::new(neural)),
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
@@ -619,6 +624,7 @@ impl Gateway {
             let recorder = self.recording_manager.clone();
             let socket = self.udp_socket.as_ref().unwrap().clone();
             let mdh = self.mask_catalog.packet_mdh_bytes();
+            let neural = self.neural_module.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -635,6 +641,11 @@ impl Gateway {
                     }
 
                     let removed = sessions.cleanup_expired();
+                    for session_id in &removed {
+                        // Release per-session neural traffic stats; without this the
+                        // neural_module's DashMap grows unbounded as sessions expire.
+                        neural.lock().cleanup_stats(*session_id);
+                    }
                     // Stop active recordings for removed sessions
                     if let Some(ref rec) = recorder {
                         let store = rec.store();
@@ -1238,6 +1249,41 @@ impl Gateway {
                 return Err(Error::InvalidPacket("Active session exists on other port"));
             }
 
+            // Serialize concurrent handshakes from the same source IP.
+            // When a client reconnects rapidly, multiple shard workers may receive
+            // init packets on different source ports simultaneously and each enter
+            // this branch before any session is registered in tag_map. Without
+            // serialization both complete PSK-matching, create sessions for the same
+            // VPN IP, and the last cleanup_old_sessions_for_vpn_ip call removes the
+            // session the client already ratcheted to, causing aead::Error on all
+            // subsequent data packets. try_lock_owned is non-blocking: if another
+            // handshake is in progress for this IP we drop the packet silently;
+            // the client retransmits naturally and hits the existing-session path.
+            let _handshake_guard = {
+                let lock = {
+                    let entry = self.handshake_locks
+                        .entry(client_addr.ip())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+                    entry.value().clone()
+                };
+                match lock.try_lock_owned() {
+                    Ok(guard) => guard,
+                    Err(_) => return Ok(()),
+                }
+            };
+
+            // Guard against session pool exhaustion: the handshake path calls
+            // create_session() speculatively for every (client × bootstrap_mask)
+            // combination before tag validation confirms which one is correct.
+            // An attacker spoofing many source IPs can fill the pool with temporary
+            // sessions and block legitimate clients. Reserve 10 slots so ratchet
+            // renewals for existing sessions always have capacity.
+            if self.session_manager.session_count() + 10 >= MAX_SESSIONS {
+                debug!("Session pool near capacity ({}/{}), dropping unauthenticated handshake from {}",
+                    self.session_manager.session_count(), MAX_SESSIONS, hash_addr(&client_addr));
+                return Ok(());
+            }
+
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
             // After mask rotation or session timeout, stale clients may flood the server
@@ -1778,6 +1824,7 @@ impl Gateway {
                 // Close session and stop active recording if any
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
+                self.neural_module.lock().cleanup_stats(session_id);
                 if let Some(ref recorder) = self.recording_manager {
                     let socket = self.udp_socket.as_ref().unwrap().clone();
                     let store = recorder.store();

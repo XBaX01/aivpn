@@ -153,7 +153,20 @@ class SplitTunnelActivity : AppCompatActivity() {
             0
         }
 
-        allApps = pm.getInstalledApplications(flags)
+        // On Android 12+ the system may deny QUERY_ALL_PACKAGES for policy reasons
+        // even when it is declared in the manifest.  Catch SecurityException so the
+        // activity degrades gracefully instead of crashing.
+        val installedApps = try {
+            pm.getInstalledApplications(flags)
+        } catch (e: Exception) {
+            android.util.Log.w("SplitTunnelActivity",
+                "getInstalledApplications denied — app list unavailable: ${e.message}")
+            Toast.makeText(this,
+                getString(R.string.split_tunnel_apps_unavailable), Toast.LENGTH_LONG).show()
+            emptyList()
+        }
+
+        allApps = installedApps
             .filter { appInfo ->
                 // Exclude own package
                 appInfo.packageName != ownPackage
@@ -331,13 +344,16 @@ class SplitTunnelActivity : AppCompatActivity() {
         override fun getItemCount() = excludedDomains.size
 
         override fun onBindViewHolder(holder: VH, position: Int) {
-            holder.domain.text = excludedDomains[position]
+            val domain = excludedDomains[position]
+            holder.domain.text = domain
             holder.delete.setOnClickListener {
-                val pos = holder.adapterPosition
-                if (pos >= 0 && pos < excludedDomains.size) {
-                    excludedDomains.removeAt(pos)
+                // Capture the domain value at bind time rather than reading adapterPosition
+                // in the click handler. adapterPosition can return -1 or a stale index
+                // while the RecyclerView is laying out (rapid taps, concurrent deletions),
+                // causing IndexOutOfBoundsException on excludedDomains.removeAt().
+                if (excludedDomains.remove(domain)) {
                     saveDomains()
-                    notifyItemRemoved(pos)
+                    notifyDataSetChanged()
                 }
             }
         }

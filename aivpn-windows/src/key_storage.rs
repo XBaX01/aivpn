@@ -1,9 +1,95 @@
 //! Connection key storage
 //!
-//! Stores keys in JSON file at %APPDATA%/AIVPN/keys.json
+//! Stores keys encrypted at rest via Windows DPAPI (CryptProtectData /
+//! CryptUnprotectData).  The encrypted blob is base64-encoded before being
+//! written to %LOCALAPPDATA%/AIVPN/keys.json so the file remains valid JSON.
+//! Encryption is tied to the current Windows user account — other users
+//! (and offline attackers) cannot decrypt the stored connection keys.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+// ── DPAPI helpers (Windows-only) ─────────────────────────────────────────────
+
+#[cfg(windows)]
+mod dpapi {
+    use std::ptr;
+    use winapi::um::dpapi::{CryptProtectData, CryptUnprotectData};
+    use winapi::um::wincrypt::DATA_BLOB;
+    use winapi::um::winbase::LocalFree;
+
+    pub fn encrypt(plaintext: &[u8]) -> Option<Vec<u8>> {
+        let mut input = DATA_BLOB {
+            cbData: plaintext.len() as u32,
+            pbData: plaintext.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let ok = unsafe {
+            CryptProtectData(&mut input, ptr::null(), ptr::null_mut(),
+                             ptr::null_mut(), ptr::null_mut(), 0, &mut output)
+        };
+        if ok == 0 || output.pbData.is_null() {
+            return None;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
+        };
+        unsafe { LocalFree(output.pbData as _) };
+        Some(bytes)
+    }
+
+    pub fn decrypt(ciphertext: &[u8]) -> Option<Vec<u8>> {
+        let mut input = DATA_BLOB {
+            cbData: ciphertext.len() as u32,
+            pbData: ciphertext.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let ok = unsafe {
+            CryptUnprotectData(&mut input, ptr::null_mut(), ptr::null_mut(),
+                               ptr::null_mut(), ptr::null_mut(), 0, &mut output)
+        };
+        if ok == 0 || output.pbData.is_null() {
+            return None;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
+        };
+        unsafe { LocalFree(output.pbData as _) };
+        Some(bytes)
+    }
+}
+
+/// Encrypt a connection-key string for storage.
+/// On Windows uses DPAPI; on other platforms returns the plaintext unchanged
+/// (compilation for non-Windows targets is only for `cargo check` purposes).
+fn protect_key(key: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(encrypted) = dpapi::encrypt(key.as_bytes()) {
+            return base64::engine::general_purpose::STANDARD.encode(&encrypted);
+        }
+    }
+    key.to_string()
+}
+
+/// Decrypt a stored connection-key string.
+/// Handles both encrypted (base64 DPAPI blob) and legacy plaintext values so
+/// existing key files are migrated transparently on first load.
+fn unprotect_key(stored: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(stored) {
+            if let Some(plaintext) = dpapi::decrypt(&blob) {
+                if let Ok(s) = String::from_utf8(plaintext) {
+                    return s;
+                }
+            }
+        }
+    }
+    // Not an encrypted blob (legacy plaintext) — return as-is.
+    stored.to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionKey {
@@ -37,8 +123,6 @@ impl ConnectionKey {
     }
 }
 
-use base64::Engine;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyStorage {
     pub keys: Vec<ConnectionKey>,
@@ -52,6 +136,10 @@ impl KeyStorage {
         if path.exists() {
             if let Ok(data) = std::fs::read_to_string(&path) {
                 if let Ok(mut storage) = serde_json::from_str::<KeyStorage>(&data) {
+                    // Decrypt keys from disk (transparent migration of legacy plaintext)
+                    for k in &mut storage.keys {
+                        k.key = unprotect_key(&k.key);
+                    }
                     // Validate selected index
                     if let Some(idx) = storage.selected {
                         if idx >= storage.keys.len() {
@@ -73,7 +161,16 @@ impl KeyStorage {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
+        // Encrypt keys before writing to disk
+        let on_disk = KeyStorage {
+            keys: self.keys.iter().map(|k| {
+                let mut k2 = k.clone();
+                k2.key = protect_key(&k.key);
+                k2
+            }).collect(),
+            selected: self.selected,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&on_disk) {
             let _ = std::fs::write(&path, json);
         }
     }

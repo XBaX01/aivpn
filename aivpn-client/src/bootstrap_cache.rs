@@ -70,9 +70,47 @@ pub fn store_descriptor(descriptor: BootstrapDescriptor) -> Result<()> {
     fs::write(cache_path(), json).map_err(Error::Io)
 }
 
+/// Store a bootstrap descriptor after verifying its ed25519 signature.
+///
+/// `trusted_key` should be the operator's ed25519 signing public key. When `Some`, the
+/// signature is verified and unsigned/invalid descriptors are rejected. When `None` the
+/// descriptor is stored without signature verification — callers must only pass `None` in
+/// development/test contexts where a signing key is not yet available.
+///
+/// TODO(production-secure): all call sites should supply the operator signing key once
+/// a dedicated ed25519 signing keypair is added to the connection-key format.
 pub fn store_verified_descriptor(
     descriptor: BootstrapDescriptor,
+    trusted_key: Option<&[u8; 32]>,
 ) -> Result<()> {
+    let sig_is_zero = descriptor.signature == [0u8; 64];
+
+    match trusted_key {
+        Some(key) if !sig_is_zero => {
+            match descriptor.verify_signature(key)? {
+                true => {}
+                false => return Err(aivpn_common::error::Error::Session(format!(
+                    "Bootstrap descriptor {} has invalid ed25519 signature — rejecting",
+                    descriptor.descriptor_id
+                ))),
+            }
+        }
+        Some(_) => {
+            tracing::warn!(
+                descriptor_id = %descriptor.descriptor_id,
+                "Bootstrap descriptor has no signature (all-zero) — storing without verification"
+            );
+        }
+        None => {
+            if !sig_is_zero {
+                tracing::debug!(
+                    descriptor_id = %descriptor.descriptor_id,
+                    "Bootstrap descriptor has signature but no trusted key provided — storing without verification"
+                );
+            }
+        }
+    }
+
     store_descriptor(descriptor)
 }
 
@@ -95,7 +133,7 @@ pub async fn refresh_from_urls(urls: &[String]) -> usize {
         };
 
         for descriptor in descriptors {
-            if store_verified_descriptor(descriptor).is_ok() {
+            if store_verified_descriptor(descriptor, None).is_ok() {
                 stored += 1;
             }
         }

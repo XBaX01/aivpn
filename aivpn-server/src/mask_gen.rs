@@ -6,6 +6,13 @@
 //! 3. Self-test via Kolmogorov-Smirnov test
 //! 4. Store and broadcast
 
+// Generated masks carry all-zero ed25519 signatures until a dedicated
+// signing key is plumbed through. Reject the build in production-secure mode
+// to prevent unsigned masks from reaching end users.
+#[cfg(feature = "production-secure")]
+compile_error!("mask_gen produces MaskProfile with signature=[0u8;64]. \
+    Wire up a real Ed25519 signing key before enabling production-secure.");
+
 use std::sync::Arc;
 
 use tracing::{info, error};

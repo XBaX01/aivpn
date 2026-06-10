@@ -4,6 +4,12 @@
 *.rs.bk
 Cargo.lock
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
 # Build
 *.o
 *.a
@@ -35,7 +41,7 @@ secrets/
 # Docker
 *.dockerfile
 
-# Test
+# Test coverage
 coverage/
 *.gcov
 *.gcda
@@ -61,24 +67,28 @@ aivpn-android/**/.cxx/
 aivpn-android/**/captures/
 *.apk
 !releases/*.apk
+*.idsig
 *.aab
 *.ap_
 *.dex
 *.class
 gen/
 
-# Releases (pre-built binaries for download)
+# macOS app build output
+aivpn-macos/build/
+
+# Releases (pre-built binaries for download — keep tracked)
 !releases/
 !releases/*.dmg
-aivpn-macos/build/
 releases/RELEASE_NOTES.md
-releases/RELEASE_NOTES.md
+
+# Backups (may contain server state / credentials)
+backups/
+
+# Local test and development scripts (not for upstream)
 setup-docker-test.sh
 test-connection-key.sh
-.gitignore
-.gitignore
 test-full-tunnel-with-key.sh
-.gitignore
 test-speed-detailed.sh
 test-speed-optimized.sh
 test-speed-simple.sh
@@ -96,7 +106,6 @@ test-bench-macos.sh
 test-bench.sh
 docker-compose.dpi.yml
 test-dpi-emulation.sh
-deploy.py
 build-windows-package.sh
 .tmp_docker_speed_test.sh
 .tmp_multi_client_test.sh
@@ -111,22 +120,22 @@ remote-speed-server.sh
 deploy-server-update.sh
 .tmp_update_remote_clients.py
 MACOS_RECORDING_TEST.md
-deploy-server-release.sh
-docker-entrypoint.sh
 update-server.sh
 Dockerfile.windows-test
 Dockerfile.windows-test-full
 test-windows-docker-full.sh
 test-windows-docker.sh
-backups/62.204.42.184/clients.json
 
-# Security: Never commit deployment scripts with credentials
+# Security: never commit deployment scripts or secrets
 deploy-release.sh
+deploy.py
+docker-entrypoint.sh
+deploy-server-release.sh
+deployment-config.sh
 .env
 *.env
 .secrets
 credentials.json
-deployment-config.sh
 
 # Claude Code — local agent memory, never commit
 .claude/

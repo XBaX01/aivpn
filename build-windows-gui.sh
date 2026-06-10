@@ -4,6 +4,8 @@
 # Prerequisites:
 #   - Rust with x86_64-pc-windows-gnu target
 #   - mingw-w64 cross compiler
+#   - zip (optional — falls back to python3 -m zipfile)
+#   - makensis / nsis (optional — skips installer build if absent)
 #
 # Usage: ./build-windows-gui.sh
 
@@ -51,12 +53,43 @@ if [ ! -f "$WINTUN_DLL" ]; then
     cp /tmp/wintun/bin/amd64/wintun.dll "$WINTUN_DLL"
 fi
 
-# Create zip
+# Copy icon into package dir so NSIS can find it with a simple relative path
+cp "aivpn-windows/assets/aivpn.ico" "$PACKAGE_DIR/aivpn.ico"
+
+# Create zip — prefer system zip, fall back to python3
 ZIP_NAME="aivpn-windows-gui.zip"
 echo "Creating ${ZIP_NAME}..."
-cd "$PACKAGE_DIR"
-zip -r "../${ZIP_NAME}" ./*
-cd ..
+if command -v zip &>/dev/null; then
+    (cd "$PACKAGE_DIR" && zip -r "../${ZIP_NAME}" ./*)
+else
+    echo "  zip not found — using python3 zipfile"
+    python3 - <<EOF
+import zipfile, pathlib
+pkg = pathlib.Path("${PACKAGE_DIR}")
+with zipfile.ZipFile("${ZIP_NAME}", "w", zipfile.ZIP_DEFLATED) as z:
+    for f in pkg.iterdir():
+        z.write(f, f.name)
+        print(f"  added {f.name}")
+EOF
+fi
+
+# Build NSIS installer if makensis is available
+INSTALLER_NSI="${SCRIPT_DIR}/windows-installer/aivpn-installer.nsi"
+INSTALLER_EXE="${SCRIPT_DIR}/releases/aivpn-windows-installer.exe"
+APP_VERSION=$(grep -m1 '^version' "${SCRIPT_DIR}/Cargo.toml" | sed 's/.*"\(.*\)"/\1/')
+if command -v makensis &>/dev/null && [ -f "$INSTALLER_NSI" ]; then
+    echo ""
+    echo "Building NSIS installer (v${APP_VERSION})..."
+    makensis -V2 \
+        "-DAPP_VERSION=${APP_VERSION}" \
+        "-DSTAGE_DIR=${SCRIPT_DIR}/${PACKAGE_DIR}" \
+        "-DOUTPUT_EXE=${INSTALLER_EXE}" \
+        "$INSTALLER_NSI"
+    echo "Installer: ${INSTALLER_EXE} ($(du -sh "$INSTALLER_EXE" | cut -f1))"
+else
+    echo ""
+    echo "makensis not found — skipping installer (install nsis to enable)"
+fi
 
 # Show result
 echo ""

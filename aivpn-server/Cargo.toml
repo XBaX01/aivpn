@@ -58,6 +58,7 @@ neural = []
 metrics = ["prometheus"]
 passive-distribution = ["reqwest"]
 management-api = ["axum", "tower", "hyper", "hyper-util"]
+production-secure = []
 
 # Management API (Unix socket HTTP server)
 [dependencies.axum]
