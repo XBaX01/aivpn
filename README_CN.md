@@ -117,6 +117,15 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 如果`keystore.properties`不存在，脚本将回退到未签名的发布APK，然后仅使用调试keystore签名作为本地可安装的后备方案。
 
+### 📦 通过 Cargo 安装 (crates.io)
+
+如果您已经安装了 Rust，可以直接从 crates.io 轻松安装客户端或服务器：
+
+```bash
+cargo install aivpn-client
+cargo install aivpn-server
+```
+
 ## ❤️ 支持项目
 
 如果你觉得这个项目有帮助，可以通过Tribute捐款来支持其开发：

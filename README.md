@@ -113,6 +113,15 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 If `keystore.properties` is absent, the script falls back to an unsigned release APK and then signs it with the debug keystore only as a local installable fallback.
 
+### 📦 Install via Cargo (crates.io)
+
+If you have Rust installed, you can easily install the client or server binaries directly from crates.io:
+
+```bash
+cargo install aivpn-client
+cargo install aivpn-server
+```
+
 ## ❤️ Support the Project
 
 If you find this project helpful, you can support its development with a donation via Tribute:
