@@ -571,7 +571,7 @@ impl AivpnClient {
         impl PacketEncryptor for MimicryEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let inner = build_inner_packet(InnerType::Data, state.seq, payload);
                 state.seq = state.seq.wrapping_add(1);
                 let keys = state.keys.clone();
@@ -582,7 +582,7 @@ impl AivpnClient {
 
             fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let bytes = payload.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &bytes);
                 state.seq = state.seq.wrapping_add(1);
@@ -592,7 +592,7 @@ impl AivpnClient {
 
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
                 self.check_mask();
-                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
                 let keepalive = ControlPayload::Keepalive.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
                 state.seq = state.seq.wrapping_add(1);
@@ -740,7 +740,7 @@ impl AivpnClient {
                 self.counter = 0;
                 self.recv_window.reset();
                 if let Some(upload_state) = &self.upload_state {
-                    let mut state = upload_state.lock().expect("upload state poisoned");
+                    let mut state = upload_state.lock().unwrap_or_else(|e| e.into_inner());
                     state.keys = self.session_keys.clone().expect("session keys set");
                     state.counter = 0;
                     info!("Outbound ratchet activated — upload switched to new keys");
