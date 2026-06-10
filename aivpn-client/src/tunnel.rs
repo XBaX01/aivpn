@@ -111,9 +111,13 @@ pub struct Tunnel {
     server_ip: Option<String>,
     /// Active IPv6 interface name saved before we add the blackhole route.
     /// Used to restore the route on disconnect instead of guessing (e.g. hard-coding en0).
+    /// Only read in the macOS restore_ipv6 path; allow(dead_code) silences Linux build warnings.
+    #[allow(dead_code)]
     saved_ipv6_iface: Option<String>,
     /// Windows: wintun adapter interface index for explicit route binding.
     /// Without this, `route add` may bind VPN routes to the physical NIC.
+    /// Only read in Windows-gated code paths; allow(dead_code) silences Linux/macOS build warnings.
+    #[allow(dead_code)]
     wintun_if_index: Option<String>,
 }
 
@@ -219,7 +223,7 @@ impl Tunnel {
 
         #[cfg(target_os = "linux")]
         {
-            config_builder.name(&self.config.tun_name);
+            config_builder.tun_name(&self.config.tun_name);
             config_builder.platform_config(|config| {
                 config.ensure_root_privileges(true);
             });
@@ -902,8 +906,10 @@ impl Drop for Tunnel {
             self.disable_full_tunnel();
         }
         
-        // Restore IPv6 on macOS
-        #[cfg(target_os = "macos")]
+        // Restore IPv6 blackhole route removed during full-tunnel setup.
+        // Must run on both macOS (saves/restores via saved_ipv6_iface) and Linux
+        // (removes the blackhole default route added in disable_ipv6).
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.restore_ipv6();
         
         if self.writer.is_some() || self.reader.is_some() {
