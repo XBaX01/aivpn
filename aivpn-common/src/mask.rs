@@ -1,10 +1,10 @@
 //! Mask System (Traffic Mimicry Profiles)
-//! 
+//!
 //! Implements Mask profiles that define traffic shaping behavior
 
-use serde::{Deserialize, Serialize};
-use rand::{Rng, distributions::Distribution};
 use rand::distributions::weighted::WeightedIndex;
+use rand::{distributions::Distribution, Rng};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -39,7 +39,7 @@ impl BootstrapDescriptor {
 
     /// Verify the ed25519 signature of this descriptor against an operator signing key.
     pub fn verify_signature(&self, public_key: &[u8; 32]) -> Result<bool> {
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let vk = VerifyingKey::from_bytes(public_key)
             .map_err(|e| Error::Crypto(format!("Invalid Ed25519 public key: {}", e)))?;
         let message = self.signing_bytes();
@@ -105,7 +105,7 @@ impl BootstrapChannel {
             BootstrapChannel::Email { address, .. } => address.as_str(),
         }
     }
-    
+
     /// Get the channel type name
     pub fn channel_type(&self) -> &str {
         match self {
@@ -153,7 +153,7 @@ impl BootstrapConfig {
             ..Default::default()
         }
     }
-    
+
     /// Add a CDN channel
     pub fn with_cdn(mut self, url: impl Into<String>, provider: impl Into<String>) -> Self {
         self.channels.push(BootstrapChannel::CDN {
@@ -162,7 +162,7 @@ impl BootstrapConfig {
         });
         self
     }
-    
+
     /// Add a Telegram channel
     pub fn with_telegram(mut self, bot_username: impl Into<String>) -> Self {
         self.channels.push(BootstrapChannel::Telegram {
@@ -171,7 +171,7 @@ impl BootstrapConfig {
         });
         self
     }
-    
+
     /// Add a GitHub channel
     pub fn with_github(mut self, repo: impl Into<String>, asset_name: impl Into<String>) -> Self {
         self.channels.push(BootstrapChannel::GitHub {
@@ -180,7 +180,7 @@ impl BootstrapConfig {
         });
         self
     }
-    
+
     /// Add an IPFS channel
     pub fn with_ipfs(mut self, hash: impl Into<String>) -> Self {
         self.channels.push(BootstrapChannel::IPFS {
@@ -237,7 +237,11 @@ pub fn derive_bootstrap_candidate(
     }
 
     let seed = derive_bootstrap_seed(descriptor, preshared_key, slot);
-    let selector_len = if !embedded_masks.is_empty() { embedded_masks.len() } else { base_ids.len() };
+    let selector_len = if !embedded_masks.is_empty() {
+        embedded_masks.len()
+    } else {
+        base_ids.len()
+    };
     let base_index = (seed[0] as usize) % selector_len;
     let mut mask = if !embedded_masks.is_empty() {
         embedded_masks[base_index].clone()
@@ -247,10 +251,15 @@ pub fn derive_bootstrap_candidate(
     let extra_gap_len = (seed[1] % 9) as usize;
 
     if extra_gap_len > 0 {
-        let mut fields = mask.header_spec
+        let mut fields = mask
+            .header_spec
             .as_ref()
             .map(HeaderSpec::fields)
-            .unwrap_or_else(|| vec![HeaderField::Fixed { bytes: mask.header_template.clone() }]);
+            .unwrap_or_else(|| {
+                vec![HeaderField::Fixed {
+                    bytes: mask.header_template.clone(),
+                }]
+            });
         fields.push(HeaderField::Random { len: extra_gap_len });
         mask.header_spec = Some(HeaderSpec::Structured { fields });
         mask.eph_pub_offset = mask.eph_pub_offset.saturating_add(extra_gap_len as u16);
@@ -259,7 +268,11 @@ pub fn derive_bootstrap_candidate(
     mask.mask_id = format!(
         "bootstrap:{}:{}:{}:{:02x}{:02x}",
         descriptor.descriptor_id,
-        if !embedded_masks.is_empty() { &embedded_masks[base_index].mask_id } else { &base_ids[base_index] },
+        if !embedded_masks.is_empty() {
+            &embedded_masks[base_index].mask_id
+        } else {
+            &base_ids[base_index]
+        },
         slot,
         seed[0],
         seed[1]
@@ -373,7 +386,7 @@ impl SizeDistribution {
                 if self.bins.is_empty() {
                     return 64; // Default
                 }
-                
+
                 // Weighted random selection of bin
                 let weights: Vec<f32> = self.bins.iter().map(|(_, _, p)| *p).collect();
                 if let Ok(dist) = WeightedIndex::new(&weights) {
@@ -393,7 +406,8 @@ impl SizeDistribution {
                             // Box-Muller transform: generate standard normal from two uniform samples
                             let u1: f64 = rng.gen::<f64>().max(1e-10); // avoid ln(0)
                             let u2: f64 = rng.gen();
-                            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                            let z =
+                                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
                             // LogNormal: exp(mu + sigma * z)
                             let sample = (mu + sigma * z).exp();
                             (sample as u16).max(1)
@@ -500,9 +514,7 @@ impl PaddingStrategy {
 #[serde(tag = "type")]
 pub enum HeaderSpec {
     /// Structured header semantics expressed as typed fields.
-    Structured {
-        fields: Vec<HeaderField>,
-    },
+    Structured { fields: Vec<HeaderField> },
     /// Raw prefix with per-packet randomization
     /// Uses fixed bytes with optional random positions
     RawPrefix {
@@ -517,10 +529,20 @@ pub enum HeaderSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum HeaderField {
-    Fixed { bytes: Vec<u8> },
-    Random { len: usize },
-    Length { len: usize, endian: HeaderEndian },
-    Id { len: usize, mode: IdFieldMode },
+    Fixed {
+        bytes: Vec<u8>,
+    },
+    Random {
+        len: usize,
+    },
+    Length {
+        len: usize,
+        endian: HeaderEndian,
+    },
+    Id {
+        len: usize,
+        mode: IdFieldMode,
+    },
     CounterLike {
         len: usize,
         endian: HeaderEndian,
@@ -537,19 +559,16 @@ pub enum HeaderEndian {
     Little,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum IdFieldMode {
+    #[default]
     Random,
     Zero,
 }
 
-impl Default for IdFieldMode {
-    fn default() -> Self {
-        Self::Random
-    }
+fn default_counter_step() -> u64 {
+    1
 }
-
-fn default_counter_step() -> u64 { 1 }
 
 impl HeaderSpec {
     pub fn structured(fields: Vec<HeaderField>) -> Self {
@@ -562,8 +581,13 @@ impl HeaderSpec {
 
     pub fn stun_binding_with_cookie(magic_cookie: bool) -> Self {
         Self::structured(vec![
-            HeaderField::Fixed { bytes: vec![0x00, 0x01] },
-            HeaderField::Length { len: 2, endian: HeaderEndian::Big },
+            HeaderField::Fixed {
+                bytes: vec![0x00, 0x01],
+            },
+            HeaderField::Length {
+                len: 2,
+                endian: HeaderEndian::Big,
+            },
             HeaderField::Fixed {
                 bytes: if magic_cookie {
                     vec![0x21, 0x12, 0xA4, 0x42]
@@ -571,7 +595,10 @@ impl HeaderSpec {
                     vec![0x00, 0x00, 0x00, 0x00]
                 },
             },
-            HeaderField::Id { len: 12, mode: IdFieldMode::Random },
+            HeaderField::Id {
+                len: 12,
+                mode: IdFieldMode::Random,
+            },
         ])
     }
 
@@ -579,16 +606,28 @@ impl HeaderSpec {
         let dcid_len = dcid_len.clamp(8, 20);
         Self::structured(vec![
             HeaderField::Fixed { bytes: vec![0xC0] },
-            HeaderField::Fixed { bytes: version.to_be_bytes().to_vec() },
-            HeaderField::Fixed { bytes: vec![dcid_len] },
-            HeaderField::Id { len: dcid_len as usize, mode: IdFieldMode::Random },
+            HeaderField::Fixed {
+                bytes: version.to_be_bytes().to_vec(),
+            },
+            HeaderField::Fixed {
+                bytes: vec![dcid_len],
+            },
+            HeaderField::Id {
+                len: dcid_len as usize,
+                mode: IdFieldMode::Random,
+            },
         ])
     }
 
     pub fn dns_query(flags: u16) -> Self {
         Self::structured(vec![
-            HeaderField::Id { len: 2, mode: IdFieldMode::Random },
-            HeaderField::Fixed { bytes: flags.to_be_bytes().to_vec() },
+            HeaderField::Id {
+                len: 2,
+                mode: IdFieldMode::Random,
+            },
+            HeaderField::Fixed {
+                bytes: flags.to_be_bytes().to_vec(),
+            },
             HeaderField::Fixed {
                 bytes: vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
             },
@@ -597,9 +636,16 @@ impl HeaderSpec {
 
     pub fn tls_record(content_type: u8, version: u16) -> Self {
         Self::structured(vec![
-            HeaderField::Fixed { bytes: vec![content_type] },
-            HeaderField::Fixed { bytes: version.to_be_bytes().to_vec() },
-            HeaderField::Length { len: 2, endian: HeaderEndian::Big },
+            HeaderField::Fixed {
+                bytes: vec![content_type],
+            },
+            HeaderField::Fixed {
+                bytes: version.to_be_bytes().to_vec(),
+            },
+            HeaderField::Length {
+                len: 2,
+                endian: HeaderEndian::Big,
+            },
         ])
     }
 
@@ -610,7 +656,8 @@ impl HeaderSpec {
                 prefix_hex,
                 randomize_indices,
             } => {
-                let bytes = hex::decode(prefix_hex).unwrap_or_else(|_| vec![0x00, 0x01, 0x02, 0x03]);
+                let bytes =
+                    hex::decode(prefix_hex).unwrap_or_else(|_| vec![0x00, 0x01, 0x02, 0x03]);
                 if randomize_indices.is_empty() {
                     return vec![HeaderField::Fixed { bytes }];
                 }
@@ -619,7 +666,9 @@ impl HeaderSpec {
                 for (idx, byte) in bytes.iter().enumerate() {
                     if randomize_indices.contains(&idx) {
                         if !current_fixed.is_empty() {
-                            fields.push(HeaderField::Fixed { bytes: std::mem::take(&mut current_fixed) });
+                            fields.push(HeaderField::Fixed {
+                                bytes: std::mem::take(&mut current_fixed),
+                            });
                         }
                         fields.push(HeaderField::Random { len: 1 });
                     } else {
@@ -627,7 +676,9 @@ impl HeaderSpec {
                     }
                 }
                 if !current_fixed.is_empty() {
-                    fields.push(HeaderField::Fixed { bytes: current_fixed });
+                    fields.push(HeaderField::Fixed {
+                        bytes: current_fixed,
+                    });
                 }
                 fields
             }
@@ -656,9 +707,14 @@ impl HeaderSpec {
                         header.resize(start + len, 0);
                         rng.fill_bytes(&mut header[start..start + len]);
                     }
-                    IdFieldMode::Zero => header.extend(std::iter::repeat(0u8).take(len)),
+                    IdFieldMode::Zero => header.extend(std::iter::repeat_n(0u8, len)),
                 },
-                HeaderField::CounterLike { len, endian, start, step } => {
+                HeaderField::CounterLike {
+                    len,
+                    endian,
+                    start,
+                    step,
+                } => {
                     let raw = start.saturating_add(rng.gen_range(0..=step.max(1) * 1024));
                     let bytes = encode_semantic_u64(raw, len, endian);
                     header.extend_from_slice(&bytes);
@@ -667,7 +723,7 @@ impl HeaderSpec {
         }
         header
     }
-    
+
     /// Get the minimum header length for this spec
     pub fn min_length(&self) -> usize {
         self.fields()
@@ -681,7 +737,7 @@ impl HeaderSpec {
             })
             .sum()
     }
-    
+
     /// Generate a static header template for legacy compatibility
     /// Uses a seeded RNG for deterministic output
     pub fn generate_static(&self) -> Vec<u8> {
@@ -745,7 +801,7 @@ pub enum TransitionCondition {
 impl MaskProfile {
     /// Verify Ed25519 signature over all profile fields except the signature itself
     pub fn verify_signature(&self, public_key: &[u8; 32]) -> Result<bool> {
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         let vk = VerifyingKey::from_bytes(public_key)
             .map_err(|e| Error::Crypto(format!("Invalid Ed25519 public key: {}", e)))?;
@@ -774,14 +830,21 @@ impl MaskProfile {
         current_state: u16,
         packets_in_state: u32,
         duration_in_state_ms: u64,
-    ) -> (u16, Option<SizeDistribution>, Option<IATDistribution>, Option<PaddingStrategy>) {
+    ) -> (
+        u16,
+        Option<SizeDistribution>,
+        Option<IATDistribution>,
+        Option<PaddingStrategy>,
+    ) {
         let state = self.fsm_states.iter().find(|s| s.state_id == current_state);
         if let Some(state) = state {
             for transition in &state.transitions {
                 let should_transition = match &transition.condition {
                     TransitionCondition::AfterPackets(n) => packets_in_state >= *n,
                     TransitionCondition::AfterDuration(ms) => duration_in_state_ms >= *ms,
-                    TransitionCondition::Random(prob) => rand::thread_rng().gen_range(0.0..1.0) < *prob,
+                    TransitionCondition::Random(prob) => {
+                        rand::thread_rng().gen_range(0.0..1.0) < *prob
+                    }
                     TransitionCondition::OnPayloadType(_) => false, // Handled separately
                 };
 
@@ -801,7 +864,7 @@ impl MaskProfile {
 
 #[cfg(test)]
 mod distribution_tests {
-    use super::{IATDistribution, IATDistType};
+    use super::{IATDistType, IATDistribution};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -843,7 +906,9 @@ pub mod preset_masks {
     }
 
     fn load_webrtc_yandex_telemost_v1() -> MaskProfile {
-        parse_mask(include_str!("../../mask-assets/webrtc_yandex_telemost_v1.json"))
+        parse_mask(include_str!(
+            "../../mask-assets/webrtc_yandex_telemost_v1.json"
+        ))
     }
 
     fn load_webrtc_vk_teams_v1() -> MaskProfile {
@@ -863,15 +928,21 @@ pub mod preset_masks {
     }
 
     pub fn webrtc_yandex_telemost_v1() -> MaskProfile {
-        WEBRTC_YANDEX_TELEMOST_V1.get_or_init(load_webrtc_yandex_telemost_v1).clone()
+        WEBRTC_YANDEX_TELEMOST_V1
+            .get_or_init(load_webrtc_yandex_telemost_v1)
+            .clone()
     }
 
     pub fn webrtc_vk_teams_v1() -> MaskProfile {
-        WEBRTC_VK_TEAMS_V1.get_or_init(load_webrtc_vk_teams_v1).clone()
+        WEBRTC_VK_TEAMS_V1
+            .get_or_init(load_webrtc_vk_teams_v1)
+            .clone()
     }
 
     pub fn webrtc_sberjazz_v1() -> MaskProfile {
-        WEBRTC_SBERJAZZ_V1.get_or_init(load_webrtc_sberjazz_v1).clone()
+        WEBRTC_SBERJAZZ_V1
+            .get_or_init(load_webrtc_sberjazz_v1)
+            .clone()
     }
 
     pub fn all() -> Vec<MaskProfile> {
@@ -909,19 +980,19 @@ mod tests {
     #[test]
     fn test_stun_binding_generation() {
         let spec = HeaderSpec::stun_binding();
-        
+
         // Generate two headers - they should differ in transaction_id
         let mut rng = StdRng::seed_from_u64(42);
         let header1 = spec.generate(&mut rng);
         let header2 = spec.generate(&mut rng);
-        
+
         assert_eq!(header1.len(), 20);
         assert_eq!(header2.len(), 20);
-        
+
         // First 8 bytes should be the same (type + length + magic cookie)
         assert_eq!(&header1[0..2], &[0x00, 0x01]); // Binding Request
         assert_eq!(&header1[4..8], &[0x21, 0x12, 0xA4, 0x42]); // Magic cookie
-        
+
         // Transaction IDs should differ
         assert_ne!(&header1[8..], &header2[8..]);
     }
@@ -929,23 +1000,23 @@ mod tests {
     #[test]
     fn test_quic_initial_generation() {
         let spec = HeaderSpec::quic_initial(0x00000001, 8);
-        
+
         let mut rng = StdRng::seed_from_u64(42);
         let header1 = spec.generate(&mut rng);
         let header2 = spec.generate(&mut rng);
-        
+
         assert_eq!(header1.len(), 14); // 1 + 4 + 1 + 8
         assert_eq!(header2.len(), 14);
-        
+
         // First byte should be 0xC0 (long packet)
         assert_eq!(header1[0], 0xC0);
-        
+
         // Version bytes
         assert_eq!(&header1[1..5], &0x00000001u32.to_be_bytes());
-        
+
         // DCID length
         assert_eq!(header1[5], 8);
-        
+
         // DCID should differ between generations
         assert_ne!(&header1[6..], &header2[6..]);
     }
@@ -953,32 +1024,35 @@ mod tests {
     #[test]
     fn test_dns_query_generation() {
         let spec = HeaderSpec::dns_query(0x0100);
-        
+
         let mut rng = StdRng::seed_from_u64(42);
         let header1 = spec.generate(&mut rng);
         let header2 = spec.generate(&mut rng);
-        
+
         assert_eq!(header1.len(), 12);
         assert_eq!(header2.len(), 12);
-        
+
         // Flags should be consistent
         assert_eq!(&header1[2..4], &[0x01, 0x00]);
         assert_eq!(&header2[2..4], &[0x01, 0x00]);
-        
+
         // Transaction ID should differ
         assert_ne!(&header1[0..2], &header2[0..2]);
-        
+
         // Counts should be standard DNS query
-        assert_eq!(&header1[4..], &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            &header1[4..],
+            &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
     fn test_tls_record_generation() {
         let spec = HeaderSpec::tls_record(0x17, 0x0303);
-        
+
         let mut rng = StdRng::seed_from_u64(42);
         let header = spec.generate(&mut rng);
-        
+
         assert_eq!(header.len(), 5);
         assert_eq!(header[0], 0x17); // Application data
         assert_eq!(&header[1..3], &[0x03, 0x03]); // TLS 1.2
@@ -991,20 +1065,20 @@ mod tests {
             prefix_hex: "010203040506".to_string(),
             randomize_indices: vec![2, 4],
         };
-        
+
         let mut rng = StdRng::seed_from_u64(42);
         let header1 = spec.generate(&mut rng);
         let header2 = spec.generate(&mut rng);
-        
+
         assert_eq!(header1.len(), 6);
         assert_eq!(header2.len(), 6);
-        
+
         // Fixed bytes should be the same
         assert_eq!(header1[0], header2[0]); // 0x01
         assert_eq!(header1[1], header2[1]); // 0x02
         assert_eq!(header1[3], header2[3]); // 0x04
         assert_eq!(header1[5], header2[5]); // 0x06
-        
+
         // Randomized bytes should differ
         assert_ne!(header1[2], header2[2]);
         assert_ne!(header1[4], header2[4]);
@@ -1014,14 +1088,14 @@ mod tests {
     fn test_header_spec_min_length() {
         let stun = HeaderSpec::stun_binding();
         assert_eq!(stun.min_length(), 20);
-        
+
         let quic = HeaderSpec::quic_initial(0x00000001, 8);
         // 1 (header_form) + 4 (version) + 1 (dcid_len) + 8 (dcid) = 14
         assert_eq!(quic.min_length(), 14);
-        
+
         let dns = HeaderSpec::dns_query(0x0100);
         assert_eq!(dns.min_length(), 12);
-        
+
         let tls = HeaderSpec::tls_record(0x17, 0x0303);
         assert_eq!(tls.min_length(), 5);
     }
@@ -1029,10 +1103,10 @@ mod tests {
     #[test]
     fn test_static_generation_deterministic() {
         let spec = HeaderSpec::stun_binding();
-        
+
         let static1 = spec.generate_static();
         let static2 = spec.generate_static();
-        
+
         // Static generation should be deterministic
         assert_eq!(static1, static2);
     }
@@ -1042,7 +1116,7 @@ mod tests {
         let mask = preset_masks::webrtc_zoom_v3();
         assert!(mask.header_spec.is_some());
         assert_eq!(mask.version, 2);
-        
+
         let mask2 = preset_masks::quic_https_v2();
         assert!(mask2.header_spec.is_some());
         assert_eq!(mask2.version, 2);
@@ -1069,7 +1143,10 @@ mod tests {
         for (lhs, rhs) in left.iter().zip(right.iter()) {
             assert_eq!(lhs.mask_id, rhs.mask_id);
             assert_eq!(lhs.eph_pub_offset, rhs.eph_pub_offset);
-            assert_eq!(lhs.header_spec.as_ref().map(|s| s.min_length()), rhs.header_spec.as_ref().map(|s| s.min_length()));
+            assert_eq!(
+                lhs.header_spec.as_ref().map(|s| s.min_length()),
+                rhs.header_spec.as_ref().map(|s| s.min_length())
+            );
         }
     }
 
@@ -1109,6 +1186,8 @@ mod tests {
 
         let masks = derive_bootstrap_candidates(&descriptor, Some(&[9u8; 32]));
         assert_eq!(masks.len(), 1);
-        assert!(masks[0].mask_id.starts_with("bootstrap:epoch-3:webrtc_zoom_v3:"));
+        assert!(masks[0]
+            .mask_id
+            .starts_with("bootstrap:epoch-3:webrtc_zoom_v3:"));
     }
 }

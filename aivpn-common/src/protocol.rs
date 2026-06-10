@@ -1,5 +1,5 @@
 //! AIVPN Wire Protocol
-//! 
+//!
 //! Implements packet format, inner payload encoding, and control messages
 
 use bytes::{BufMut, BytesMut};
@@ -111,7 +111,10 @@ impl InnerHeader {
         let inner_type = InnerType::from_u16(u16::from_le_bytes([data[0], data[1]]))
             .ok_or(Error::InvalidPacket("Unknown inner type"))?;
         let seq_num = u16::from_le_bytes([data[2], data[3]]);
-        Ok(Self { inner_type, seq_num })
+        Ok(Self {
+            inner_type,
+            seq_num,
+        })
     }
 }
 
@@ -147,12 +150,12 @@ impl AivpnPacket {
 
     /// Serialize packet to bytes
     pub fn to_bytes(&self) -> BytesMut {
-        let total_len = TAG_SIZE 
-            + self.mask_dependent_header.len() 
+        let total_len = TAG_SIZE
+            + self.mask_dependent_header.len()
             + 2 // pad_len
-            + self.encrypted_payload.len() 
+            + self.encrypted_payload.len()
             + self.random_padding.len();
-        
+
         let mut buf = BytesMut::with_capacity(total_len);
         buf.put_slice(&self.resonance_tag);
         buf.put_slice(&self.mask_dependent_header);
@@ -180,7 +183,7 @@ impl AivpnPacket {
         // For now, we'll parse it in the server/client with mask context
         // Return raw data for upper layers to parse
         let _remaining = &data[cursor..];
-        
+
         Ok(Self {
             resonance_tag,
             mask_dependent_header: Vec::new(),
@@ -304,7 +307,7 @@ pub enum ControlPayload {
 impl ControlPayload {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
-        
+
         match self {
             Self::KeyRotate { new_eph_pub } => {
                 buf.push(ControlSubtype::KeyRotate as u8);
@@ -312,7 +315,10 @@ impl ControlPayload {
                 buf.extend_from_slice(&(new_eph_pub.len() as u16).to_le_bytes());
                 buf.extend_from_slice(new_eph_pub);
             }
-            Self::MaskUpdate { mask_data, signature } => {
+            Self::MaskUpdate {
+                mask_data,
+                signature,
+            } => {
                 buf.push(ControlSubtype::MaskUpdate as u8);
                 buf.extend_from_slice(&(mask_data.len() as u16).to_le_bytes());
                 buf.extend_from_slice(mask_data);
@@ -325,7 +331,12 @@ impl ControlPayload {
                 buf.push(ControlSubtype::TelemetryRequest as u8);
                 buf.push(*metric_flags);
             }
-            Self::TelemetryResponse { packet_loss, rtt_ms, jitter_ms, buffer_pct } => {
+            Self::TelemetryResponse {
+                packet_loss,
+                rtt_ms,
+                jitter_ms,
+                buffer_pct,
+            } => {
                 buf.push(ControlSubtype::TelemetryResponse as u8);
                 buf.push(0); // flags
                 buf.extend_from_slice(&packet_loss.to_le_bytes());
@@ -342,12 +353,19 @@ impl ControlPayload {
                 buf.push(ControlSubtype::Shutdown as u8);
                 buf.push(*reason);
             }
-            Self::ControlAck { ack_seq, ack_for_subtype } => {
+            Self::ControlAck {
+                ack_seq,
+                ack_for_subtype,
+            } => {
                 buf.push(ControlSubtype::ControlAck as u8);
                 buf.extend_from_slice(&ack_seq.to_le_bytes());
                 buf.push(*ack_for_subtype);
             }
-            Self::ServerHello { server_eph_pub, signature, network_config } => {
+            Self::ServerHello {
+                server_eph_pub,
+                signature,
+                network_config,
+            } => {
                 buf.push(ControlSubtype::ServerHello as u8);
                 buf.extend_from_slice(server_eph_pub);
                 buf.extend_from_slice(signature);
@@ -372,7 +390,11 @@ impl ControlPayload {
                 buf.push(ControlSubtype::RecordingStop as u8);
                 buf.extend_from_slice(session_id);
             }
-            Self::RecordingComplete { service, mask_id, confidence } => {
+            Self::RecordingComplete {
+                service,
+                mask_id,
+                confidence,
+            } => {
                 buf.push(ControlSubtype::RecordingComplete as u8);
                 let service_bytes = service.as_bytes();
                 buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
@@ -391,7 +413,10 @@ impl ControlPayload {
             Self::RecordingStatusRequest => {
                 buf.push(ControlSubtype::RecordingStatusRequest as u8);
             }
-            Self::RecordingStatus { can_record, active_service } => {
+            Self::RecordingStatus {
+                can_record,
+                active_service,
+            } => {
                 buf.push(ControlSubtype::RecordingStatus as u8);
                 let mut flags = 0u8;
                 if *can_record {
@@ -413,7 +438,7 @@ impl ControlPayload {
                 buf.extend_from_slice(descriptor_data);
             }
         }
-        
+
         Ok(buf)
     }
 
@@ -449,14 +474,19 @@ impl ControlPayload {
                 let mask_data = data[3..3 + mask_len].to_vec();
                 let mut signature = [0u8; 64];
                 signature.copy_from_slice(&data[3 + mask_len..3 + mask_len + 64]);
-                Ok(Self::MaskUpdate { mask_data, signature })
+                Ok(Self::MaskUpdate {
+                    mask_data,
+                    signature,
+                })
             }
             ControlSubtype::Keepalive => Ok(Self::Keepalive),
             ControlSubtype::TelemetryRequest => {
                 if data.len() < 2 {
                     return Err(Error::InvalidPacket("TelemetryRequest too short"));
                 }
-                Ok(Self::TelemetryRequest { metric_flags: data[1] })
+                Ok(Self::TelemetryRequest {
+                    metric_flags: data[1],
+                })
             }
             ControlSubtype::TelemetryResponse => {
                 if data.len() < 12 {
@@ -473,8 +503,8 @@ impl ControlPayload {
                 if data.len() < 9 {
                     return Err(Error::InvalidPacket("TimeSync too short"));
                 }
-                Ok(Self::TimeSync { 
-                    server_ts_ms: u64::from_le_bytes(data[1..9].try_into().unwrap()) 
+                Ok(Self::TimeSync {
+                    server_ts_ms: u64::from_le_bytes(data[1..9].try_into().unwrap()),
                 })
             }
             ControlSubtype::Shutdown => {
@@ -565,9 +595,16 @@ impl ControlPayload {
                 let mask_id = String::from_utf8_lossy(&data[cursor..cursor + mid_len]).to_string();
                 cursor += mid_len;
                 let confidence = f32::from_le_bytes([
-                    data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
-                Ok(Self::RecordingComplete { service, mask_id, confidence })
+                Ok(Self::RecordingComplete {
+                    service,
+                    mask_id,
+                    confidence,
+                })
             }
             ControlSubtype::RecordingFailed => {
                 if data.len() < 3 {
@@ -590,17 +627,24 @@ impl ControlPayload {
                 let has_service = (flags & 0x02) != 0;
                 let active_service = if has_service {
                     if data.len() < 4 {
-                        return Err(Error::InvalidPacket("RecordingStatus missing service length"));
+                        return Err(Error::InvalidPacket(
+                            "RecordingStatus missing service length",
+                        ));
                     }
                     let service_len = u16::from_le_bytes([data[2], data[3]]) as usize;
                     if data.len() < 4 + service_len {
-                        return Err(Error::InvalidPacket("RecordingStatus invalid service length"));
+                        return Err(Error::InvalidPacket(
+                            "RecordingStatus invalid service length",
+                        ));
                     }
                     Some(String::from_utf8_lossy(&data[4..4 + service_len]).to_string())
                 } else {
                     None
                 };
-                Ok(Self::RecordingStatus { can_record, active_service })
+                Ok(Self::RecordingStatus {
+                    can_record,
+                    active_service,
+                })
             }
             ControlSubtype::BootstrapDescriptorUpdate => {
                 if data.len() < 3 {
@@ -608,7 +652,9 @@ impl ControlPayload {
                 }
                 let descriptor_len = u16::from_le_bytes([data[1], data[2]]) as usize;
                 if data.len() < 3 + descriptor_len {
-                    return Err(Error::InvalidPacket("BootstrapDescriptorUpdate invalid length"));
+                    return Err(Error::InvalidPacket(
+                        "BootstrapDescriptorUpdate invalid length",
+                    ));
                 }
                 Ok(Self::BootstrapDescriptorUpdate {
                     descriptor_data: data[3..3 + descriptor_len].to_vec(),
@@ -628,7 +674,11 @@ pub struct AckPacket {
 
 impl AckPacket {
     pub fn new(ack_seq: u16, ack_base: u16, bitmap: Vec<u8>) -> Self {
-        Self { ack_seq, ack_base, bitmap }
+        Self {
+            ack_seq,
+            ack_base,
+            bitmap,
+        }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -652,6 +702,10 @@ impl AckPacket {
             return Err(Error::InvalidPacket("ACK invalid length"));
         }
         let bitmap = data[7..7 + bitmap_len].to_vec();
-        Ok(Self { ack_seq, ack_base, bitmap })
+        Ok(Self {
+            ack_seq,
+            ack_base,
+            bitmap,
+        })
     }
 }
