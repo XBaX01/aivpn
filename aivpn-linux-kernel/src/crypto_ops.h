@@ -11,14 +11,15 @@
 
 /**
  * aivpn_decrypt - decrypt an inbound skb in-place.
- * @s:   session (spinlock held by caller).
- * @skb: data starts at the 8-byte resonance tag, followed by ciphertext
- *       + 16-byte Poly1305 auth tag.
+ * @s:       session (s->lock held by caller with BH disabled).
+ * @skb:     data starts at the 8-byte resonance tag, followed by ciphertext
+ *           + 16-byte Poly1305 auth tag.
+ * @counter: counter from the tag-window lookup (NOT extracted from wire bytes).
  *
  * On success skb->data points to plaintext IP payload.
  * Returns 0 on success, -errno on failure.
  */
-int aivpn_decrypt(struct aivpn_kern_session *s, struct sk_buff *skb);
+int aivpn_decrypt(struct aivpn_kern_session *s, struct sk_buff *skb, u64 counter);
 
 /**
  * aivpn_encrypt - encrypt an outbound skb in-place.

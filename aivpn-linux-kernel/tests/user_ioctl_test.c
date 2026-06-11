@@ -50,7 +50,7 @@ static void test_session_add_remove(void)
     /* Random-looking keys */
     memset(add.session_key,  0xAB, 32);
     memset(add.tag_secret,   0xCD, 32);
-    memset(add.prng_seed,    0xEF, 32);
+    memset(add.nonce_suffix, 0xEF, 4);
     add.counter_base = 0;
     add.client_ip    = 0x0A000201; /* 10.0.2.1 */
     add.window_ms    = 10000;

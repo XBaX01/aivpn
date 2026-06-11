@@ -18,19 +18,24 @@ const fn iowr(nr: u32, sz: u32) -> u32 { (3 << 30) | (M << 8) | nr | (sz << 16) 
 const fn io(nr: u32) -> u32            { (M << 8) | nr }
 
 // Packed struct sizes matching C definitions (see include/uapi/aivpn.h)
-//   aivpn_session_add:  16+32+32+32+8+4+28+8 = 160 bytes
-//   aivpn_session_del:  16
-//   aivpn_session_stat: 16+4+8+8+8+8 = 52 (with __attribute__((packed)))
-//   aivpn_set_tun:      4
-//   aivpn_set_udp_sock: 4
-const IOC_SESSION_ADD:  u32 = iow(1,  160);
-const IOC_SESSION_DEL:  u32 = iow(2,  16);
-const IOC_SESSION_STAT: u32 = iowr(3, 52);
-const IOC_SET_TUN:      u32 = iow(4,  4);
-const IOC_SET_UDP_SOCK: u32 = iow(5,  4);
-const IOC_FLUSH:        u32 = io(6);
-const IOC_GET_VERSION:  u32 = ior(7,  4);
-const API_VERSION:      u32 = 1;
+//   aivpn_session_add:          16+32+32+4+28+8+4+28+8 = 160 bytes
+//   aivpn_session_del:          16
+//   aivpn_session_stat:         16+4+8+8+8+8 = 52 (packed)
+//   aivpn_set_tun:              4
+//   aivpn_set_udp_sock:         4
+//   aivpn_session_update_tags:  16+4+256*16 = 4116 bytes
+const IOC_SESSION_ADD:          u32 = iow(1,  160);
+const IOC_SESSION_DEL:          u32 = iow(2,   16);
+const IOC_SESSION_STAT:         u32 = iowr(3,  52);
+const IOC_SET_TUN:              u32 = iow(4,    4);
+const IOC_SET_UDP_SOCK:         u32 = iow(5,    4);
+const IOC_FLUSH:                u32 = io(6);
+const IOC_GET_VERSION:          u32 = ior(7,    4);
+const IOC_SESSION_UPDATE_TAGS:  u32 = iow(8, 4116);
+const API_VERSION:              u32 = 2;
+
+// CAP_NET_ADMIN = 12 (linux/capability.h)
+const CAP_NET_ADMIN: i32 = 12;
 
 // ── C helper declarations ─────────────────────────────────────────────────────
 
@@ -38,6 +43,7 @@ extern "C" {
     fn aivpn_session_insert(add: *const u8) -> i32;
     fn aivpn_session_remove(session_id: *const u8) -> i32;
     fn aivpn_session_stat(stat: *mut u8) -> i32;
+    fn aivpn_session_tags_update(upd: *const u8) -> i32;
     fn aivpn_session_flush();
     fn aivpn_tun_set_device(ifindex: u32) -> i32;
     fn aivpn_tun_clear();
@@ -65,7 +71,13 @@ impl AivpnDev {
 impl FileOperations for AivpnDev {
     type Data = ();
     type OpenData = ();
-    fn open(_: &(), _: &kernel::file::File) -> Result<()> { Ok(()) }
+    fn open(_: &(), _file: &kernel::file::File) -> Result<()> {
+        // CRITICAL-4: restrict /dev/aivpn to processes with CAP_NET_ADMIN
+        if !unsafe { kernel::bindings::capable(CAP_NET_ADMIN) } {
+            return Err(EPERM);
+        }
+        Ok(())
+    }
 }
 
 impl IoctlHandler for AivpnDev {
@@ -110,6 +122,12 @@ impl IoctlHandler for AivpnDev {
             }
             n if n == IOC_GET_VERSION => {
                 cmd.user_slice_writer()?.write_slice(&API_VERSION.to_ne_bytes())?;
+                Ok(0)
+            }
+            n if n == IOC_SESSION_UPDATE_TAGS => {
+                let mut buf = [0u8; 4116];
+                cmd.user_slice_reader()?.read_slice(&mut buf)?;
+                to_result(unsafe { aivpn_session_tags_update(buf.as_ptr()) })?;
                 Ok(0)
             }
             _ => Err(EINVAL),

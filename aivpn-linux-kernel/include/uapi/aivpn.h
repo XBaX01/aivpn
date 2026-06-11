@@ -25,7 +25,7 @@ typedef uint64_t __u64;
 
 /* Module API version returned by AIVPN_IOC_GET_VERSION.
  * Increment when any ioctl struct or semantic changes. */
-#define AIVPN_MODULE_API_VERSION  1U
+#define AIVPN_MODULE_API_VERSION  2U
 
 /* ioctl magic byte */
 #define AIVPN_MAGIC  0xAE
@@ -40,7 +40,8 @@ typedef uint64_t __u64;
  * @session_id:   16-byte opaque session identifier (matches Rust [u8;16])
  * @session_key:  32-byte ChaCha20-Poly1305 symmetric key
  * @tag_secret:   32-byte BLAKE3 secret used to derive resonance tags
- * @prng_seed:    32-byte PRNG seed; bytes [0..4] used as nonce suffix
+ * @nonce_suffix:  4-byte static per-session nonce suffix (bytes 8-11 of the 12-byte nonce)
+ *                 Only the first 4 bytes are used; remaining 28 bytes reserved.
  * @counter_base: initial send counter value (little-endian u64)
  * @client_ip:    VPN IPv4 address assigned to this client (network byte order)
  * @client_addr:  28-byte sockaddr_storage holding UDP peer address
@@ -50,7 +51,8 @@ struct aivpn_session_add {
 	__u8  session_id[16];
 	__u8  session_key[32];
 	__u8  tag_secret[32];
-	__u8  prng_seed[32];
+	__u8  nonce_suffix[4]; /* bytes 8-11 of the 12-byte ChaCha20 nonce; 28 bytes reserved */
+	__u8  _reserved[28];
 	__u64 counter_base;
 	__u32 client_ip;
 	__u8  client_addr[28];
@@ -107,6 +109,37 @@ struct aivpn_set_udp_sock {
 	__u32 fd;
 } __attribute__((packed));
 
+/* Maximum number of (tag, counter) pairs per update batch */
+#define AIVPN_TAG_WINDOW_SLOTS  256
+
+/**
+ * struct aivpn_tag_window_entry - one (resonance_tag, counter) pair
+ *
+ * The kernel looks up incoming packets by their 8-byte resonance tag.
+ * User-space pre-computes a window of valid tags from the session's
+ * tag_secret and passes them here so the kernel can route and decrypt.
+ *
+ * @tag:     8-byte resonance tag as it appears on the wire
+ * @counter: sender counter value that was used to derive this tag
+ */
+struct aivpn_tag_window_entry {
+	__u8  tag[8];
+	__u64 counter;
+} __attribute__((packed));
+
+/**
+ * struct aivpn_session_update_tags - payload for AIVPN_IOC_SESSION_UPDATE_TAGS
+ *
+ * @session_id: identifies the session to update
+ * @count:      number of valid entries in @entries (max AIVPN_TAG_WINDOW_SLOTS)
+ * @entries:    array of (tag, counter) pairs for the current validity window
+ */
+struct aivpn_session_update_tags {
+	__u8  session_id[16];
+	__u32 count;
+	struct aivpn_tag_window_entry entries[AIVPN_TAG_WINDOW_SLOTS];
+} __attribute__((packed));
+
 /* ------------------------------------------------------------------ *
  *  ioctl commands                                                      *
  * ------------------------------------------------------------------ */
@@ -130,6 +163,9 @@ struct aivpn_set_udp_sock {
 #define AIVPN_IOC_FLUSH         _IO(AIVPN_MAGIC, 6)
 
 /** Get module API version — returns AIVPN_MODULE_API_VERSION */
-#define AIVPN_IOC_GET_VERSION   _IOR(AIVPN_MAGIC, 7, __u32)
+#define AIVPN_IOC_GET_VERSION          _IOR(AIVPN_MAGIC, 7, __u32)
+
+/** Push a batch of (tag, counter) pairs so the kernel can route packets */
+#define AIVPN_IOC_SESSION_UPDATE_TAGS  _IOW(AIVPN_MAGIC, 8, struct aivpn_session_update_tags)
 
 #endif /* _UAPI_AIVPN_H */

@@ -3,8 +3,14 @@
  * udp_hook.c — intercept UDP socket RX for in-kernel VPN fast path
  *
  * After AIVPN_IOC_SET_UDP_SOCK, sk->sk_data_ready is replaced with
- * aivpn_sk_data_ready.  Matched packets go: tag lookup → decrypt →
- * tun inject.  Unmatched packets fall back to user space.
+ * aivpn_sk_data_ready.  On wakeup we atomically drain the receive queue,
+ * process recognised packets (tag lookup → anti-replay → decrypt → TUN
+ * inject) and return unrecognised packets to the queue so user-space sees them.
+ *
+ * HIGH-2 fix: we do NOT use skb_recv_datagram for fallback — that dequeues
+ * unconditionally.  Instead we splice the entire receive queue into a local
+ * list, categorise in-process, then prepend any fallback packets back to the
+ * head of sk_receive_queue (before new arrivals) before waking user-space.
  */
 
 #include <linux/net.h>
@@ -23,22 +29,53 @@ struct aivpn_hook_state {
 static void aivpn_sk_data_ready(struct sock *sk)
 {
 	struct aivpn_hook_state *hs = sk->sk_user_data;
+	struct sk_buff_head process_q, fallback_q;
 	struct sk_buff *skb;
-	struct aivpn_kern_session *session;
-	u64 now_ms;
-	int ret, err;
 
-	while ((skb = skb_recv_datagram(sk, MSG_DONTWAIT, &err)) != NULL) {
-		if (skb->len < AIVPN_TAG_SIZE)
-			goto fallback;
+	skb_queue_head_init(&process_q);
+	skb_queue_head_init(&fallback_q);
 
-		now_ms = aivpn_ktime_ms();
-		session = aivpn_session_lookup(skb->data, now_ms);
-		if (!session)
-			goto fallback;
+	/* Atomically splice the entire receive queue into our local list */
+	spin_lock(&sk->sk_receive_queue.lock);
+	skb_queue_splice_init(&sk->sk_receive_queue, &process_q);
+	spin_unlock(&sk->sk_receive_queue.lock);
 
-		ret = aivpn_decrypt(session, skb);
-		spin_unlock(&session->lock);
+	while ((skb = __skb_dequeue(&process_q)) != NULL) {
+		struct aivpn_kern_session *session;
+		u64 counter;
+		int ret;
+
+		if (skb->len < AIVPN_TAG_SIZE) {
+			__skb_queue_tail(&fallback_q, skb);
+			continue;
+		}
+
+		rcu_read_lock();
+		session = aivpn_tag_lookup(skb->data, &counter);
+		if (!session) {
+			rcu_read_unlock();
+			__skb_queue_tail(&fallback_q, skb);
+			continue;
+		}
+		/*
+		 * Acquire session->lock while still inside rcu_read_lock so that
+		 * aivpn_session_remove's synchronize_rcu() cannot complete — and
+		 * therefore cannot free the session — until we release rcu_read_lock.
+		 * After acquiring the spinlock, rcu_read_unlock is safe: the session
+		 * remove path calls spin_lock_bh(s->lock) after synchronize_rcu()
+		 * before freeing, so it will wait for us to unlock.
+		 */
+		spin_lock_bh(&session->lock);
+		rcu_read_unlock();
+
+		if (!aivpn_counter_validate(session, counter)) {
+			spin_unlock_bh(&session->lock);
+			kfree_skb(skb);
+			continue;
+		}
+
+		ret = aivpn_decrypt(session, skb, counter);
+		spin_unlock_bh(&session->lock);
 
 		if (ret) {
 			kfree_skb(skb);
@@ -47,10 +84,18 @@ static void aivpn_sk_data_ready(struct sock *sk)
 
 		if (aivpn_tun_inject(skb))
 			kfree_skb(skb);
-		continue;
+	}
 
-fallback:
-		skb_queue_tail(&sk->sk_receive_queue, skb);
+	/*
+	 * Return fallback packets to the head of the receive queue so they
+	 * appear before any new packets that arrived while we were processing.
+	 * Then wake user-space once.
+	 */
+	if (!skb_queue_empty(&fallback_q)) {
+		spin_lock(&sk->sk_receive_queue.lock);
+		skb_queue_splice(&fallback_q, &sk->sk_receive_queue);
+		spin_unlock(&sk->sk_receive_queue.lock);
+
 		if (hs && hs->orig_data_ready)
 			hs->orig_data_ready(sk);
 	}

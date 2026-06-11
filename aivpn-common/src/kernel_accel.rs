@@ -16,29 +16,49 @@ const fn ior(nr: u64, sz: u64) -> u64  { (1u64 << 30) | (MAGIC << 8) | nr | (sz 
 const fn iowr(nr: u64, sz: u64) -> u64 { (3u64 << 30) | (MAGIC << 8) | nr | (sz << 16) }
 const fn io_(nr: u64) -> u64           { (MAGIC << 8) | nr }
 
-const IOC_SESSION_ADD:  u64 = iow(1,  160);
-const IOC_SESSION_DEL:  u64 = iow(2,   16);
+const IOC_SESSION_ADD:         u64 = iow(1,  160);
+const IOC_SESSION_DEL:         u64 = iow(2,   16);
 #[allow(dead_code)]
-const IOC_SESSION_STAT: u64 = iowr(3,  52);
-const IOC_SET_TUN:      u64 = iow(4,    4);
-const IOC_SET_UDP_SOCK: u64 = iow(5,    4);
-const IOC_FLUSH:        u64 = io_(6);
-const IOC_GET_VERSION:  u64 = ior(7,    4);
+const IOC_SESSION_STAT:        u64 = iowr(3,  52);
+const IOC_SET_TUN:             u64 = iow(4,    4);
+const IOC_SET_UDP_SOCK:        u64 = iow(5,    4);
+const IOC_FLUSH:               u64 = io_(6);
+const IOC_GET_VERSION:         u64 = ior(7,    4);
+const IOC_SESSION_UPDATE_TAGS: u64 = iow(8, 4116);
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 // ── Wire structs (packed, matching C structs in include/uapi/aivpn.h) ─────────
 
+/// Payload for AIVPN_IOC_SESSION_ADD (160 bytes).
 #[repr(C, packed)]
 pub struct SessionAdd {
     pub session_id:   [u8; 16],
     pub session_key:  [u8; 32],
     pub tag_secret:   [u8; 32],
-    pub prng_seed:    [u8; 32],
+    pub nonce_suffix: [u8; 4],    // bytes 8-11 of the 12-byte ChaCha20 nonce
+    pub _reserved:    [u8; 28],
     pub counter_base: u64,
     pub client_ip:    u32,
     pub client_addr:  [u8; 28],
     pub window_ms:    u64,
+}
+
+/// One (tag, counter) pair in a tag-window batch.
+#[repr(C, packed)]
+#[derive(Copy, Clone)]
+pub struct TagWindowEntry {
+    pub tag:     [u8; 8],
+    pub counter: u64,
+}
+
+/// Payload for AIVPN_IOC_SESSION_UPDATE_TAGS (4116 bytes).
+#[repr(C, packed)]
+#[derive(Copy, Clone)]
+pub struct UpdateTagsPayload {
+    pub session_id: [u8; 16],
+    pub count:      u32,
+    pub entries:    [TagWindowEntry; 256],
 }
 
 // ── KernelAccel handle ────────────────────────────────────────────────────────
@@ -85,6 +105,12 @@ impl KernelAccel {
     /// Install a session into the kernel accelerator.
     pub fn session_add(&self, add: &SessionAdd) -> io::Result<()> {
         ioctl_ref(self.fd(), IOC_SESSION_ADD, add)?;
+        Ok(())
+    }
+
+    /// Push a batch of (tag, counter) pairs for the given session.
+    pub fn session_update_tags(&self, payload: &UpdateTagsPayload) -> io::Result<()> {
+        ioctl_ref(self.fd(), IOC_SESSION_UPDATE_TAGS, payload)?;
         Ok(())
     }
 

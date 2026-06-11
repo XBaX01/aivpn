@@ -2,9 +2,11 @@
 /*
  * session_table.h — kernel-side session table for aivpn.ko
  *
- * Wraps a DEFINE_HASHTABLE with 512 buckets keyed on the 8-byte resonance
- * tag.  A global rwlock_t serialises structural changes; per-session
- * spinlock_t protects counter and stats.
+ * Two hash tables:
+ *   aivpn_tag_htable    — keyed by 8-byte resonance tag (RCU, read from softirq)
+ *   aivpn_session_htable — keyed by 16-byte session_id (spinlock, management only)
+ *
+ * Anti-replay uses a WireGuard-style 256-bit sliding window per session.
  */
 
 #ifndef AIVPN_SESSION_TABLE_H
@@ -13,59 +15,72 @@
 #include <linux/types.h>
 #include <linux/hashtable.h>
 #include <linux/spinlock.h>
+#include <linux/rcupdate.h>
 #include <linux/atomic.h>
-#include <linux/net.h>
 #include <crypto/aead.h>
 #include "../include/uapi/aivpn.h"
 
-/* anti-replay bitmap width (256 bits = 4 × unsigned long on 64-bit) */
-#define AIVPN_REPLAY_BITS  256
-#define AIVPN_REPLAY_WORDS (AIVPN_REPLAY_BITS / BITS_PER_LONG)
+/* Hash table sizes */
+#define AIVPN_TAG_HASH_BITS      17   /* 128K buckets for tag entries */
+#define AIVPN_SESSION_HASH_BITS   9   /* 512 buckets for session objects */
+
+/* WireGuard-style sliding window: 256 bits */
+#define AIVPN_REPLAY_WINDOW  256UL
 
 /**
- * struct aivpn_kern_session - per-session state in the kernel
+ * struct aivpn_tag_entry - one (tag, counter) entry in the per-session tag window.
  *
- * Lifetime: allocated by aivpn_session_insert(), freed by
- * aivpn_session_remove() / aivpn_session_flush().  Always heap-allocated
- * with kzalloc so fields are zero-initialised before use.
+ * Installed by AIVPN_IOC_SESSION_UPDATE_TAGS.  The kernel looks up incoming
+ * packets by their 8-byte resonance tag; matching an entry gives both the
+ * session pointer and the counter needed to build the AEAD nonce.
+ *
+ * Protected by RCU on the read side (softirq); spinlock_bh on writes.
+ */
+struct aivpn_tag_entry {
+	u8                       tag[8];      /* wire resonance tag (hash key) */
+	u64                      counter;     /* counter that generated this tag */
+	struct aivpn_kern_session *session;   /* owning session (non-owning ptr) */
+	struct hlist_node        hnode;       /* aivpn_tag_htable linkage */
+	struct rcu_head          rcu;         /* for call_rcu on removal */
+};
+
+/**
+ * struct aivpn_kern_session - per-VPN-session state
+ *
+ * Allocated by AIVPN_IOC_SESSION_ADD, freed after all RCU grace periods
+ * following AIVPN_IOC_SESSION_DEL / flush.
  */
 struct aivpn_kern_session {
-	/* hash table linkage — keyed on tag[] */
-	struct hlist_node  hnode;
+	/* management hash table linkage — keyed on session_id */
+	struct hlist_node  mgmt_node;
 
 	/* identity */
-	u8   tag[8];           /* current resonance tag (hash key) */
-	u8   session_id[16];   /* opaque identifier from user space */
+	u8   session_id[16];
 
 	/* crypto material — zeroed on removal */
-	u8   session_key[32];
-	u8   tag_secret[32];
-	u8   prng_seed[32];
+	struct crypto_aead *tfm;      /* ChaCha20-Poly1305, key pre-loaded */
+	u8   nonce_suffix[4];         /* bytes 8-11 of the 12-byte nonce */
 
-	/* per-packet counter (atomic for lock-free increment on fast path) */
-	atomic64_t counter;
+	/* VPN routing */
+	u32  client_ip;               /* VPN IPv4 (network byte order) */
 
-	/* AEAD transform: one handle per session; key pre-loaded */
-	struct crypto_aead *tfm;
+	/* WireGuard-style anti-replay */
+	spinlock_t        lock;            /* protects counter + replay_window + stats */
+	u64               recv_counter;   /* highest validated counter */
+	unsigned long     replay_window[AIVPN_REPLAY_WINDOW / BITS_PER_LONG];
 
-	/* routing */
-	u32  client_ip;                      /* VPN IPv4 (network byte order) */
-	struct sockaddr_storage client_addr; /* UDP peer */
+	/* stats (updated under lock) */
+	u64  rx_packets;
+	u64  rx_bytes;
+	u64  tx_packets;
+	u64  tx_bytes;
 
-	/* tag validity window */
-	u64  window_ms;
+	/* tag window: pointers to tag entries installed in aivpn_tag_htable */
+	struct aivpn_tag_entry   *tag_entries[AIVPN_TAG_WINDOW_SLOTS];
+	int                       tag_entry_count;
 
-	/* anti-replay bitmap (256 slots) */
-	unsigned long replay_bitmap[AIVPN_REPLAY_WORDS];
-
-	/* stats */
-	atomic64_t rx_packets;
-	atomic64_t tx_packets;
-	atomic64_t rx_bytes;
-	atomic64_t tx_bytes;
-
-	/* protects replay_bitmap */
-	spinlock_t lock;
+	/* outbound TX counter for aivpn_encrypt(); atomic, no lock needed */
+	atomic64_t                tx_counter;
 };
 
 /* ── Lifecycle ───────────────────────────────────────────────────────────── */
@@ -75,18 +90,30 @@ void aivpn_session_table_fini(void);
 
 /* ── CRUD ────────────────────────────────────────────────────────────────── */
 
-int aivpn_session_insert(const struct aivpn_session_add *add);
-
-/* Returns session with spinlock held; caller must spin_unlock(&s->lock). */
-struct aivpn_kern_session *aivpn_session_lookup(const u8 *tag, u64 now_ms);
-
+int  aivpn_session_insert(const struct aivpn_session_add *add);
+int  aivpn_session_tags_update(const struct aivpn_session_update_tags *upd);
 int  aivpn_session_remove(const u8 *session_id);
 void aivpn_session_flush(void);
 int  aivpn_session_stat(struct aivpn_session_stat *stat);
 
-/* ── Tag validation ──────────────────────────────────────────────────────── */
+/**
+ * aivpn_tag_lookup - find a session by its wire resonance tag.
+ *
+ * Called from softirq.  Returns a pointer with rcu_read_lock held by the
+ * caller; fills *counter with the nonce counter for this tag.  Returns NULL
+ * if the tag is not in the table.
+ *
+ * Caller must hold rcu_read_lock() across the returned pointer's use and
+ * call rcu_read_unlock() when done.
+ */
+struct aivpn_kern_session *aivpn_tag_lookup(const u8 *tag, u64 *counter);
 
-bool aivpn_tag_valid_window(struct aivpn_kern_session *s,
-			    const u8 *tag, u64 now_ms);
+/**
+ * aivpn_counter_validate - WireGuard-style sliding window anti-replay check.
+ *
+ * Must be called with session->lock held.
+ * Returns true if counter is valid (not a replay); advances the window.
+ */
+bool aivpn_counter_validate(struct aivpn_kern_session *s, u64 counter);
 
 #endif /* AIVPN_SESSION_TABLE_H */

@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use aivpn_common::crypto::{self, decrypt_payload, encrypt_payload, NONCE_SIZE, TAG_SIZE, DEFAULT_WINDOW_MS};
-use aivpn_common::kernel_accel::{KernelAccel, SessionAdd};
+use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use libc;
 use aivpn_common::error::{Error, Result};
 use aivpn_common::mask::{
@@ -1855,6 +1855,10 @@ impl Gateway {
                 if let Err(e) = ka.session_add(&add) {
                     warn!("kernel session_add failed: {e}");
                 }
+                let upd = make_kernel_update_tags(&sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags failed: {e}");
+                }
             }
         }
 
@@ -1914,6 +1918,14 @@ impl Gateway {
         // Refresh tag_map only when the precomputed window moves.
         if refresh_tags {
             self.session_manager.refresh_session_tags(&session_id);
+            if let Some(ref ka) = self.kernel_accel {
+                let sess = session.lock();
+                let upd = make_kernel_update_tags(&sess);
+                drop(sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags (refresh) failed: {e}");
+                }
+            }
         }
 
         // Record traffic stats for neural resonance (Patent 1)
@@ -2428,12 +2440,27 @@ fn make_kernel_session_add(sess: &crate::session::Session) -> SessionAdd {
         session_id:   sess.session_id,
         session_key:  sess.keys.session_key,
         tag_secret:   sess.keys.tag_secret,
-        prng_seed:    sess.keys.prng_seed,
+        nonce_suffix: sess.keys.prng_seed[..4].try_into().unwrap_or([0u8; 4]),
+        _reserved:    [0u8; 28],
         counter_base: sess.counter,
         client_ip,
         client_addr:  ca,
         window_ms:    DEFAULT_WINDOW_MS,
     }
+}
+
+fn make_kernel_update_tags(sess: &crate::session::Session) -> UpdateTagsPayload {
+    // Safety: UpdateTagsPayload is a plain C struct of integers and byte arrays;
+    // zeroed is valid for all fields.
+    let mut payload: UpdateTagsPayload = unsafe { std::mem::zeroed() };
+    payload.session_id = sess.session_id;
+    let mut count = 0usize;
+    for (&counter, tag) in sess.expected_tags.iter().take(256) {
+        payload.entries[count] = TagWindowEntry { tag: *tag, counter };
+        count += 1;
+    }
+    payload.count = count as u32;
+    payload
 }
 
 #[cfg(test)]
