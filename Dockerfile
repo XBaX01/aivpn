@@ -19,6 +19,7 @@ COPY aivpn-server aivpn-server/
 COPY aivpn-client aivpn-client/
 COPY aivpn-android-core aivpn-android-core/
 COPY aivpn-windows aivpn-windows/
+COPY aivpn-ios-core aivpn-ios-core/
 COPY aivpn-common/mask-assets mask-assets/
 
 # Build in release mode (Cargo.lock is auto-generated if missing)
