@@ -20,6 +20,7 @@
 | **Windows** | — | ✅ | ✅ | 通过[Wintun](https://www.wintun.net/)驱动程序 |
 | **Android** | — | ✅ | ✅ | 通过`VpnService`API的原生Kotlin应用 |
 | **iOS** | — | ✅ | ✅ | 通过`NetworkExtension`API的原生SwiftUI应用 |
+| **MikroTik RouterOS** | — | ✅ | ✅ | RouterOS 7.6+容器，支持arm64/armv7/amd64 |
 
 ### 当前客户端状态
 
@@ -28,6 +29,7 @@
 - ✅ Android应用：正常工作
 - ✅ iOS应用：正常工作（构建需要macOS + Xcode 15+）
 - ✅ Windows客户端：正常工作（GUI + CLI）
+- ✅ MikroTik RouterOS容器：正常工作（arm64/armv7/amd64）
 
 ## 📥 下载（预编译二进制）
 
@@ -94,6 +96,22 @@
    /opt/bin/aivpn-client -k "your_connection_key_here"
    ```
 4. 由于这些musl构建是静态链接的，路由器上不需要Rust工具链或额外的共享库。
+
+### 快速开始（MikroTik RouterOS）
+
+1. 启用容器支持：`/system/device-mode/update container=yes`，然后重启路由器
+2. 执行配置命令（详见 [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)）：
+   ```routeros
+   /interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+   /ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+   /container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+   /container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
+   /container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
+   /container/start [find remote-image~"aivpn-mikrotik"]
+   ```
+3. 通过容器添加默认路由：`/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2`
+
+完整文档（包括策略路由配置和故障排除）请参见 [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)。
 
 ### 快速开始（Android）
 
@@ -325,6 +343,17 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
 sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 ```
+
+`listen_addr` 控制监听端口（默认：443）。使用其他端口：
+
+```json
+{
+  "listen_addr": "0.0.0.0:8443",
+  ...
+}
+```
+
+端口会自动嵌入连接密钥中——客户端无需手动配置。环境变量 `AIVPN_LISTEN` 或 `--listen` 命令行参数可覆盖 `server.json` 中的设置。
 
 ### 3.1 客户端管理
 
