@@ -39,6 +39,7 @@ fn test_network_config() -> VpnNetworkConfig {
         server_vpn_ip: "10.99.0.1".parse().unwrap(),
         prefix_len: 24,
         mtu: 1400,
+        keepalive_secs: None,
     }
 }
 

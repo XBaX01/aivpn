@@ -121,14 +121,28 @@ pub fn stop_active_tunnel() {
         .unwrap_or((-1, -1));
 
     if stop_fd >= 0 {
-        let value: u64 = 1;
-        unsafe {
-            let _ = libc::write(
-                stop_fd,
-                &value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>(),
-            );
-        };
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            let value: u64 = 1;
+            unsafe {
+                let _ = libc::write(
+                    stop_fd,
+                    &value as *const u64 as *const libc::c_void,
+                    std::mem::size_of::<u64>(),
+                );
+            };
+        }
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        {
+            let v: u8 = 1;
+            unsafe {
+                let _ = libc::write(
+                    stop_fd,
+                    &v as *const u8 as *const libc::c_void,
+                    1,
+                );
+            };
+        }
     }
 
     if udp_fd >= 0 {
@@ -622,6 +636,7 @@ fn create_protected_udp_socket(
     Ok(fd)
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>> {
     let stop_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     if stop_fd < 0 {
@@ -640,6 +655,28 @@ fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>>
     Ok(AsyncFd::new(owned_stop_fd)?)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    let dup_write = unsafe { libc::dup(write_fd) };
+    if dup_write < 0 {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    session.stop_event_fd.store(dup_write, Ordering::SeqCst);
+    unsafe { libc::close(write_fd) };
+    Ok(AsyncFd::new(unsafe { OwnedFd::from_raw_fd(read_fd) })?)
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
 async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
     loop {
         let mut guard = stop_signal.readable().await?;
@@ -650,6 +687,31 @@ async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result
                     inner.as_raw_fd(),
                     &mut value as *mut u64 as *mut libc::c_void,
                     std::mem::size_of::<u64>(),
+                )
+            };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(r) => return r,
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
+    loop {
+        let mut guard = stop_signal.readable().await?;
+        match guard.try_io(|inner| {
+            let mut b = [0u8; 1];
+            let n = unsafe {
+                libc::read(
+                    inner.as_raw_fd(),
+                    b.as_mut_ptr() as *mut libc::c_void,
+                    1,
                 )
             };
             if n < 0 {

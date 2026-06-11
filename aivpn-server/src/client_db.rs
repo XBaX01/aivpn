@@ -405,6 +405,7 @@ mod tests {
             server_vpn_ip: Ipv4Addr::new(10, 99, 0, 1),
             prefix_len: 24,
             mtu: 1400,
+            keepalive_secs: None,
         }
     }
 
