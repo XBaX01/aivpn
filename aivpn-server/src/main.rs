@@ -29,6 +29,7 @@ struct ServerFileConfig {
     bootstrap_mask_files: Option<Vec<String>>,
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
+    tun_mtu: Option<u16>,
 }
 
 #[tokio::main]
@@ -181,6 +182,10 @@ async fn main() {
         session_timeout_secs: file_config.as_ref().and_then(|c| c.session_timeout_secs),
         idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
         bootstrap_masks,
+        tun_mtu: file_config
+            .as_ref()
+            .and_then(|c| c.tun_mtu)
+            .unwrap_or(aivpn_server::nat::DEFAULT_TUN_MTU),
     };
 
     // Spawn management API (Unix socket, optional)

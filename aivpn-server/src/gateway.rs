@@ -68,6 +68,8 @@ pub struct GatewayConfig {
     pub idle_timeout_secs: Option<u64>,
     /// Optional custom bootstrap masks embedded into signed descriptors.
     pub bootstrap_masks: Vec<MaskProfile>,
+    /// Server-side NAT TUN MTU. Does not affect client VPN MTU (carried in ServerHello).
+    pub tun_mtu: u16,
 }
 
 impl Default for GatewayConfig {
@@ -89,6 +91,7 @@ impl Default for GatewayConfig {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             bootstrap_masks: Vec::new(),
+            tun_mtu: crate::nat::DEFAULT_TUN_MTU,
         }
     }
 }
@@ -581,6 +584,7 @@ impl Gateway {
                 &self.config.tun_name,
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
+                self.config.tun_mtu,
                 self.config.network_config,
             )?;
             nat.create()?;

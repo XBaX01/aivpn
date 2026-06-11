@@ -32,7 +32,7 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15); // closer to WireGuard roaming behavior
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8); // below typical provider NAT UDP timeout (~10-15s)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this

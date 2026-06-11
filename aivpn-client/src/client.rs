@@ -658,7 +658,7 @@ impl AivpnClient {
             pending_mask,
         };
         let config = UploadConfig {
-            keepalive_interval: Duration::from_secs(15),
+            keepalive_interval: Duration::from_secs(8),
             ..Default::default()
         };
         upload_pipeline::run_upload_loop(&mut rx, Some(&mut control_rx), &udp, &mut enc, &config)
