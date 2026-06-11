@@ -48,6 +48,7 @@ class AivpnService : VpnService() {
 
         @Volatile var statusCallback:  ((Boolean, String) -> Unit)? = null
         @Volatile var trafficCallback: ((Long, Long) -> Unit)?      = null
+        @Volatile var tileCallback:    (() -> Unit)?                = null
         @Volatile var isRunning     = false
         @Volatile var isServiceActive = false
         @Volatile var lastStatusText = ""
@@ -86,6 +87,9 @@ class AivpnService : VpnService() {
     @Volatile private var currentUnderlyingNetwork: Network? = null
     @Volatile private var lastNetworkEventAtMs: Long = 0L
     private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
+    // Android reshuffles underlying network IDs when VPN comes up; ignore churn for this window.
+    @Volatile private var postConnectUntilMs: Long = 0L
+    private val POST_CONNECT_COOLDOWN_MS = 5_000L
 
     // ──────────── Service lifecycle ────────────
 
@@ -284,10 +288,15 @@ class AivpnService : VpnService() {
      */
     @Suppress("unused")
     fun onTunnelReady(host: String) {
+        // postConnectUntilMs must be written BEFORE sessionEstablished — network callbacks
+        // check sessionEstablished first and then read postConnectUntilMs; if the order were
+        // reversed a callback could see sessionEstablished=true while postConnectUntilMs=0.
+        postConnectUntilMs = SystemClock.elapsedRealtime() + POST_CONNECT_COOLDOWN_MS
         sessionEstablished = true
         isRunning = true
         lastStatusText = getString(R.string.status_connected, host)
         statusCallback?.invoke(true, lastStatusText)
+        tileCallback?.invoke()
         updateNotification(getString(R.string.notification_connected, host))
         Log.d(TAG, "Tunnel ready: host=$host")
     }
@@ -323,7 +332,10 @@ class AivpnService : VpnService() {
                 // under an established session, restart immediately on the new path.
                 if (previous != null && previous != network && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                    if (now < postConnectUntilMs) {
+                        // VPN just came up — Android re-registers network IDs; ignore this churn.
+                        currentUnderlyingNetwork = network
+                    } else if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
                         Log.d(TAG, "Underlying network switched: $previous -> $network; restarting tunnel")
                         networkTrigger = true
@@ -355,7 +367,7 @@ class AivpnService : VpnService() {
 
                 if (hasUsableDefault && replacement != null && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                    if (now >= postConnectUntilMs && now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
                         Log.d(TAG, "Underlying network moved to $replacement after loss of $network; restarting tunnel")
                         networkTrigger = true
@@ -419,6 +431,7 @@ class AivpnService : VpnService() {
         isRunning = false
         lastStatusText = getString(R.string.status_disconnected)
         statusCallback?.invoke(false, lastStatusText)
+        tileCallback?.invoke()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
