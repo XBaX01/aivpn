@@ -749,6 +749,8 @@ impl Gateway {
             let mdh = self.mask_catalog.packet_mdh_bytes();
             let neural = self.neural_module.clone();
             let ka_cleanup = self.kernel_accel.clone();
+            let rate_limits_cleanup = self.rate_limits.clone();
+            let handshake_cooldowns_cleanup = self.handshake_cooldowns.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -777,6 +779,11 @@ impl Gateway {
                             .await;
                         }
                     }
+
+                    // Prune stale per-IP rate-limit and handshake-cooldown entries.
+                    rate_limits_cleanup.retain(|_, v| v.1.elapsed() < Duration::from_secs(30));
+                    handshake_cooldowns_cleanup
+                        .retain(|_, v| v.1.elapsed() < Duration::from_secs(60));
 
                     let removed = sessions.cleanup_expired();
                     for session_id in &removed {
