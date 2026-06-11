@@ -66,7 +66,6 @@ aivpn-android/**/local.properties
 aivpn-android/**/.cxx/
 aivpn-android/**/captures/
 *.apk
-!releases/*.apk
 *.idsig
 *.aab
 *.ap_
@@ -77,10 +76,8 @@ gen/
 # macOS app build output
 aivpn-macos/build/
 
-# Releases (pre-built binaries for download — keep tracked)
-!releases/
-!releases/*.dmg
-releases/RELEASE_NOTES.md
+# Releases (pre-built binaries for download — ignored)
+/releases/
 
 # Backups (may contain server state / credentials)
 backups/
