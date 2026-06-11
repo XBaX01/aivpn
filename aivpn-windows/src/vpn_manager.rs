@@ -94,7 +94,12 @@ impl VpnManager {
     }
 
     /// Connect using a connection key
-    pub fn connect(&mut self, connection_key: &str, full_tunnel: bool) -> Result<(), String> {
+    pub fn connect(
+        &mut self,
+        connection_key: &str,
+        full_tunnel: bool,
+        proxy_listen: Option<&str>,
+    ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
         }
@@ -119,6 +124,10 @@ impl VpnManager {
 
         if full_tunnel {
             cmd.arg("--full-tunnel");
+        }
+
+        if let Some(addr) = proxy_listen {
+            cmd.arg("--proxy-listen").arg(addr);
         }
 
         // Hide console window on Windows

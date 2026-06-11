@@ -106,6 +106,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         // Options
         (Lang::En, "full_tunnel") => "Route all traffic through VPN",
         (Lang::Ru, "full_tunnel") => "Весь трафик через VPN",
+        (Lang::En, "proxy_mode") => "Proxy mode (no admin rights)",
+        (Lang::Ru, "proxy_mode") => "Прокси-режим (без прав адм.)",
+        (Lang::En, "proxy_addr") => "Listen address",
+        (Lang::Ru, "proxy_addr") => "Адрес прослушивания",
 
         // Misc
         (Lang::En, "show") => "Show",
