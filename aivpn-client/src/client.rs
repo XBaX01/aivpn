@@ -33,6 +33,10 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
+#[cfg(target_os = "linux")]
+use aivpn_common::kernel_accel::KernelAccel;
+#[cfg(target_os = "linux")]
+use libc;
 
 /// RAII guard that aborts a spawned task when dropped.
 /// Used to ensure the admin IPC socket task is cancelled when run() returns,
@@ -112,6 +116,9 @@ pub struct AivpnClient {
     // Recording tracking
     active_recording_session: Option<[u8; 16]>,
     keepalive_interval: Duration,
+    /// Kernel-module accelerator (Linux only, auto-detected via /dev/aivpn).
+    #[cfg(target_os = "linux")]
+    kernel_accel: Option<Arc<KernelAccel>>,
 }
 
 impl AivpnClient {
@@ -132,6 +139,8 @@ impl AivpnClient {
             control_tx: None,
             pending_mask: Arc::new(Mutex::new(None)),
             session_keys: None,
+            #[cfg(target_os = "linux")]
+            kernel_accel: None,
             upload_state: None,
             transition_recv_keys: None,
             transition_recv_deadline: None,
@@ -211,6 +220,40 @@ impl AivpnClient {
         let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
 
         self.udp_socket = Some(Arc::new(socket));
+
+        // Auto-detect kernel acceleration (Linux only).
+        #[cfg(target_os = "linux")]
+        {
+            let ka = KernelAccel::try_open();
+            if ka.is_some() {
+                info!("Kernel acceleration: active (aivpn.ko loaded — /dev/aivpn ready)");
+            } else {
+                info!("Kernel acceleration: not available — using built-in user-space data path");
+            }
+            if let Some(ref ka) = ka {
+                // Wire UDP socket
+                use std::os::unix::io::AsRawFd;
+                let udp_fd = self.udp_socket.as_ref().unwrap().as_raw_fd();
+                if let Err(e) = ka.set_udp_sock(udp_fd) {
+                    warn!("kernel set_udp_sock failed: {e}");
+                }
+                // Wire TUN device (skipped in proxy mode)
+                if self.config.proxy_listen.is_none() {
+                    let tun_name = self.tunnel.name();
+                    if let Ok(cname) = std::ffi::CString::new(tun_name) {
+                        let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+                        if ifindex > 0 {
+                            if let Err(e) = ka.set_tun(ifindex) {
+                                warn!("kernel set_tun failed: {e}");
+                            } else {
+                                info!("Kernel acceleration wired to TUN (ifindex={ifindex})");
+                            }
+                        }
+                    }
+                }
+            }
+            self.kernel_accel = ka.map(Arc::new);
+        }
 
         if self.config.proxy_listen.is_none() {
             self.tunnel.set_server_ip(server_addr.ip().to_string());

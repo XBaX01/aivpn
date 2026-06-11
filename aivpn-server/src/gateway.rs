@@ -17,7 +17,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use aivpn_common::crypto::{self, decrypt_payload, encrypt_payload, NONCE_SIZE, TAG_SIZE};
+use aivpn_common::crypto::{self, decrypt_payload, encrypt_payload, NONCE_SIZE, TAG_SIZE, DEFAULT_WINDOW_MS};
+use aivpn_common::kernel_accel::{KernelAccel, SessionAdd};
+use libc;
 use aivpn_common::error::{Error, Result};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
@@ -247,6 +249,8 @@ pub struct Gateway {
     mask_store: Option<Arc<MaskStore>>,
     /// Active bootstrap descriptors for previous/current/next epochs.
     bootstrap_descriptors: Vec<BootstrapDescriptor>,
+    /// Optional kernel-module accelerator (auto-detected via /dev/aivpn).
+    kernel_accel: Option<Arc<KernelAccel>>,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -536,6 +540,13 @@ impl Gateway {
             mask_catalog.available_count()
         );
 
+        let kernel_accel: Option<Arc<KernelAccel>> = KernelAccel::try_open().map(Arc::new);
+        if kernel_accel.is_some() {
+            info!("Kernel acceleration: active (aivpn.ko loaded — /dev/aivpn ready)");
+        } else {
+            info!("Kernel acceleration: not available — using built-in user-space data path");
+        }
+
         Ok(Self {
             config: config.clone(),
             session_manager,
@@ -552,6 +563,7 @@ impl Gateway {
             recording_manager: Some(recording_manager),
             mask_store: Some(mask_store),
             bootstrap_descriptors,
+            kernel_accel,
         })
     }
 
@@ -632,6 +644,28 @@ impl Gateway {
         );
 
         self.udp_socket = Some(Arc::new(socket));
+
+        // Wire kernel accelerator to live TUN + UDP socket.
+        if let Some(ref ka) = self.kernel_accel {
+            if self.config.enable_nat {
+                let tun_name = self.config.tun_name.as_str();
+                if let Ok(cname) = std::ffi::CString::new(tun_name) {
+                    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+                    if ifindex > 0 {
+                        if let Err(e) = ka.set_tun(ifindex) {
+                            warn!("aivpn: kernel set_tun failed: {e}");
+                        } else {
+                            info!("Kernel acceleration wired to TUN {} (ifindex={ifindex})", tun_name);
+                        }
+                    }
+                }
+            }
+            use std::os::unix::io::AsRawFd;
+            let udp_fd = self.udp_socket.as_ref().unwrap().as_raw_fd();
+            if let Err(e) = ka.set_udp_sock(udp_fd) {
+                warn!("aivpn: kernel set_udp_sock failed: {e}");
+            }
+        }
 
         // Spawn neural resonance check loop (Patent 1 — periodic validation)
         if self.config.enable_neural {
@@ -714,6 +748,7 @@ impl Gateway {
             let socket = self.udp_socket.as_ref().unwrap().clone();
             let mdh = self.mask_catalog.packet_mdh_bytes();
             let neural = self.neural_module.clone();
+            let ka_cleanup = self.kernel_accel.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -748,6 +783,9 @@ impl Gateway {
                         // Release per-session neural traffic stats; without this the
                         // neural_module's DashMap grows unbounded as sessions expire.
                         neural.lock().cleanup_stats(*session_id);
+                        if let Some(ref ka) = ka_cleanup {
+                            let _ = ka.session_remove(session_id);
+                        }
                     }
                     // Stop active recordings for removed sessions
                     if let Some(ref rec) = recorder {
@@ -1811,6 +1849,13 @@ impl Gateway {
                 sess.send_counter,
                 sess.counter
             );
+            // Install session into kernel accelerator now that keys are stable.
+            if let Some(ref ka) = self.kernel_accel {
+                let add = make_kernel_session_add(&sess);
+                if let Err(e) = ka.session_add(&add) {
+                    warn!("kernel session_add failed: {e}");
+                }
+            }
         }
 
         // Extract pad_len from inside decrypted data and strip padding
@@ -2050,6 +2095,9 @@ impl Gateway {
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
                 self.neural_module.lock().cleanup_stats(session_id);
+                if let Some(ref ka) = self.kernel_accel {
+                    let _ = ka.session_remove(&session_id);
+                }
                 if let Some(ref recorder) = self.recording_manager {
                     let socket = self.udp_socket.as_ref().unwrap().clone();
                     let store = recorder.store();
@@ -2355,6 +2403,36 @@ impl Gateway {
     /// Get metrics reference
     pub fn metrics(&self) -> &Arc<MetricsCollector> {
         &self.metrics
+    }
+}
+
+fn make_kernel_session_add(sess: &crate::session::Session) -> SessionAdd {
+    let client_ip = match sess.client_addr.ip() {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    };
+    let mut ca = [0u8; 28];
+    match sess.client_addr {
+        SocketAddr::V4(ref v4) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v4.port().to_be_bytes());
+            ca[4..8].copy_from_slice(&v4.ip().octets());
+        }
+        SocketAddr::V6(ref v6) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET6 as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v6.port().to_be_bytes());
+            ca[8..24].copy_from_slice(&v6.ip().octets());
+        }
+    }
+    SessionAdd {
+        session_id:   sess.session_id,
+        session_key:  sess.keys.session_key,
+        tag_secret:   sess.keys.tag_secret,
+        prng_seed:    sess.keys.prng_seed,
+        counter_base: sess.counter,
+        client_ip,
+        client_addr:  ca,
+        window_ms:    DEFAULT_WINDOW_MS,
     }
 }
 

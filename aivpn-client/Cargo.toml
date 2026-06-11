@@ -54,3 +54,6 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 
 # Userspace TCP/IP stack for proxy mode (--proxy-listen)
 smoltcp = { version = "0.11", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "socket-tcp"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
