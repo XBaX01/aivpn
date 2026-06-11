@@ -17,6 +17,7 @@ use tracing::{error, info};
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/aivpn/server.json";
 const LOCAL_SERVER_CONFIG_PATH: &str = "config/server.json";
+const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:443";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ServerFileConfig {
@@ -539,7 +540,7 @@ fn resolve_network_config(
 }
 
 fn resolve_listen_addr(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -> String {
-    if args.listen == "0.0.0.0:443" {
+    if args.listen == DEFAULT_LISTEN_ADDR {
         file_config
             .and_then(|config| config.listen_addr.clone())
             .unwrap_or_else(|| args.listen.clone())

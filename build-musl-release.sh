@@ -15,6 +15,7 @@ Usage: ./build-musl-release.sh <server|client> <target>
 Supported targets:
   - armv7-unknown-linux-musleabihf
   - mipsel-unknown-linux-musl
+  - aarch64-unknown-linux-musl
 
 Examples:
   ./build-musl-release.sh server armv7-unknown-linux-musleabihf
@@ -58,6 +59,10 @@ case "$TARGET" in
     mipsel-unknown-linux-musl)
         IMAGE_TAG="mipsel-musl"
         ARTIFACT_PATH="releases/${BINARY_NAME}-linux-mipsel-musl"
+        ;;
+    aarch64-unknown-linux-musl)
+        IMAGE_TAG="aarch64-musl"
+        ARTIFACT_PATH="releases/${BINARY_NAME}-linux-aarch64-musl"
         ;;
     *)
         echo "Error: unsupported target '$TARGET'" >&2
