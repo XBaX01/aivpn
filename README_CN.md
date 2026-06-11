@@ -19,12 +19,14 @@
 | **macOS** | — | ✅ | ✅ | 通过`utun`内核接口，自动路由配置 |
 | **Windows** | — | ✅ | ✅ | 通过[Wintun](https://www.wintun.net/)驱动程序 |
 | **Android** | — | ✅ | ✅ | 通过`VpnService`API的原生Kotlin应用 |
+| **iOS** | — | ✅ | ✅ | 通过`NetworkExtension`API的原生SwiftUI应用 |
 
 ### 当前客户端状态
 
 - ✅ macOS应用：正常工作
 - ✅ CLI客户端：正常工作
 - ✅ Android应用：正常工作
+- ✅ iOS应用：正常工作（构建需要macOS + Xcode 15+）
 - ✅ Windows客户端：正常工作（GUI + CLI）
 
 ## 📥 下载（预编译二进制）
@@ -40,6 +42,7 @@
 | **Windows（安装程序）** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | 一键安装程序：GUI应用 + CLI + Wintun驱动。**以管理员身份运行** |
 | **Windows（便携版）** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | 便携归档：`aivpn.exe`（GUI）+ `aivpn-client.exe`（CLI）+ `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | 安装并粘贴你的连接密钥 |
+| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 MB | 通过Xcode Devices或ios-deploy安装；需要免费Apple ID签名（7天有效期） |
 | **Linux服务器** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | 预编译的x86_64 GNU/Linux服务器二进制，用于VPS或快速Docker部署 |
 | **Linux服务器 ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | 用于ARMv7 Linux主机的静态musl服务器二进制 |
 | **Linux服务器 MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 MB | 用于轻量级MIPSel/Entware系统的静态musl服务器二进制 |
@@ -98,6 +101,21 @@
 2. 在应用中粘贴你的连接密钥（`aivpn://...`）
 3. 点击**连接**
 
+### 快速开始（iOS）
+
+1. 在macOS上构建（需要Xcode 15+、`xcodegen`）：
+   ```bash
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+   cargo install xcodegen
+   ./build-ios.sh YOUR_TEAM_ID
+   ```
+2. 在设备上安装`releases/aivpn-ios.ipa`：
+   - 拖拽到**Xcode → Window → Devices and Simulators**，或
+   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
+3. 打开应用，粘贴连接密钥（`aivpn://...`）并点击**连接**
+
+> 免费Apple ID（个人团队）即可——无需付费开发者计划。设备安装7天后过期，需重新签名。
+
 ### Android发布签名
 
 对于生产签名的Android APK，创建`aivpn-android/keystore.properties`：
@@ -143,7 +161,7 @@ cargo install aivpn-server
 
 我们没有在项目中拖入一个会耗尽廉价VPS所有内存的400MB大语言模型，而是：
 
-- **预训练掩码编码器：**对于每个掩码配置文件（WebRTC编解码器、QUIC协议），我们训练了一个微型神经网络（MLP 64→128→64）并直接"烘焙"到二进制文件中。它仅重约66KB！
+- **预生成掩码编码器：**对于每个掩码配置文件（WebRTC编解码器、QUIC协议），我们从掩码的64维签名向量直接确定性地推导出一个微型神经网络（MLP 64→128→64）——以该签名的BLAKE3哈希作为种子。每个掩码唯一，约66KB，无需外部训练文件。
 - **实时分析：**这个神经网络实时分析传入UDP数据包的熵和IAT（到达间隔时间）。
 - **追踪审查者：**如果ISP的DPI系统试图探测我们的服务器（主动探测）或开始限制数据包，神经模块会检测到重建误差（MSE）的峰值。
 - **自动掩码轮换：**一旦AI确定当前掩码已泄露（例如`webrtc_zoom`被标记），服务器和客户端会*无缝*地将流量重塑为备用掩码（例如`dns_over_udp`）。零断开连接！
@@ -186,6 +204,17 @@ cargo build --release
 ./build-musl-release.sh client armv7-unknown-linux-musleabihf
 ./build-musl-release.sh client mipsel-unknown-linux-musl
 ```
+
+构建iOS应用（需要macOS + Xcode 15+）：
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./build-ios.sh              # 未签名构建（CI/模拟器）
+./build-ios.sh YOUR_TEAM_ID # 真机签名（免费Apple ID）
+```
+
+`.ipa`文件复制到`releases/aivpn-ios.ipa`。
 
 要将最新的已发布Linux服务器版本一键部署到VPS：
 
@@ -597,6 +626,8 @@ aivpn/
 │   ├── key_rotation.rs  # 会话密钥轮换
 │   └── metrics.rs       # Prometheus监控
 ├── aivpn-android/       # Android客户端（Kotlin）
+├── aivpn-ios-core/      # iOS Rust静态库（C FFI，socketpair TUN桥接）
+├── aivpn-ios/           # iOS SwiftUI应用 + NEPacketTunnelProvider扩展
 ├── Dockerfile
 ├── docker-compose.yml
 └── build.sh

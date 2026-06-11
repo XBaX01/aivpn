@@ -19,12 +19,14 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 | **macOS** | — | ✅ | ✅ | Via `utun` kernel interface, auto route config |
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
+| **iOS** | — | ✅ | ✅ | Native SwiftUI app via `NetworkExtension` API |
 
 ### Current Client Status
 
 - ✅ macOS app: working
 - ✅ CLI client: working
 - ✅ Android app: working
+- ✅ iOS app: working (build requires macOS + Xcode 15+)
 - ✅ Windows client: working (GUI + CLI)
 
 ## 📥 Downloads (Pre-built Binaries)
@@ -40,6 +42,7 @@ No need to compile — download and run:
 | **Windows (installer)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | One-click installer, includes GUI app + CLI + Wintun driver. **Run as Administrator** |
 | **Windows (portable)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Portable archive: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
+| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 MB | Install via Xcode Devices or ios-deploy; requires free Apple ID signing (7-day) |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | Prebuilt x86_64 GNU/Linux server binary for VPS or fast Docker deploy |
 | **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | Static musl server binary for ARMv7 Linux hosts |
 | **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 MB | Static musl server binary for lightweight MIPSel/Entware systems |
@@ -94,6 +97,20 @@ No need to compile — download and run:
 2. Paste your connection key (`aivpn://...`) into the app
 3. Tap **Connect**
 
+### Quick Start (iOS)
+1. Build on macOS (requires Xcode 15+, `xcodegen`):
+   ```bash
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+   cargo install xcodegen
+   ./build-ios.sh YOUR_TEAM_ID
+   ```
+2. Install `releases/aivpn-ios.ipa` on device:
+   - Drag into **Xcode → Window → Devices and Simulators**, or
+   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
+3. Open the app, paste your connection key (`aivpn://...`) and tap **Connect**
+
+> A free Apple ID (personal team) is sufficient — no paid Developer Program required. Device installs expire after 7 days and must be rebuilt to renew.
+
 ### Android Release Signing
 
 For a production-signed Android APK, create `aivpn-android/keystore.properties`:
@@ -138,7 +155,7 @@ Every donation helps keep AIVPN evolving. Thank you! 🙌
 The most interesting thing under the hood is our AI module called **Neural Resonance**.
 We didn't drag a 400 MB LLM into the project that would eat all the RAM on a cheap VPS. Instead:
 
-- **Baked Mask Encoder:** For each mask profile (WebRTC codec, QUIC protocol) we trained and "baked" a micro neural network (MLP 64→128→64) directly into the binary. It weighs only ~66 KB!
+- **Baked Mask Encoder:** For each mask profile (WebRTC codec, QUIC protocol) we deterministically derive a micro neural network (MLP 64→128→64) directly from the mask's 64-float signature vector — seeded by a BLAKE3 hash of that signature. Structurally unique per mask, ~66 KB, no external training files needed.
 - **Real-time analysis:** This neural net analyzes entropy and IAT (inter-arrival times) of incoming UDP packets on the fly.
 - **Hunting censors:** If the ISP's DPI system tries to probe our server (Active Probing) or starts throttling packets, the neural module detects a spike in reconstruction error (MSE).
 - **Auto mask rotation:** As soon as the AI determines the current mask is compromised (e.g. `webrtc_zoom` got flagged), the server and client *seamlessly* reshape traffic to a backup mask (e.g. `dns_over_udp`). Zero disconnects!
@@ -181,6 +198,17 @@ For static musl builds for ARMv7 servers and Entware-class MIPSel routers:
 ./build-musl-release.sh client armv7-unknown-linux-musleabihf
 ./build-musl-release.sh client mipsel-unknown-linux-musl
 ```
+
+For the iOS app (macOS + Xcode 15+ required):
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./build-ios.sh              # unsigned (CI / simulator)
+./build-ios.sh YOUR_TEAM_ID # signed for real device (free Apple ID)
+```
+
+The `.ipa` is copied to `releases/aivpn-ios.ipa`.
 
 To deploy the latest published Linux server release to a VPS in one command:
 
@@ -592,6 +620,8 @@ aivpn/
 │   ├── key_rotation.rs  # Session key rotation
 │   └── metrics.rs       # Prometheus monitoring
 ├── aivpn-android/       # Android client (Kotlin)
+├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, socketpair TUN bridge)
+├── aivpn-ios/           # iOS SwiftUI app + NEPacketTunnelProvider extension
 ├── Dockerfile
 ├── docker-compose.yml
 └── build.sh
