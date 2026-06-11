@@ -600,6 +600,29 @@ wintun.dll         # Wintun网络驱动
 
 > 客户端将通过`route add`自动配置路由，并在退出时清理它们。
 
+### 4.1 代理模式（SOCKS5，无需root）
+
+客户端可以作为本地 **SOCKS5 代理**运行，而无需创建 TUN 设备。这样您可以将特定浏览器或应用程序通过 VPN 路由，无需管理员/root 权限，也无需安装内核驱动程序。
+
+```bash
+# 在 1080 端口启动 SOCKS5 代理（无需 sudo）
+aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
+```
+
+将您的应用程序配置为使用 `127.0.0.1:1080` 的 `SOCKS5` 代理：
+
+| 应用程序 | 配置方法 |
+|---------|---------|
+| **Firefox** | 设置 → 网络设置 → 手动代理配置 → SOCKS5 `127.0.0.1:1080`，启用"通过代理解析DNS" |
+| **Chrome / Chromium** | 使用 `--proxy-server=socks5://127.0.0.1:1080` 启动 |
+| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
+| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
+
+**限制：**
+- 不支持 IPv6 目标地址（请使用主机名或 IPv4）
+- 不代理 UDP 流量（仅支持 TCP CONNECT）
+- DNS 通过本地系统解析器解析（查询不经过 VPN）
+
 ### 5. Android
 
 1. 安装APK（`aivpn-android/app/build/outputs/apk/debug/app-debug.apk`）

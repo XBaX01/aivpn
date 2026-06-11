@@ -569,6 +569,29 @@ Full tunnel:
 
 > The client auto-configures routes via `route add` and cleans them up on exit.
 
+### 4.1 Proxy Mode (SOCKS5, no root required)
+
+Instead of a TUN device, the client can run as a local **SOCKS5 proxy**. This lets you route a specific browser or application through the VPN without administrator/root privileges and without any kernel driver.
+
+```bash
+# Start the SOCKS5 proxy on port 1080 (no sudo needed)
+aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
+```
+
+Configure your application to use `SOCKS5` at `127.0.0.1:1080`:
+
+| Application | How to configure |
+|-------------|-----------------|
+| **Firefox** | Settings → Network Settings → Manual proxy → SOCKS5 `127.0.0.1:1080`, enable "Proxy DNS" |
+| **Chrome / Chromium** | Launch with `--proxy-server=socks5://127.0.0.1:1080` |
+| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
+| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
+
+**Limitations:**
+- IPv6 target addresses are not supported (use hostnames or IPv4)
+- UDP traffic is not proxied (TCP CONNECT only)
+- DNS is resolved locally via system resolver (queries bypass the VPN)
+
 ### 5. Android
 
 1. Install the APK (`aivpn-android/app/build/outputs/apk/debug/app-debug.apk`)
