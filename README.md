@@ -241,12 +241,6 @@ fi
 # If they are missing, the container now bootstraps both automatically.
 mkdir -p config
 
-# Enable NAT (required for internet access from VPN)
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-
 # Fast start from the prebuilt Linux release binary
 AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt $AIVPN_COMPOSE up -d aivpn-server
 
@@ -256,7 +250,7 @@ $AIVPN_COMPOSE up -d aivpn-server
 
 The fast path expects `releases/aivpn-server-linux-x86_64` to be present locally. Build it with `./build-server-release.sh` or download it from Releases before starting Docker.
 
-For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, enables IPv4 forwarding, adds the NAT rule for the default interface, and starts Docker with `Dockerfile.prebuilt`.
+For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, and starts Docker with `Dockerfile.prebuilt`. The server manages IPv4 forwarding and NAT automatically on startup.
 
 If your firewall is enabled, also allow `443/udp` using the tool your system uses:
 
@@ -288,14 +282,7 @@ Start it up:
 sudo ./target/release/aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
 ```
 
-Enable NAT:
-
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-```
+> The server automatically enables IPv4 forwarding and installs NAT masquerade rules on startup (using nftables if available, otherwise iptables). No manual `iptables` configuration is required.
 
 If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/server.json` as the authoritative source:
 
@@ -311,14 +298,7 @@ If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/
 }
 ```
 
-Then match the NAT rule to that subnet, for example:
-
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-```
+The server reads `network_config` from `server.json` and automatically installs the NAT rule for the correct subnet on startup.
 
 ### 3.1 Client Management
 
@@ -446,7 +426,7 @@ sudo ./target/release/aivpn-client -k "aivpn://..."
 
 ```bash
 # Send record start command through the VPN tunnel
-aivpn record start --service zoom
+aivpn-client record start --service zoom
 ```
 
 **4. Use the service normally** for 30-60 seconds to capture diverse traffic patterns.
@@ -454,19 +434,15 @@ aivpn record start --service zoom
 **5. Stop recording:**
 
 ```bash
-aivpn record stop
+aivpn-client record stop
 ```
 
-The server will analyze the captured packets and generate a new mask. You'll see output like:
+The server analyzes the captured packets and generates a new mask. Progress appears in server logs:
 
 ```
-✅ Mask generated and tested!
-
-   Mask ID:     zoom_custom_abc123
-   Service:     zoom
-   Confidence:  0.87
-
-   Broadcasting to all clients...
+INFO Analysis complete for 'zoom': 1243 packets, up=621 down=622, confidence=0.87
+INFO Self-test passed for 'zoom': up(size=0.923,iat=0.891) down(size=0.908,iat=0.876) header=0.94 fsm=0.89, confidence=0.87
+INFO Mask 'zoom_custom_abc123' stored and broadcast to active sessions
 ```
 
 #### Requirements for Good Masks
@@ -615,7 +591,7 @@ aivpn/
 ├── aivpn-server/src/
 │   ├── gateway.rs       # UDP gateway, MaskCatalog, resonance loop
 │   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT forwarder (iptables)
+│   ├── nat.rs           # NAT forwarder (nftables/iptables, auto-detected)
 │   ├── client_db.rs     # Client database (PSK, static IP, stats)
 │   ├── key_rotation.rs  # Session key rotation
 │   └── metrics.rs       # Prometheus monitoring

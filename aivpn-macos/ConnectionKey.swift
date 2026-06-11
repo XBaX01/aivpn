@@ -63,43 +63,51 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
 /// Менеджер хранения ключей
 class KeychainStorage: ObservableObject {
     static let shared = KeychainStorage()
-    
+
     @Published var keys: [ConnectionKey] = []
     @Published var selectedKeyId: String?
-    
-    private let userDefaults = UserDefaults.standard
-    private let keysKey = "saved_connection_keys"
+
+    private let keychain = KeychainHelper()
+    private let keychainKey = "connection_keys_v1"
+    private let defaults = UserDefaults.standard
     private let selectedKeyKey = "selected_connection_key_id"
-    
+
     init() {
         loadKeys()
     }
-    
-    /// Загрузить ключи из UserDefaults
+
+    /// Загрузить ключи из Keychain (с миграцией из UserDefaults)
     func loadKeys() {
-        if let data = userDefaults.data(forKey: keysKey),
+        if let json = keychain.load(key: keychainKey),
+           let data = json.data(using: .utf8),
            let decoded = try? JSONDecoder().decode([ConnectionKey].self, from: data) {
             keys = decoded
+        } else if let data = defaults.data(forKey: "saved_connection_keys"),
+                  let decoded = try? JSONDecoder().decode([ConnectionKey].self, from: data) {
+            // Migrate from UserDefaults to Keychain
+            keys = decoded
+            saveKeys()
+            defaults.removeObject(forKey: "saved_connection_keys")
         }
-        
-        // Загрузить выбранный ключ
-        selectedKeyId = userDefaults.string(forKey: selectedKeyKey)
-        
-        // Если выбранный ключ отсутствует или удален, выбрать первый
+
+        // selectedKeyId хранится в UserDefaults — это UI-состояние, не секрет
+        selectedKeyId = defaults.string(forKey: selectedKeyKey)
+
         if selectedKeyId != nil && !keys.contains(where: { $0.id == selectedKeyId }) {
             selectedKeyId = nil
         }
 
         if selectedKeyId == nil && !keys.isEmpty {
             selectedKeyId = keys.first?.id
-            userDefaults.set(selectedKeyId, forKey: selectedKeyKey)
+            defaults.set(selectedKeyId, forKey: selectedKeyKey)
         }
     }
-    
-    /// Сохранить ключи
+
+    /// Сохранить ключи в Keychain
     private func saveKeys() {
-        if let encoded = try? JSONEncoder().encode(keys) {
-            userDefaults.set(encoded, forKey: keysKey)
+        if let encoded = try? JSONEncoder().encode(keys),
+           let json = String(data: encoded, encoding: .utf8) {
+            keychain.save(key: keychainKey, value: json)
         }
     }
     
@@ -160,14 +168,14 @@ class KeychainStorage: ObservableObject {
         // Если удалили выбранный, выбрать другой
         if selectedKeyId == id {
             selectedKeyId = keys.first?.id
-            userDefaults.set(selectedKeyId, forKey: selectedKeyKey)
+            defaults.set(selectedKeyId, forKey: selectedKeyKey)
         }
     }
-    
+
     /// Выбрать ключ
     func selectKey(id: String?) {
         selectedKeyId = id
-        userDefaults.set(id, forKey: selectedKeyKey)
+        defaults.set(id, forKey: selectedKeyKey)
     }
     
     /// Получить выбранный ключ

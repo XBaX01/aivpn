@@ -685,6 +685,7 @@ mod tests {
             bootstrap_mask_files: None,
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
@@ -714,6 +715,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![empty_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -745,6 +747,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -813,6 +816,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![single_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -911,6 +915,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
