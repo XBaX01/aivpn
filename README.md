@@ -19,12 +19,14 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 | **macOS** | — | ✅ | ✅ | Via `utun` kernel interface, auto route config |
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
+| **iOS** | — | ✅ | ✅ | Native SwiftUI app via `NetworkExtension` API |
 
 ### Current Client Status
 
 - ✅ macOS app: working
 - ✅ CLI client: working
 - ✅ Android app: working
+- ✅ iOS app: working (build requires macOS + Xcode 15+)
 - ✅ Windows client: working (GUI + CLI)
 
 ## 📥 Downloads (Pre-built Binaries)
@@ -40,6 +42,7 @@ No need to compile — download and run:
 | **Windows (installer)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | One-click installer, includes GUI app + CLI + Wintun driver. **Run as Administrator** |
 | **Windows (portable)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Portable archive: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
+| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 MB | Install via Xcode Devices or ios-deploy; requires free Apple ID signing (7-day) |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | Prebuilt x86_64 GNU/Linux server binary for VPS or fast Docker deploy |
 | **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | Static musl server binary for ARMv7 Linux hosts |
 | **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 MB | Static musl server binary for lightweight MIPSel/Entware systems |
@@ -94,6 +97,20 @@ No need to compile — download and run:
 2. Paste your connection key (`aivpn://...`) into the app
 3. Tap **Connect**
 
+### Quick Start (iOS)
+1. Build on macOS (requires Xcode 15+, `xcodegen`):
+   ```bash
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+   cargo install xcodegen
+   ./build-ios.sh YOUR_TEAM_ID
+   ```
+2. Install `releases/aivpn-ios.ipa` on device:
+   - Drag into **Xcode → Window → Devices and Simulators**, or
+   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
+3. Open the app, paste your connection key (`aivpn://...`) and tap **Connect**
+
+> A free Apple ID (personal team) is sufficient — no paid Developer Program required. Device installs expire after 7 days and must be rebuilt to renew.
+
 ### Android Release Signing
 
 For a production-signed Android APK, create `aivpn-android/keystore.properties`:
@@ -138,7 +155,7 @@ Every donation helps keep AIVPN evolving. Thank you! 🙌
 The most interesting thing under the hood is our AI module called **Neural Resonance**.
 We didn't drag a 400 MB LLM into the project that would eat all the RAM on a cheap VPS. Instead:
 
-- **Baked Mask Encoder:** For each mask profile (WebRTC codec, QUIC protocol) we trained and "baked" a micro neural network (MLP 64→128→64) directly into the binary. It weighs only ~66 KB!
+- **Baked Mask Encoder:** For each mask profile (WebRTC codec, QUIC protocol) we deterministically derive a micro neural network (MLP 64→128→64) directly from the mask's 64-float signature vector — seeded by a BLAKE3 hash of that signature. Structurally unique per mask, ~66 KB, no external training files needed.
 - **Real-time analysis:** This neural net analyzes entropy and IAT (inter-arrival times) of incoming UDP packets on the fly.
 - **Hunting censors:** If the ISP's DPI system tries to probe our server (Active Probing) or starts throttling packets, the neural module detects a spike in reconstruction error (MSE).
 - **Auto mask rotation:** As soon as the AI determines the current mask is compromised (e.g. `webrtc_zoom` got flagged), the server and client *seamlessly* reshape traffic to a backup mask (e.g. `dns_over_udp`). Zero disconnects!
@@ -182,6 +199,17 @@ For static musl builds for ARMv7 servers and Entware-class MIPSel routers:
 ./build-musl-release.sh client mipsel-unknown-linux-musl
 ```
 
+For the iOS app (macOS + Xcode 15+ required):
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./build-ios.sh              # unsigned (CI / simulator)
+./build-ios.sh YOUR_TEAM_ID # signed for real device (free Apple ID)
+```
+
+The `.ipa` is copied to `releases/aivpn-ios.ipa`.
+
 To deploy the latest published Linux server release to a VPS in one command:
 
 ```bash
@@ -213,12 +241,6 @@ fi
 # If they are missing, the container now bootstraps both automatically.
 mkdir -p config
 
-# Enable NAT (required for internet access from VPN)
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-
 # Fast start from the prebuilt Linux release binary
 AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt $AIVPN_COMPOSE up -d aivpn-server
 
@@ -228,7 +250,7 @@ $AIVPN_COMPOSE up -d aivpn-server
 
 The fast path expects `releases/aivpn-server-linux-x86_64` to be present locally. Build it with `./build-server-release.sh` or download it from Releases before starting Docker.
 
-For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, enables IPv4 forwarding, adds the NAT rule for the default interface, and starts Docker with `Dockerfile.prebuilt`.
+For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, and starts Docker with `Dockerfile.prebuilt`. The server manages IPv4 forwarding and NAT automatically on startup.
 
 If your firewall is enabled, also allow `443/udp` using the tool your system uses:
 
@@ -260,14 +282,7 @@ Start it up:
 sudo ./target/release/aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
 ```
 
-Enable NAT:
-
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-```
+> The server automatically enables IPv4 forwarding and installs NAT masquerade rules on startup (using nftables if available, otherwise iptables). No manual `iptables` configuration is required.
 
 If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/server.json` as the authoritative source:
 
@@ -283,14 +298,7 @@ If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/
 }
 ```
 
-Then match the NAT rule to that subnet, for example:
-
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-```
+The server reads `network_config` from `server.json` and automatically installs the NAT rule for the correct subnet on startup.
 
 ### 3.1 Client Management
 
@@ -418,7 +426,7 @@ sudo ./target/release/aivpn-client -k "aivpn://..."
 
 ```bash
 # Send record start command through the VPN tunnel
-aivpn record start --service zoom
+aivpn-client record start --service zoom
 ```
 
 **4. Use the service normally** for 30-60 seconds to capture diverse traffic patterns.
@@ -426,19 +434,15 @@ aivpn record start --service zoom
 **5. Stop recording:**
 
 ```bash
-aivpn record stop
+aivpn-client record stop
 ```
 
-The server will analyze the captured packets and generate a new mask. You'll see output like:
+The server analyzes the captured packets and generates a new mask. Progress appears in server logs:
 
 ```
-✅ Mask generated and tested!
-
-   Mask ID:     zoom_custom_abc123
-   Service:     zoom
-   Confidence:  0.87
-
-   Broadcasting to all clients...
+INFO Analysis complete for 'zoom': 1243 packets, up=621 down=622, confidence=0.87
+INFO Self-test passed for 'zoom': up(size=0.923,iat=0.891) down(size=0.908,iat=0.876) header=0.94 fsm=0.89, confidence=0.87
+INFO Mask 'zoom_custom_abc123' stored and broadcast to active sessions
 ```
 
 #### Requirements for Good Masks
@@ -587,11 +591,13 @@ aivpn/
 ├── aivpn-server/src/
 │   ├── gateway.rs       # UDP gateway, MaskCatalog, resonance loop
 │   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT forwarder (iptables)
+│   ├── nat.rs           # NAT forwarder (nftables/iptables, auto-detected)
 │   ├── client_db.rs     # Client database (PSK, static IP, stats)
 │   ├── key_rotation.rs  # Session key rotation
 │   └── metrics.rs       # Prometheus monitoring
 ├── aivpn-android/       # Android client (Kotlin)
+├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, socketpair TUN bridge)
+├── aivpn-ios/           # iOS SwiftUI app + NEPacketTunnelProvider extension
 ├── Dockerfile
 ├── docker-compose.yml
 └── build.sh

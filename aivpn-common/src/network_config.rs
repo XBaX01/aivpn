@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 pub const DEFAULT_VPN_MTU: u16 = 1346;
+pub const DEFAULT_KEEPALIVE_SECS: u8 = 8;
 pub const LEGACY_VPN_PREFIX_LEN: u8 = 24;
 pub const LEGACY_SERVER_VPN_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
@@ -28,6 +29,9 @@ pub struct VpnNetworkConfig {
     pub prefix_len: u8,
     #[serde(default = "default_mtu")]
     pub mtu: u16,
+    /// Keepalive interval pushed to clients in ServerHello. None = client uses its default (8s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u8>,
 }
 
 impl Default for VpnNetworkConfig {
@@ -36,6 +40,7 @@ impl Default for VpnNetworkConfig {
             server_vpn_ip: default_server_vpn_ip(),
             prefix_len: default_prefix_len(),
             mtu: default_mtu(),
+            keepalive_secs: None,
         }
     }
 }
@@ -121,6 +126,7 @@ impl VpnNetworkConfig {
             prefix_len: self.prefix_len,
             mtu: self.mtu,
             mdh_len: default_mdh_len(),
+            keepalive_secs: self.keepalive_secs,
         })
     }
 
@@ -149,6 +155,10 @@ pub struct ClientNetworkConfig {
     /// Defaults to 20 (STUN/WebRTC mask) for backward compatibility.
     #[serde(default = "default_mdh_len")]
     pub mdh_len: u16,
+    /// Keepalive interval in seconds. None = use client default (8s).
+    /// Sent by server in ServerHello to override per-network settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u8>,
 }
 
 fn default_mdh_len() -> u16 {
@@ -156,7 +166,7 @@ fn default_mdh_len() -> u16 {
 }
 
 impl ClientNetworkConfig {
-    pub const WIRE_SIZE: usize = 12;
+    pub const WIRE_SIZE: usize = 13;
     const WIRE_VERSION: u8 = 1;
 
     pub fn validate(&self) -> Result<()> {
@@ -164,6 +174,7 @@ impl ClientNetworkConfig {
             server_vpn_ip: self.server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
+            keepalive_secs: None,
         }
         .client_config(self.client_ip)
         .map(|_| ())
@@ -188,11 +199,13 @@ impl ClientNetworkConfig {
         buf[2..4].copy_from_slice(&self.mtu.to_le_bytes());
         buf[4..8].copy_from_slice(&self.server_vpn_ip.octets());
         buf[8..12].copy_from_slice(&self.client_ip.octets());
+        buf[12] = self.keepalive_secs.unwrap_or(0);
         buf
     }
 
     pub fn decode_wire(data: &[u8]) -> Result<Self> {
-        if data.len() != Self::WIRE_SIZE {
+        // Accept both old (12-byte) and new (13-byte) wire format
+        if data.len() < 12 {
             return Err(Error::InvalidPacket(
                 "Client network config has invalid wire length",
             ));
@@ -203,12 +216,19 @@ impl ClientNetworkConfig {
             ));
         }
 
+        let keepalive_secs = if data.len() >= 13 && data[12] > 0 {
+            Some(data[12])
+        } else {
+            None
+        };
+
         let config = Self {
             prefix_len: data[1],
             mtu: u16::from_le_bytes([data[2], data[3]]),
             server_vpn_ip: Ipv4Addr::new(data[4], data[5], data[6], data[7]),
             client_ip: Ipv4Addr::new(data[8], data[9], data[10], data[11]),
             mdh_len: default_mdh_len(),
+            keepalive_secs,
         };
         config.validate()?;
         Ok(config)
@@ -253,10 +273,28 @@ mod tests {
             prefix_len: 24,
             mtu: 1346,
             mdh_len: 20,
+            keepalive_secs: Some(4),
         };
 
         let decoded = ClientNetworkConfig::decode_wire(&config.encode_wire()).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn wire_decode_old_12_byte_format_backward_compat() {
+        // Old 12-byte wire format must decode cleanly with keepalive_secs = None
+        let old_wire: [u8; 12] = {
+            let mut buf = [0u8; 12];
+            buf[0] = 1; // version
+            buf[1] = 24; // prefix_len
+            buf[2..4].copy_from_slice(&1346u16.to_le_bytes());
+            buf[4..8].copy_from_slice(&Ipv4Addr::new(10, 150, 0, 1).octets());
+            buf[8..12].copy_from_slice(&Ipv4Addr::new(10, 150, 0, 2).octets());
+            buf
+        };
+        let decoded = ClientNetworkConfig::decode_wire(&old_wire).unwrap();
+        assert_eq!(decoded.keepalive_secs, None);
+        assert_eq!(decoded.mtu, 1346);
     }
 
     #[test]
@@ -265,6 +303,7 @@ mod tests {
             server_vpn_ip: Ipv4Addr::new(10, 150, 0, 1),
             prefix_len: 24,
             mtu: 1346,
+            keepalive_secs: None,
         };
 
         assert_eq!(config.network_addr(), Ipv4Addr::new(10, 150, 0, 0));

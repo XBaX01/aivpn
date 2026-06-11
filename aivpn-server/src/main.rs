@@ -29,6 +29,7 @@ struct ServerFileConfig {
     bootstrap_mask_files: Option<Vec<String>>,
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
+    tun_mtu: Option<u16>,
 }
 
 #[tokio::main]
@@ -181,6 +182,10 @@ async fn main() {
         session_timeout_secs: file_config.as_ref().and_then(|c| c.session_timeout_secs),
         idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
         bootstrap_masks,
+        tun_mtu: file_config
+            .as_ref()
+            .and_then(|c| c.tun_mtu)
+            .unwrap_or(aivpn_server::nat::DEFAULT_TUN_MTU),
     };
 
     // Spawn management API (Unix socket, optional)
@@ -522,6 +527,7 @@ fn resolve_network_config(
                         .unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
                 )?,
                 mtu: DEFAULT_VPN_MTU,
+                keepalive_secs: None,
             }
         }
     } else {
@@ -680,6 +686,7 @@ mod tests {
             bootstrap_mask_files: None,
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
@@ -709,6 +716,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![empty_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -740,6 +748,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -808,6 +817,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![single_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -906,6 +916,7 @@ mod tests {
             bootstrap_mask_files: Some(vec![array_file.to_string_lossy().to_string()]),
             session_timeout_secs: None,
             idle_timeout_secs: None,
+            tun_mtu: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));

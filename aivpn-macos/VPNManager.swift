@@ -656,7 +656,4 @@ class VPNManager: ObservableObject {
         }
     }
 
-    deinit {
-        disconnect()
-    }
 }

@@ -20,12 +20,14 @@
 | **macOS** | — | ✅ | ✅ | Через `utun`, автоматическая настройка маршрутов |
 | **Windows** | — | ✅ | ✅ | Через [Wintun](https://www.wintun.net/) драйвер |
 | **Android** | — | ✅ | ✅ | Kotlin-приложение через `VpnService` API |
+| **iOS** | — | ✅ | ✅ | Нативное SwiftUI-приложение через `NetworkExtension` API |
 
 ### Текущий статус клиентов
 
 - ✅ Приложение macOS: работает
 - ✅ CLI-клиент: работает
 - ✅ Android-приложение: работает
+- ✅ iOS-приложение: работает (сборка требует macOS + Xcode 15+)
 - ✅ Windows-клиент: работает (GUI + CLI)
 
 ## 📥 Готовые бинарники
@@ -41,6 +43,7 @@
 | **Windows (установщик)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 МБ | Установщик в один клик: GUI-приложение + CLI + Wintun драйвер. **Запускать от администратора** |
 | **Windows (портативная)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Портативный архив: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
 | **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
+| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 МБ | Установка через Xcode Devices или ios-deploy; требует бесплатную подпись Apple ID (7 дней) |
 | **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 МБ | Готовый x86_64 GNU/Linux бинарник сервера для VPS или быстрого Docker-деплоя |
 | **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl бинарник сервера для ARMv7 Linux-хостов |
 | **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 МБ | Статический musl бинарник сервера для лёгких MIPSel/Entware систем |
@@ -104,6 +107,20 @@ cargo install aivpn-client
 cargo install aivpn-server
 ```
 
+### Быстрый старт (iOS)
+1. Соберите на macOS (требуется Xcode 15+, `xcodegen`):
+   ```bash
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+   cargo install xcodegen
+   ./build-ios.sh ВАШ_TEAM_ID
+   ```
+2. Установите `releases/aivpn-ios.ipa` на устройство:
+   - Перетащите в **Xcode → Window → Devices and Simulators**, или
+   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
+3. Откройте приложение, вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
+
+> Бесплатный Apple ID (personal team) достаточен — платный Developer Program не нужен. Установки истекают через 7 дней.
+
 ## ❤️ Поддержать проект
 
 Если проект оказался полезным, вы можете поддержать его развитие донейшеном через Tribute:
@@ -117,7 +134,7 @@ cargo install aivpn-server
 Самое интересное под капотом — это наш ИИ-модуль, который мы называем **Neural Resonance**.
 Мы не стали тащить в проект огромные LLM-модели на 400 мегабайт, которые сожрут всю память на дешевом VPS. Вместо этого:
 
-- **Baked Mask Encoder:** Под каждую маску (кодек WebRTC, протокол QUIC) мы натренировали и "запекли" в бинарник микро-нейросеть (MLP 64→128→64). Она весит всего ~66 КБ!
+- **Baked Mask Encoder:** Под каждую маску (кодек WebRTC, протокол QUIC) мы детерминированно выводим микро-нейросеть (MLP 64→128→64) напрямую из 64-float вектора подписи маски — засеянного BLAKE3-хэшем этой подписи. Уникальна для каждой маски, ~66 КБ, никаких внешних файлов обучения не требуется.
 - **Анализ в реальном времени:** Эта нейронка на лету анализирует энтропию и IAT (тайминги) прилетающих UDP-пакетов.
 - **Охота на цензоров:** Если DPI-система провайдера пытается прощупать наш сервер (Active Probing) или начинает задерживать пакеты, нейромодуль видит рост ошибки реконструкции (MSE).
 - **Авто-ротация масок:** Как только ИИ понимает, что текущая маска скомпрометирована (например, `webrtc_zoom` спалили), сервер и клиент *без разрыва соединения* перестраивают шейпинг трафика под резервную маску (например, на `dns_over_udp`). Никаких дисконнектов!
@@ -160,6 +177,17 @@ cargo build --release
 ./build-musl-release.sh client armv7-unknown-linux-musleabihf
 ./build-musl-release.sh client mipsel-unknown-linux-musl
 ```
+
+Для сборки iOS-приложения (требуется macOS + Xcode 15+):
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./build-ios.sh              # неподписанная сборка (CI / симулятор)
+./build-ios.sh ВАШ_TEAM_ID  # подписанная для устройства (бесплатный Apple ID)
+```
+
+Артефакт копируется в `releases/aivpn-ios.ipa`.
 
 Чтобы развернуть последнюю опубликованную Linux-версию сервера на VPS одной командой:
 
@@ -582,6 +610,8 @@ aivpn/
 │   ├── key_rotation.rs  # Ротация сессионных ключей
 │   └── metrics.rs       # Prometheus-мониторинг
 ├── aivpn-android/       # Android-клиент (Kotlin)
+├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, мост socketpair TUN)
+├── aivpn-ios/           # iOS SwiftUI-приложение + расширение NEPacketTunnelProvider
 ├── Dockerfile
 ├── docker-compose.yml
 └── build.sh

@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var connectionKey: String = ""
     @State private var keyName: String = ""
     @State private var showKeyInput: Bool = false
+    @State private var showConnectionKey: Bool = false
     @AppStorage("fullTunnel") private var fullTunnel: Bool = false
     @State private var editingKeyId: String?
     @State private var editingKeyName: String = ""
@@ -184,10 +185,25 @@ struct ContentView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11))
                     
-                    SecureField(loc.t("enter_key"), text: $connectionKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 10))
-                        .help("aivpn://...")
+                    HStack(spacing: 4) {
+                        if showConnectionKey {
+                            TextField(loc.t("enter_key"), text: $connectionKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 10))
+                                .help("aivpn://...")
+                        } else {
+                            SecureField(loc.t("enter_key"), text: $connectionKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 10))
+                                .help("aivpn://...")
+                        }
+                        Button(action: { showConnectionKey.toggle() }) {
+                            Image(systemName: showConnectionKey ? "eye.slash" : "eye")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     HStack {
                         Toggle(loc.t("full_tunnel"), isOn: $fullTunnel)
@@ -394,7 +410,8 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .frame(width: 360, height: 420)
+        .frame(width: 360)
+        .frame(minHeight: 420)
         .onReceive(vpn.$isConnected) { connected in
             if let appDelegate = NSApp.delegate as? AppDelegate {
                 appDelegate.updateStatusIcon(connected: connected)
@@ -538,7 +555,8 @@ struct KeyRowView: View {
     let onSelect: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
-    
+
+    @EnvironmentObject var loc: LocalizationManager
     @State private var isHovering = false
     
     var body: some View {
@@ -596,10 +614,10 @@ struct KeyRowView: View {
             // Actions menu - larger button
             Menu {
                 Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
+                    Label(loc.t("edit"), systemImage: "pencil")
                 }
                 Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
+                    Label(loc.t("delete"), systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")

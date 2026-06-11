@@ -748,23 +748,6 @@ impl SessionManager {
         }
     }
 
-    /// Return true when the same public IP already has a fresh ratcheted session
-    /// on a different socket endpoint. This helps ignore stale duplicate-port
-    /// probes instead of spawning a new handshake loop.
-    pub fn has_recent_ratcheted_session_on_other_endpoint(
-        &self,
-        client_addr: &SocketAddr,
-        max_age: Duration,
-    ) -> bool {
-        self.sessions.iter().any(|entry| {
-            let sess = entry.value().lock();
-            sess.client_addr.ip() == client_addr.ip()
-                && sess.client_addr != *client_addr
-                && sess.is_ratcheted
-                && sess.last_seen.elapsed() <= max_age
-        })
-    }
-
     /// Get session by tag (O(1) lookup)
     pub fn get_session_by_tag(&self, tag: &[u8; TAG_SIZE]) -> Option<Arc<Mutex<Session>>> {
         if let Some(entry) = self.tag_map.get(tag) {

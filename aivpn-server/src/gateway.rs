@@ -68,6 +68,8 @@ pub struct GatewayConfig {
     pub idle_timeout_secs: Option<u64>,
     /// Optional custom bootstrap masks embedded into signed descriptors.
     pub bootstrap_masks: Vec<MaskProfile>,
+    /// Server-side NAT TUN MTU. Does not affect client VPN MTU (carried in ServerHello).
+    pub tun_mtu: u16,
 }
 
 impl Default for GatewayConfig {
@@ -89,6 +91,7 @@ impl Default for GatewayConfig {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             bootstrap_masks: Vec::new(),
+            tun_mtu: crate::nat::DEFAULT_TUN_MTU,
         }
     }
 }
@@ -581,6 +584,7 @@ impl Gateway {
                 &self.config.tun_name,
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
+                self.config.tun_mtu,
                 self.config.network_config,
             )?;
             nat.create()?;
@@ -1404,18 +1408,11 @@ impl Gateway {
             // NOTE: We intentionally do NOT drop packets from the same public IP
             // on a different port. Multiple clients behind the same NAT must be
             // able to handshake independently (different PSKs → different sessions).
-
-            // FIX Issue #42: Skip handshake if this IP already has a fresh
-            // ratcheted session on a different port (NAT rebind / stale packets).
-            if self
-                .session_manager
-                .has_recent_ratcheted_session_on_other_endpoint(
-                    &client_addr,
-                    Duration::from_secs(30),
-                )
-            {
-                return Err(Error::InvalidPacket("Active session exists on other port"));
-            }
+            // Mobile carriers (MTS, etc.) change source ports on reconnect — we must
+            // not block new handshakes based on port mismatch with an existing session.
+            // The handshake_locks mutex below serializes concurrent handshakes from
+            // the same IP, preventing the duplicate-session race without blocking
+            // legitimate reconnects from a new port.
 
             // Serialize concurrent handshakes from the same source IP.
             // When a client reconnects rapidly, multiple shard workers may receive

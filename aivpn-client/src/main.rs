@@ -297,6 +297,7 @@ async fn main() {
                             prefix_len: 24,
                             mtu: DEFAULT_VPN_MTU,
                             mdh_len: 20,
+                            keepalive_secs: None,
                         })
                 })
             })
@@ -593,5 +594,6 @@ fn fallback_network_config(tun_addr: &str) -> ClientNetworkConfig {
         prefix_len: 24,
         mtu: DEFAULT_VPN_MTU,
         mdh_len: 20,
+        keepalive_secs: None,
     }
 }

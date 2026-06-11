@@ -32,7 +32,7 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15); // closer to WireGuard roaming behavior
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8); // below typical provider NAT UDP timeout (~10-15s)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
@@ -181,9 +181,9 @@ pub async fn run_tunnel_android(
     let session = Arc::new(SessionRuntime::new());
     let _active_session_guard = activate_session(session.clone())?;
 
-    // ── 1. Ephemeral keypair + initial session keys (Zero-RTT like existing Kotlin) ──
-    let keypair = KeyPair::generate();
-    let dh = keypair.compute_shared(&server_key)?;
+    // ── 1. Ephemeral keypair + initial session keys ──
+    let mut keypair = KeyPair::generate();
+    let mut dh = keypair.compute_shared(&server_key)?;
     let mut keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
 
     // ── 2. Create and protect UDP socket ──
@@ -218,18 +218,13 @@ pub async fn run_tunnel_android(
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
     let keepalive = ControlPayload::Keepalive.encode()?;
-    let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
-
-    let send_handshake =
-        |keys: &SessionKeys, send_counter: &mut u64, send_seq: &mut u16| -> Result<Vec<u8>> {
-            let inner = build_inner_packet(InnerType::Control, *send_seq, &keepalive);
-            let pkt = build_random_mdh_packet(keys, send_counter, &inner, Some(&obf_pub), mdh_len)?;
-            *send_seq = send_seq.wrapping_add(1);
-            Ok(pkt)
-        };
-
-    let init_pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
-    udp.send(&init_pkt).await?;
+    {
+        let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+        let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+    }
 
     // ── 5. Wait for ServerHello with timeout ──
     let mut recv_buf = vec![0u8; BUF_SIZE];
@@ -259,14 +254,28 @@ pub async fn run_tunnel_android(
                 }
             }
             _ = &mut retry => {
-                let pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
+                // Fresh keypair on every retry: if the server already has a session
+                // from a prior attempt (ServerHello sent but never received by the
+                // client), reusing the same keypair causes retry packets to match the
+                // existing session's tag window and be treated as keepalives — the
+                // server never sends a new ServerHello. A new keypair produces new
+                // tags, forcing the server to treat it as a fresh handshake.
+                keypair = KeyPair::generate();
+                dh = keypair.compute_shared(&server_key)?;
+                keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                send_counter = 0;
+                send_seq = 0;
+                let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+                let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+                let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+                send_seq = send_seq.wrapping_add(1);
                 udp.send(&pkt).await?;
             }
         }
     };
 
     let mut recv_win = RecvWindow::new();
-    process_server_hello_with_mdh_len(
+    let server_network_cfg = process_server_hello_with_mdh_len(
         &recv_buf[..n],
         &mut keys,
         &keypair,
@@ -274,6 +283,11 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         mdh_len,
     )?;
+    let keepalive_interval = server_network_cfg
+        .and_then(|c| c.keepalive_secs)
+        .filter(|&s| s > 0)
+        .map(|s| Duration::from_secs(s as u64))
+        .unwrap_or(KEEPALIVE_INTERVAL);
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
         psk.as_ref(),
@@ -361,7 +375,7 @@ pub async fn run_tunnel_android(
             session: session_for_upload,
         };
         let config = UploadConfig {
-            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_interval,
             ..Default::default()
         };
 

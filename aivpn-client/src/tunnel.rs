@@ -75,6 +75,7 @@ impl TunnelConfig {
             prefix_len: self.prefix_len,
             mtu: self.mtu,
             mdh_len: self.mdh_len,
+            keepalive_secs: None,
         };
         network_config.validate()?;
         Ok(network_config)
@@ -106,6 +107,7 @@ impl TunnelConfig {
             server_vpn_ip: self.configured_server_vpn_ip()?,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
+            keepalive_secs: None,
         };
         network_config.validate()?;
         Ok(network_config)
