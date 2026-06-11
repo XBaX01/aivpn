@@ -304,7 +304,8 @@ fn battle_session_multiple_clients() {
     let current_tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     for (i, client_keys) in client_keys_list.iter().enumerate() {
         let tag_current = generate_resonance_tag(&client_keys.tag_secret, 0, current_tw);
-        let tag_prev = generate_resonance_tag(&client_keys.tag_secret, 0, current_tw.wrapping_sub(1));
+        let tag_prev =
+            generate_resonance_tag(&client_keys.tag_secret, 0, current_tw.wrapping_sub(1));
 
         let found_current = mgr.get_session_by_tag(&tag_current);
         let found_prev = mgr.get_session_by_tag(&tag_prev);
