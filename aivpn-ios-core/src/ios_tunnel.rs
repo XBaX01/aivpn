@@ -95,7 +95,9 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
         .lock()
         .map_err(|_| Error::Session("Session lock poisoned".into()))?;
     if guard.is_some() {
-        return Err(Error::Session("Another iOS tunnel session is already active".into()));
+        return Err(Error::Session(
+            "Another iOS tunnel session is already active".into(),
+        ));
     }
     *guard = Some(session.clone());
     Ok(ActiveSessionGuard { session })
@@ -106,10 +108,12 @@ pub fn stop_active_tunnel() {
         .lock()
         .ok()
         .and_then(|guard| {
-            guard.as_ref().map(|s| (
-                s.udp_control_fd.swap(-1, Ordering::SeqCst),
-                s.stop_pipe_write.load(Ordering::SeqCst),
-            ))
+            guard.as_ref().map(|s| {
+                (
+                    s.udp_control_fd.swap(-1, Ordering::SeqCst),
+                    s.stop_pipe_write.load(Ordering::SeqCst),
+                )
+            })
         })
         .unwrap_or((-1, -1));
 
@@ -206,7 +210,8 @@ pub async fn run_tunnel_ios(
         Ok(pkt)
     };
 
-    udp.send(&send_hs(&keys, &mut send_counter, &mut send_seq)?).await?;
+    udp.send(&send_hs(&keys, &mut send_counter, &mut send_seq)?)
+        .await?;
 
     // 5. Wait for ServerHello
     let mut recv_buf = vec![0u8; BUF_SIZE];
@@ -216,7 +221,10 @@ pub async fn run_tunnel_ios(
         if now >= deadline {
             return Err(Error::Session("Handshake timeout (10 s)".into()));
         }
-        let wait = std::cmp::min(HANDSHAKE_RETRY_INTERVAL, deadline.saturating_duration_since(now));
+        let wait = std::cmp::min(
+            HANDSHAKE_RETRY_INTERVAL,
+            deadline.saturating_duration_since(now),
+        );
         let retry = time::sleep(wait);
         tokio::pin!(retry);
         tokio::select! {
@@ -232,9 +240,18 @@ pub async fn run_tunnel_ios(
 
     let mut recv_win = RecvWindow::new();
     process_server_hello_with_mdh_len(
-        &recv_buf[..n], &mut keys, &keypair, &mut recv_win, &mut send_counter, mdh_len,
+        &recv_buf[..n],
+        &mut keys,
+        &keypair,
+        &mut recv_win,
+        &mut send_counter,
+        mdh_len,
     )?;
-    let mut tr_keys: Option<SessionKeys> = Some(derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes()));
+    let mut tr_keys: Option<SessionKeys> = Some(derive_session_keys(
+        &dh,
+        psk.as_ref(),
+        &keypair.public_key_bytes(),
+    ));
     let mut tr_deadline = Some(Instant::now() + Duration::from_secs(2));
     let mut tr_win = std::mem::take(&mut recv_win);
 
@@ -268,8 +285,12 @@ pub async fn run_tunnel_ios(
             match tun_async_read(&tun_read, &mut buf).await {
                 Ok(0) => continue,
                 Ok(n) => {
-                    if buf[0] >> 4 != 4 { continue; } // IPv4 only
-                    if tun_tx.send(buf[..n].to_vec()).await.is_err() { break; }
+                    if buf[0] >> 4 != 4 {
+                        continue;
+                    } // IPv4 only
+                    if tun_tx.send(buf[..n].to_vec()).await.is_err() {
+                        break;
+                    }
                 }
                 Err(e) => {
                     let _ = tun_err_tx.send(format!("TUN read: {e}")).await;
@@ -291,22 +312,32 @@ pub async fn run_tunnel_ios(
             fn encrypt_data(&mut self, p: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_data(p)
             }
-            fn encrypt_control(&mut self, p: &ControlPayload) -> aivpn_common::error::Result<Vec<u8>> {
+            fn encrypt_control(
+                &mut self,
+                p: &ControlPayload,
+            ) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_control(p)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_keepalive()
             }
             fn on_data_sent(&mut self, len: usize) {
-                self.session.upload_bytes.fetch_add(len as u64, Ordering::Relaxed);
+                self.session
+                    .upload_bytes
+                    .fetch_add(len as u64, Ordering::Relaxed);
             }
         }
         let mut enc = IosEncryptor {
             inner: ZeroMdhEncryptor::with_mdh_len(keys_tx, send_counter, send_seq, mdh_len),
             session: session_up,
         };
-        let cfg = UploadConfig { keepalive_interval: KEEPALIVE_INTERVAL, ..Default::default() };
-        if let Err(e) = upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &cfg).await {
+        let cfg = UploadConfig {
+            keepalive_interval: KEEPALIVE_INTERVAL,
+            ..Default::default()
+        };
+        if let Err(e) =
+            upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &cfg).await
+        {
             let _ = sender_err_tx.send(format!("Upload: {e}")).await;
         }
     });
@@ -385,21 +416,36 @@ fn create_udp_socket(dest: SocketAddr, session: &Arc<SessionRuntime>) -> Result<
     }
     let buf: libc::c_int = 4 * 1024 * 1024;
     unsafe {
-        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF,
-            &buf as *const _ as *const libc::c_void, std::mem::size_of_val(&buf) as libc::socklen_t);
-        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF,
-            &buf as *const _ as *const libc::c_void, std::mem::size_of_val(&buf) as libc::socklen_t);
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &buf as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&buf) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &buf as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&buf) as libc::socklen_t,
+        );
     }
     let SocketAddr::V4(v4) = dest else {
         unsafe { libc::close(fd) };
-        return Err(Error::Session("Only IPv4 server addresses are supported".into()));
+        return Err(Error::Session(
+            "Only IPv4 server addresses are supported".into(),
+        ));
     };
     let sa = to_sockaddr_in(&v4);
     if unsafe {
-        libc::connect(fd,
+        libc::connect(
+            fd,
             &sa as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
-    } < 0 {
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    } < 0
+    {
         unsafe { libc::close(fd) };
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
@@ -421,7 +467,10 @@ fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>>
     unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) };
     let dup_write = unsafe { libc::dup(write_fd) };
     if dup_write < 0 {
-        unsafe { libc::close(read_fd); libc::close(write_fd) };
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd)
+        };
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
     session.stop_pipe_write.store(dup_write, Ordering::SeqCst);
@@ -434,10 +483,13 @@ async fn wait_for_stop(sig: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
         let mut guard = sig.readable().await?;
         match guard.try_io(|inner| {
             let mut b = [0u8; 1];
-            let n = unsafe {
-                libc::read(inner.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 1)
-            };
-            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+            let n =
+                unsafe { libc::read(inner.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
         }) {
             Ok(r) => return r,
             Err(_) => continue,
@@ -450,7 +502,9 @@ fn to_sockaddr_in(addr: &SocketAddrV4) -> libc::sockaddr_in {
         sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: addr.port().to_be(),
-        sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(addr.ip().octets()) },
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr.ip().octets()),
+        },
         sin_zero: [0; 8],
     }
 }
@@ -460,9 +514,17 @@ async fn tun_async_read(tun: &AsyncFd<OwnedFd>, buf: &mut [u8]) -> std::io::Resu
         let mut guard = tun.readable().await?;
         match guard.try_io(|inner| {
             let n = unsafe {
-                libc::read(inner.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                libc::read(
+                    inner.as_raw_fd(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
             };
-            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
         }) {
             Ok(r) => return r,
             Err(_) => continue,
@@ -476,18 +538,29 @@ async fn tun_async_write(tun: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result
         let mut guard = tun.writable().await?;
         match guard.try_io(|inner| {
             let n = unsafe {
-                libc::write(inner.as_raw_fd(),
+                libc::write(
+                    inner.as_raw_fd(),
                     data[written..].as_ptr() as *const libc::c_void,
-                    data.len() - written)
+                    data.len() - written,
+                )
             };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
-                } else { Err(e) }
-            } else { Ok(n as usize) }
+                } else {
+                    Err(e)
+                }
+            } else {
+                Ok(n as usize)
+            }
         }) {
-            Ok(Ok(0)) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write 0")),
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write 0",
+                ))
+            }
             Ok(Ok(n)) => written += n,
             Ok(Err(e)) => return Err(e),
             Err(_) => continue,
