@@ -150,6 +150,7 @@ find "${JNI_LIBS_DIR}" -name "libaivpn_core.so" -exec ls -lh {} \;
 echo ""
 echo "==> Building Android APK and publishing to releases/..."
 mkdir -p "${RELEASES_DIR}"
+rm -f "${APK_DST}"
 
 if [[ "${BUILD_TYPE}" == "release" ]]; then
     if [[ -f "${SCRIPT_DIR}/keystore.properties" ]]; then
