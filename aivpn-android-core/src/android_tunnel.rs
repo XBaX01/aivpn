@@ -136,11 +136,7 @@ pub fn stop_active_tunnel() {
         {
             let v: u8 = 1;
             unsafe {
-                let _ = libc::write(
-                    stop_fd,
-                    &v as *const u8 as *const libc::c_void,
-                    1,
-                );
+                let _ = libc::write(stop_fd, &v as *const u8 as *const libc::c_void, 1);
             };
         }
     }
@@ -235,7 +231,8 @@ pub async fn run_tunnel_android(
     {
         let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
         let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
-        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+        let pkt =
+            build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
         send_seq = send_seq.wrapping_add(1);
         udp.send(&pkt).await?;
     }
@@ -707,13 +704,8 @@ async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result
         let mut guard = stop_signal.readable().await?;
         match guard.try_io(|inner| {
             let mut b = [0u8; 1];
-            let n = unsafe {
-                libc::read(
-                    inner.as_raw_fd(),
-                    b.as_mut_ptr() as *mut libc::c_void,
-                    1,
-                )
-            };
+            let n =
+                unsafe { libc::read(inner.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 1) };
             if n < 0 {
                 Err(std::io::Error::last_os_error())
             } else {
