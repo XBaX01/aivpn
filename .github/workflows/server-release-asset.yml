@@ -164,3 +164,83 @@ jobs:
           tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           files: releases/${{ matrix.artifact_name }}
           fail_on_unmatched_files: true
+
+  build-windows-release-assets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nsis zip
+
+      - name: Add Windows target
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Build Windows release assets
+        env:
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+        run: |
+          mkdir -p releases
+          chmod +x ./build-windows-gui.sh
+          ./build-windows-gui.sh
+          # Move zip package to releases directory
+          mv aivpn-windows-gui.zip releases/
+
+      - name: Upload Windows workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-windows-release-assets
+          path: |
+            releases/aivpn-windows-installer.exe
+            releases/aivpn-windows-gui.zip
+          if-no-files-found: error
+
+      - name: Publish Windows assets to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: |
+            releases/aivpn-windows-installer.exe
+            releases/aivpn-windows-gui.zip
+          fail_on_unmatched_files: true
+
+  build-ios-release-asset:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Add iOS targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      - name: Build iOS release asset
+        run: |
+          chmod +x ./build-ios.sh
+          ./build-ios.sh
+
+      - name: Upload iOS workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aivpn-client-ios-ipa
+          path: releases/aivpn-ios.ipa
+          if-no-files-found: error
+
+      - name: Publish iOS asset to GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          files: releases/aivpn-ios.ipa
+          fail_on_unmatched_files: true
