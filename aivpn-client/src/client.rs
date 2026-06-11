@@ -25,7 +25,7 @@ use aivpn_common::client_wire::{
 use aivpn_common::crypto::{self, KeyPair, SessionKeys, X25519_PUBLIC_KEY_SIZE};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::mask::{BootstrapDescriptor, MaskProfile};
-use aivpn_common::network_config::ClientNetworkConfig;
+use aivpn_common::network_config::{ClientNetworkConfig, DEFAULT_KEEPALIVE_SECS};
 use aivpn_common::protocol::{ControlPayload, InnerType, MAX_PACKET_SIZE};
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
@@ -107,6 +107,7 @@ pub struct AivpnClient {
     _recv_buf: Vec<u8>,
     // Recording tracking
     active_recording_session: Option<[u8; 16]>,
+    keepalive_interval: Duration,
 }
 
 impl AivpnClient {
@@ -144,6 +145,7 @@ impl AivpnClient {
             _send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
             _recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
             active_recording_session: None,
+            keepalive_interval: Duration::from_secs(DEFAULT_KEEPALIVE_SECS as u64),
         })
     }
 
@@ -492,6 +494,7 @@ impl AivpnClient {
             upload_state,
             upload_bytes_sent,
             upload_pending_mask,
+            self.keepalive_interval,
         ));
 
         // Main loop: download + shutdown + upload health
@@ -592,6 +595,7 @@ impl AivpnClient {
         upload_state: Arc<Mutex<UploadCryptoState>>,
         bytes_sent: Arc<AtomicU64>,
         pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
+        keepalive_interval: Duration,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
@@ -658,7 +662,7 @@ impl AivpnClient {
             pending_mask,
         };
         let config = UploadConfig {
-            keepalive_interval: Duration::from_secs(8),
+            keepalive_interval,
             ..Default::default()
         };
         upload_pipeline::run_upload_loop(&mut rx, Some(&mut control_rx), &udp, &mut enc, &config)
@@ -791,6 +795,9 @@ impl AivpnClient {
                 info!("ServerHello received — completing PFS ratchet");
 
                 if let Some(network_config) = network_config {
+                    if let Some(ka) = network_config.keepalive_secs.filter(|&s| s > 0) {
+                        self.keepalive_interval = Duration::from_secs(ka as u64);
+                    }
                     self.apply_server_network_override(network_config)?;
                 }
 

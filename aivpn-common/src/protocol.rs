@@ -530,10 +530,9 @@ impl ControlPayload {
                 server_eph_pub.copy_from_slice(&data[1..33]);
                 let mut signature = [0u8; 64];
                 signature.copy_from_slice(&data[33..97]);
-                let network_config = if data.len() >= 97 + ClientNetworkConfig::WIRE_SIZE {
-                    Some(ClientNetworkConfig::decode_wire(
-                        &data[97..97 + ClientNetworkConfig::WIRE_SIZE],
-                    )?)
+                let network_config = if data.len() >= 97 + 12 {
+                    let end = (97 + ClientNetworkConfig::WIRE_SIZE).min(data.len());
+                    Some(ClientNetworkConfig::decode_wire(&data[97..end])?)
                 } else {
                     None
                 };

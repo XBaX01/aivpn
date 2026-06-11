@@ -1408,18 +1408,11 @@ impl Gateway {
             // NOTE: We intentionally do NOT drop packets from the same public IP
             // on a different port. Multiple clients behind the same NAT must be
             // able to handshake independently (different PSKs → different sessions).
-
-            // FIX Issue #42: Skip handshake if this IP already has a fresh
-            // ratcheted session on a different port (NAT rebind / stale packets).
-            if self
-                .session_manager
-                .has_recent_ratcheted_session_on_other_endpoint(
-                    &client_addr,
-                    Duration::from_secs(30),
-                )
-            {
-                return Err(Error::InvalidPacket("Active session exists on other port"));
-            }
+            // Mobile carriers (MTS, etc.) change source ports on reconnect — we must
+            // not block new handshakes based on port mismatch with an existing session.
+            // The handshake_locks mutex below serializes concurrent handshakes from
+            // the same IP, preventing the duplicate-session race without blocking
+            // legitimate reconnects from a new port.
 
             // Serialize concurrent handshakes from the same source IP.
             // When a client reconnects rapidly, multiple shard workers may receive

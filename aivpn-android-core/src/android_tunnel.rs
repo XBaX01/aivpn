@@ -266,7 +266,7 @@ pub async fn run_tunnel_android(
     };
 
     let mut recv_win = RecvWindow::new();
-    process_server_hello_with_mdh_len(
+    let server_network_cfg = process_server_hello_with_mdh_len(
         &recv_buf[..n],
         &mut keys,
         &keypair,
@@ -274,6 +274,11 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         mdh_len,
     )?;
+    let keepalive_interval = server_network_cfg
+        .and_then(|c| c.keepalive_secs)
+        .filter(|&s| s > 0)
+        .map(|s| Duration::from_secs(s as u64))
+        .unwrap_or(KEEPALIVE_INTERVAL);
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
         psk.as_ref(),
@@ -361,7 +366,7 @@ pub async fn run_tunnel_android(
             session: session_for_upload,
         };
         let config = UploadConfig {
-            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_interval,
             ..Default::default()
         };
 

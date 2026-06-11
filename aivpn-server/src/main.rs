@@ -527,6 +527,7 @@ fn resolve_network_config(
                         .unwrap_or(Ipv4Addr::new(255, 255, 255, 0)),
                 )?,
                 mtu: DEFAULT_VPN_MTU,
+                keepalive_secs: None,
             }
         }
     } else {
