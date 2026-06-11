@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.0] - 2026-06-11
+
+### Added
+- **iOS Client application**: Native Swift application with a Network Extension (`PacketTunnelProvider`) and integrated Rust core (`aivpn-ios-core`).
+- **Android Quick Settings tile**: One-tap quick settings tile for toggling the VPN connection easily.
+- **ED25519 descriptor verification**: Verification of `BootstrapDescriptor` signatures using ed25519 trusted keys.
+- **Neural core auto-calibration**: Added auto-calibration for MSE and O(1) time complexity optimization using sliding window in `VecDeque`.
+- **CI/CD build automation**: Added automated release builds for Windows client binaries, NSIS installers, and iOS unsigned IPAs directly in GitHub Actions.
+
+### Changed
+- **Apksigner integration**: Switch from deprecated `jarsigner` to `apksigner` for Android APK v2/v3 signing.
+- **Improved Windows installer**: Enhanced NSIS-based cross-compilation packaging.
+- **Rust workspace version**: Bumped to 0.5.0.
+
+### Fixed
+- **Helper daemon security**: Fixed world-writable socket permissions in macOS client helper.
+- **Key rotation logic**: Fixed key rotation ratchet no-op bug.
+- **Deadlock resolved**: Fixed server handshake retry deadlock on Android.
+- **Layout & Docs**: Stability fixes for macOS layout, secure fields, and post-connect sync.
+
 ## [0.4.0] - 2026-04-18
 
 ### Added
