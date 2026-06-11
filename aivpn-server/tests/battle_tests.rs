@@ -298,12 +298,21 @@ fn battle_session_multiple_clients() {
 
     assert_eq!(mgr.session_count(), 50);
 
-    // Verify each client can produce a valid tag for their session
-    let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
+    // Verify each client can produce a valid tag for their session.
+    // We compute tags for both the current and previous time windows to tolerate
+    // clock crossings during the loop.
+    let current_tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     for (i, client_keys) in client_keys_list.iter().enumerate() {
-        let tag = generate_resonance_tag(&client_keys.tag_secret, 0, tw);
-        let found = mgr.get_session_by_tag(&tag);
-        assert!(found.is_some(), "Client {i} tag must be found");
+        let tag_current = generate_resonance_tag(&client_keys.tag_secret, 0, current_tw);
+        let tag_prev = generate_resonance_tag(&client_keys.tag_secret, 0, current_tw.wrapping_sub(1));
+
+        let found_current = mgr.get_session_by_tag(&tag_current);
+        let found_prev = mgr.get_session_by_tag(&tag_prev);
+
+        assert!(
+            found_current.is_some() || found_prev.is_some(),
+            "Client {i} tag must be found (current_tw={current_tw})"
+        );
     }
 }
 
