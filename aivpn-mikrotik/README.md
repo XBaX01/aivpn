@@ -1,0 +1,137 @@
+# aivpn-mikrotik
+
+Run AIVPN client inside a MikroTik RouterOS 7 container. Configured with a single connection key — no VPN expertise required.
+
+## Supported Devices
+
+| Architecture | RouterOS Devices |
+|---|---|
+| **arm64** (aarch64) | RB5009, CCR2004, hAP ax², RBD53iG, most modern RouterBOARD |
+| **armv7** | hAP ac², RB3011, RB2011, RB951, RBD52G |
+| **amd64** | CHR (Cloud Hosted Router), x86 RouterOS |
+
+Requires RouterOS **7.6+** with container support.
+
+## Prerequisites
+
+Enable the container feature on your MikroTik (one-time):
+
+```routeros
+/system/device-mode/update container=yes
+```
+
+Reboot the device after running this command.
+
+## Quick Setup
+
+### Step 1 — Create veth interface
+
+```routeros
+/interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+/ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+```
+
+### Step 2 — Configure environment variables
+
+```routeros
+/container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://YOUR_CONNECTION_KEY_HERE"
+```
+
+Optional — disable full-tunnel mode (only route VPN subnet, not all traffic):
+```routeros
+/container/envs/add list=aivpn-env name=AIVPN_FULL_TUNNEL value="false"
+```
+
+### Step 3 — Mount /dev/net/tun
+
+```routeros
+/container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+```
+
+### Step 4 — Create and start the container
+
+```routeros
+/container/add \
+    remote-image=infosave2007/aivpn-mikrotik:latest \
+    interface=veth-aivpn \
+    start-on-boot=yes \
+    envlist=aivpn-env \
+    mounts=aivpn-tun \
+    dns=8.8.8.8 \
+    logging=yes \
+    comment="AIVPN client"
+
+/container/start [find comment="AIVPN client"]
+```
+
+### Step 5 — Configure routing
+
+Route all traffic through the VPN container:
+
+```routeros
+/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2 routing-table=main distance=5 comment="AIVPN default route"
+```
+
+Or use policy routing to only route specific hosts:
+
+```routeros
+/routing/rule/add src-address=192.168.1.50/32 action=lookup-only-in-table table=aivpn-rt
+/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2 routing-table=aivpn-rt
+```
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `AIVPN_KEY` | **Yes** | — | Connection key from `aivpn-server --show-client` |
+| `AIVPN_FULL_TUNNEL` | No | `true` | Route all traffic through VPN (`true`/`false`) |
+
+## Checking Status
+
+```routeros
+/container/print detail where comment="AIVPN client"
+/log/print where topics~"container"
+```
+
+## Getting Your Connection Key
+
+On the AIVPN server:
+
+```bash
+aivpn-server --show-client "my-mikrotik" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip your.server.ip
+```
+
+## Building from Source
+
+```bash
+# Single arch (arm64)
+docker build \
+    --platform linux/amd64 \
+    --build-arg MUSL_IMAGE_TAG=aarch64-musl \
+    --build-arg TARGET_TRIPLE=aarch64-unknown-linux-musl \
+    -t aivpn-mikrotik:arm64 \
+    -f aivpn-mikrotik/Dockerfile .
+
+# Multi-arch push to Docker Hub
+./aivpn-mikrotik/build-mikrotik.sh infosave2007/aivpn-mikrotik:latest
+```
+
+## Troubleshooting
+
+**Container fails with "TUN not found"**  
+RouterOS requires an explicit bind mount for the TUN device:
+```routeros
+/container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+```
+Recreate the container after adding the mount.
+
+**No internet after connecting on RouterOS 7.22+**  
+RouterOS 7.22 introduced a regression with TUN inside containers.
+Downgrade to 7.21 or wait for a bugfix release. This affects all TUN-based containers.
+
+**Traffic not routed through VPN**  
+Check that your default route or policy routing rules point to 172.31.0.2 (the container veth IP).
+Verify the VPN is connected: `/log/print where topics~"container"`.
