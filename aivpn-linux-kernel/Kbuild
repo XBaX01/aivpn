@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+obj-m      := aivpn.o
+aivpn-y    := src/session_table.o \
+               src/crypto_ops.o   \
+               src/udp_hook.o     \
+               src/tun_inject.o   \
+               src/dev.o          \
+               src/main.o
+
+ccflags-y  := -I$(src)/include

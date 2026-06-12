@@ -17,8 +17,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use aivpn_common::crypto::{self, decrypt_payload, encrypt_payload, NONCE_SIZE, TAG_SIZE};
+use aivpn_common::crypto::{
+    self, decrypt_payload, encrypt_payload, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
+};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
 };
@@ -26,6 +29,7 @@ use aivpn_common::network_config::VpnNetworkConfig;
 use aivpn_common::protocol::{
     ControlPayload, ControlSubtype, InnerHeader, InnerType, MAX_PACKET_SIZE,
 };
+use libc;
 
 use crate::client_db::ClientDatabase;
 use crate::mask_gen::generate_and_store_mask;
@@ -247,6 +251,8 @@ pub struct Gateway {
     mask_store: Option<Arc<MaskStore>>,
     /// Active bootstrap descriptors for previous/current/next epochs.
     bootstrap_descriptors: Vec<BootstrapDescriptor>,
+    /// Optional kernel-module accelerator (auto-detected via /dev/aivpn).
+    kernel_accel: Option<Arc<KernelAccel>>,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -536,6 +542,13 @@ impl Gateway {
             mask_catalog.available_count()
         );
 
+        let kernel_accel: Option<Arc<KernelAccel>> = KernelAccel::try_open().map(Arc::new);
+        if kernel_accel.is_some() {
+            info!("Kernel acceleration: active (aivpn.ko loaded — /dev/aivpn ready)");
+        } else {
+            info!("Kernel acceleration: not available — using built-in user-space data path");
+        }
+
         Ok(Self {
             config: config.clone(),
             session_manager,
@@ -552,6 +565,7 @@ impl Gateway {
             recording_manager: Some(recording_manager),
             mask_store: Some(mask_store),
             bootstrap_descriptors,
+            kernel_accel,
         })
     }
 
@@ -632,6 +646,31 @@ impl Gateway {
         );
 
         self.udp_socket = Some(Arc::new(socket));
+
+        // Wire kernel accelerator to live TUN + UDP socket.
+        if let Some(ref ka) = self.kernel_accel {
+            if self.config.enable_nat {
+                let tun_name = self.config.tun_name.as_str();
+                if let Ok(cname) = std::ffi::CString::new(tun_name) {
+                    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+                    if ifindex > 0 {
+                        if let Err(e) = ka.set_tun(ifindex) {
+                            warn!("aivpn: kernel set_tun failed: {e}");
+                        } else {
+                            info!(
+                                "Kernel acceleration wired to TUN {} (ifindex={ifindex})",
+                                tun_name
+                            );
+                        }
+                    }
+                }
+            }
+            use std::os::unix::io::AsRawFd;
+            let udp_fd = self.udp_socket.as_ref().unwrap().as_raw_fd();
+            if let Err(e) = ka.set_udp_sock(udp_fd) {
+                warn!("aivpn: kernel set_udp_sock failed: {e}");
+            }
+        }
 
         // Spawn neural resonance check loop (Patent 1 — periodic validation)
         if self.config.enable_neural {
@@ -714,6 +753,9 @@ impl Gateway {
             let socket = self.udp_socket.as_ref().unwrap().clone();
             let mdh = self.mask_catalog.packet_mdh_bytes();
             let neural = self.neural_module.clone();
+            let ka_cleanup = self.kernel_accel.clone();
+            let rate_limits_cleanup = self.rate_limits.clone();
+            let handshake_cooldowns_cleanup = self.handshake_cooldowns.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -743,11 +785,19 @@ impl Gateway {
                         }
                     }
 
+                    // Prune stale per-IP rate-limit and handshake-cooldown entries.
+                    rate_limits_cleanup.retain(|_, v| v.1.elapsed() < Duration::from_secs(30));
+                    handshake_cooldowns_cleanup
+                        .retain(|_, v| v.1.elapsed() < Duration::from_secs(60));
+
                     let removed = sessions.cleanup_expired();
                     for session_id in &removed {
                         // Release per-session neural traffic stats; without this the
                         // neural_module's DashMap grows unbounded as sessions expire.
                         neural.lock().cleanup_stats(*session_id);
+                        if let Some(ref ka) = ka_cleanup {
+                            let _ = ka.session_remove(session_id);
+                        }
                     }
                     // Stop active recordings for removed sessions
                     if let Some(ref rec) = recorder {
@@ -1811,6 +1861,17 @@ impl Gateway {
                 sess.send_counter,
                 sess.counter
             );
+            // Install session into kernel accelerator now that keys are stable.
+            if let Some(ref ka) = self.kernel_accel {
+                let add = make_kernel_session_add(&sess);
+                if let Err(e) = ka.session_add(&add) {
+                    warn!("kernel session_add failed: {e}");
+                }
+                let upd = make_kernel_update_tags(&sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags failed: {e}");
+                }
+            }
         }
 
         // Extract pad_len from inside decrypted data and strip padding
@@ -1869,6 +1930,14 @@ impl Gateway {
         // Refresh tag_map only when the precomputed window moves.
         if refresh_tags {
             self.session_manager.refresh_session_tags(&session_id);
+            if let Some(ref ka) = self.kernel_accel {
+                let sess = session.lock();
+                let upd = make_kernel_update_tags(&sess);
+                drop(sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags (refresh) failed: {e}");
+                }
+            }
         }
 
         // Record traffic stats for neural resonance (Patent 1)
@@ -2050,6 +2119,9 @@ impl Gateway {
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
                 self.neural_module.lock().cleanup_stats(session_id);
+                if let Some(ref ka) = self.kernel_accel {
+                    let _ = ka.session_remove(&session_id);
+                }
                 if let Some(ref recorder) = self.recording_manager {
                     let socket = self.udp_socket.as_ref().unwrap().clone();
                     let store = recorder.store();
@@ -2356,6 +2428,51 @@ impl Gateway {
     pub fn metrics(&self) -> &Arc<MetricsCollector> {
         &self.metrics
     }
+}
+
+fn make_kernel_session_add(sess: &crate::session::Session) -> SessionAdd {
+    let client_ip = match sess.client_addr.ip() {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    };
+    let mut ca = [0u8; 28];
+    match sess.client_addr {
+        SocketAddr::V4(ref v4) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v4.port().to_be_bytes());
+            ca[4..8].copy_from_slice(&v4.ip().octets());
+        }
+        SocketAddr::V6(ref v6) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET6 as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v6.port().to_be_bytes());
+            ca[8..24].copy_from_slice(&v6.ip().octets());
+        }
+    }
+    SessionAdd {
+        session_id: sess.session_id,
+        session_key: sess.keys.session_key,
+        tag_secret: sess.keys.tag_secret,
+        nonce_suffix: sess.keys.prng_seed[..4].try_into().unwrap_or([0u8; 4]),
+        _reserved: [0u8; 28],
+        counter_base: sess.counter,
+        client_ip,
+        client_addr: ca,
+        window_ms: DEFAULT_WINDOW_MS,
+    }
+}
+
+fn make_kernel_update_tags(sess: &crate::session::Session) -> UpdateTagsPayload {
+    // Safety: UpdateTagsPayload is a plain C struct of integers and byte arrays;
+    // zeroed is valid for all fields.
+    let mut payload: UpdateTagsPayload = unsafe { std::mem::zeroed() };
+    payload.session_id = sess.session_id;
+    let mut count = 0usize;
+    for (&counter, tag) in sess.expected_tags.iter().take(256) {
+        payload.entries[count] = TagWindowEntry { tag: *tag, counter };
+        count += 1;
+    }
+    payload.count = count as u32;
+    payload
 }
 
 #[cfg(test)]

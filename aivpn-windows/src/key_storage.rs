@@ -119,6 +119,8 @@ pub struct ConnectionKey {
     pub vpn_ip: String,
     #[serde(default)]
     pub full_tunnel: bool,
+    #[serde(default)]
+    pub proxy_listen: Option<String>,
 }
 
 impl ConnectionKey {
@@ -137,6 +139,7 @@ impl ConnectionKey {
             server_addr,
             vpn_ip,
             full_tunnel: false,
+            proxy_listen: None,
         })
     }
 }
@@ -197,11 +200,18 @@ impl KeyStorage {
         }
     }
 
-    pub fn add_key(&mut self, name: &str, key: &str, full_tunnel: bool) -> Result<(), String> {
+    pub fn add_key(
+        &mut self,
+        name: &str,
+        key: &str,
+        full_tunnel: bool,
+        proxy_listen: Option<String>,
+    ) -> Result<(), String> {
         // Validate key format
         let mut ck = ConnectionKey::from_key_string(name, key)
             .ok_or_else(|| "Invalid connection key format".to_string())?;
         ck.full_tunnel = full_tunnel;
+        ck.proxy_listen = proxy_listen;
 
         // Check for duplicates
         if self.keys.iter().any(|k| k.key == ck.key) {
@@ -222,6 +232,7 @@ impl KeyStorage {
         name: &str,
         key: &str,
         full_tunnel: bool,
+        proxy_listen: Option<String>,
     ) -> Result<(), String> {
         if idx >= self.keys.len() {
             return Err("Invalid key index".to_string());
@@ -229,6 +240,7 @@ impl KeyStorage {
         let mut ck = ConnectionKey::from_key_string(name, key)
             .ok_or_else(|| "Invalid connection key format".to_string())?;
         ck.full_tunnel = full_tunnel;
+        ck.proxy_listen = proxy_listen;
         self.keys[idx] = ck;
         self.save();
         Ok(())

@@ -13,8 +13,8 @@ use aivpn_common::error::Result;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct ServerArgs {
-    /// Listen address
-    #[arg(short, long, default_value = "0.0.0.0:443")]
+    /// Listen address (host:port). Overridden by listen_addr in server.json. Default: 0.0.0.0:443.
+    #[arg(short, long, default_value = "0.0.0.0:443", env = "AIVPN_LISTEN")]
     pub listen: String,
 
     /// TUN device name (random if not specified — avoids fingerprinting)

@@ -20,6 +20,7 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
 | **iOS** | — | ✅ | ✅ | Native SwiftUI app via `NetworkExtension` API |
+| **MikroTik RouterOS** | — | ✅ | ✅ | RouterOS 7.6+ container, arm64/armv7/amd64 |
 
 ### Current Client Status
 
@@ -28,6 +29,7 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 - ✅ Android app: working
 - ✅ iOS app: working (build requires macOS + Xcode 15+)
 - ✅ Windows client: working (GUI + CLI)
+- ✅ MikroTik RouterOS container: working (arm64/armv7/amd64)
 
 ## 📥 Downloads (Pre-built Binaries)
 
@@ -91,6 +93,21 @@ No need to compile — download and run:
     /opt/bin/aivpn-client -k "your_connection_key_here"
     ```
 4. Because these musl builds are statically linked, no Rust toolchain or extra shared libraries are required on the router.
+
+### Quick Start (MikroTik RouterOS)
+1. Enable containers: `/system/device-mode/update container=yes` and reboot
+2. Run the setup commands (see [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)):
+   ```routeros
+   /interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+   /ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+   /container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+   /container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
+   /container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
+   /container/start [find remote-image~"aivpn-mikrotik"]
+   ```
+3. Add a default route through the container: `/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2`
+
+See [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md) for full documentation including policy routing and troubleshooting.
 
 ### Quick Start (Android)
 1. Download and install `aivpn-client.apk`
@@ -299,6 +316,17 @@ If you use a VPN subnet other than the legacy `10.0.0.0/24`, keep it in `config/
 ```
 
 The server reads `network_config` from `server.json` and automatically installs the NAT rule for the correct subnet on startup.
+
+`listen_addr` controls the port (default: 443). To use a different port:
+
+```json
+{
+  "listen_addr": "0.0.0.0:8443",
+  ...
+}
+```
+
+The port is automatically embedded in connection keys — clients don't need manual configuration. The `AIVPN_LISTEN` environment variable or `--listen` CLI flag override `server.json`.
 
 ### 3.1 Client Management
 
@@ -540,6 +568,29 @@ Full tunnel:
 ```
 
 > The client auto-configures routes via `route add` and cleans them up on exit.
+
+### 4.1 Proxy Mode (SOCKS5, no root required)
+
+Instead of a TUN device, the client can run as a local **SOCKS5 proxy**. This lets you route a specific browser or application through the VPN without administrator/root privileges and without any kernel driver.
+
+```bash
+# Start the SOCKS5 proxy on port 1080 (no sudo needed)
+aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
+```
+
+Configure your application to use `SOCKS5` at `127.0.0.1:1080`:
+
+| Application | How to configure |
+|-------------|-----------------|
+| **Firefox** | Settings → Network Settings → Manual proxy → SOCKS5 `127.0.0.1:1080`, enable "Proxy DNS" |
+| **Chrome / Chromium** | Launch with `--proxy-server=socks5://127.0.0.1:1080` |
+| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
+| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
+
+**Limitations:**
+- IPv6 target addresses are not supported (use hostnames or IPv4)
+- UDP traffic is not proxied (TCP CONNECT only)
+- DNS is resolved locally via system resolver (queries bypass the VPN)
 
 ### 5. Android
 

@@ -8,6 +8,7 @@
 
 use bytes::Bytes;
 use portable_atomic::AtomicU64;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +33,10 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
+#[cfg(target_os = "linux")]
+use aivpn_common::kernel_accel::KernelAccel;
+#[cfg(target_os = "linux")]
+use libc;
 
 /// RAII guard that aborts a spawned task when dropped.
 /// Used to ensure the admin IPC socket task is cancelled when run() returns,
@@ -59,6 +64,8 @@ pub struct ClientConfig {
     pub preshared_key: Option<[u8; 32]>,
     pub initial_mask: MaskProfile,
     pub tun_config: TunnelConfig,
+    /// When set, run as SOCKS5 proxy on this address instead of a TUN device.
+    pub proxy_listen: Option<std::net::SocketAddr>,
 }
 
 /// Client state
@@ -105,9 +112,13 @@ pub struct AivpnClient {
     // Pre-allocated buffers for zero-copy I/O (OPTIMIZATION)
     _send_buf: Vec<u8>,
     _recv_buf: Vec<u8>,
+    proxy_rx_queue: Option<Arc<Mutex<VecDeque<Vec<u8>>>>>,
     // Recording tracking
     active_recording_session: Option<[u8; 16]>,
     keepalive_interval: Duration,
+    /// Kernel-module accelerator (Linux only, auto-detected via /dev/aivpn).
+    #[cfg(target_os = "linux")]
+    kernel_accel: Option<Arc<KernelAccel>>,
 }
 
 impl AivpnClient {
@@ -128,6 +139,8 @@ impl AivpnClient {
             control_tx: None,
             pending_mask: Arc::new(Mutex::new(None)),
             session_keys: None,
+            #[cfg(target_os = "linux")]
+            kernel_accel: None,
             upload_state: None,
             transition_recv_keys: None,
             transition_recv_deadline: None,
@@ -144,6 +157,7 @@ impl AivpnClient {
             // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
             _send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
             _recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
+            proxy_rx_queue: None,
             active_recording_session: None,
             keepalive_interval: Duration::from_secs(DEFAULT_KEEPALIVE_SECS as u64),
         })
@@ -154,8 +168,10 @@ impl AivpnClient {
         info!("Connecting to AIVPN server...");
         self.state = ClientState::Connecting;
 
-        // Create TUN device first
-        self.tunnel.create()?;
+        // Create TUN device first (skipped in proxy mode)
+        if self.config.proxy_listen.is_none() {
+            self.tunnel.create()?;
+        }
 
         // Resolve the server address. Docker/local test setups often use a
         // hostname rather than a literal IP:port string.
@@ -205,11 +221,46 @@ impl AivpnClient {
 
         self.udp_socket = Some(Arc::new(socket));
 
-        self.tunnel.set_server_ip(server_addr.ip().to_string());
+        // Auto-detect kernel acceleration (Linux only).
+        #[cfg(target_os = "linux")]
+        {
+            let ka = KernelAccel::try_open();
+            if ka.is_some() {
+                info!("Kernel acceleration: active (aivpn.ko loaded — /dev/aivpn ready)");
+            } else {
+                info!("Kernel acceleration: not available — using built-in user-space data path");
+            }
+            if let Some(ref ka) = ka {
+                // Wire UDP socket
+                use std::os::unix::io::AsRawFd;
+                let udp_fd = self.udp_socket.as_ref().unwrap().as_raw_fd();
+                if let Err(e) = ka.set_udp_sock(udp_fd) {
+                    warn!("kernel set_udp_sock failed: {e}");
+                }
+                // Wire TUN device (skipped in proxy mode)
+                if self.config.proxy_listen.is_none() {
+                    let tun_name = self.tunnel.name();
+                    if let Ok(cname) = std::ffi::CString::new(tun_name) {
+                        let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+                        if ifindex > 0 {
+                            if let Err(e) = ka.set_tun(ifindex) {
+                                warn!("kernel set_tun failed: {e}");
+                            } else {
+                                info!("Kernel acceleration wired to TUN (ifindex={ifindex})");
+                            }
+                        }
+                    }
+                }
+            }
+            self.kernel_accel = ka.map(Arc::new);
+        }
 
-        // Enable full tunnel only after the server UDP path is established.
-        if self.config.tun_config.full_tunnel {
-            self.tunnel.enable_full_tunnel()?;
+        if self.config.proxy_listen.is_none() {
+            self.tunnel.set_server_ip(server_addr.ip().to_string());
+            // Enable full tunnel only after the server UDP path is established.
+            if self.config.tun_config.full_tunnel {
+                self.tunnel.enable_full_tunnel()?;
+            }
         }
 
         // Initialize mimicry engine
@@ -262,7 +313,9 @@ impl AivpnClient {
 
         let tun_name = self.config.tun_config.tun_name.clone();
         let full_tunnel = self.config.tun_config.full_tunnel;
-        self.tunnel.apply_network_config(network_config)?;
+        if self.config.proxy_listen.is_none() {
+            self.tunnel.apply_network_config(network_config)?;
+        }
         self.config.tun_config =
             TunnelConfig::from_network_config(tun_name, network_config, full_tunnel);
         Ok(())
@@ -332,45 +385,75 @@ impl AivpnClient {
             }
         }));
 
-        // Take the TUN reader for the spawned task (no Mutex needed)
-        let mut tun_reader = self
-            .tunnel
-            .take_reader()
-            .ok_or(Error::Session("TUN reader not available".into()))?;
-        let tun_to_udp_tx_clone = tun_to_udp_tx.clone();
-        let shutdown_for_tasks = shutdown.clone();
-        let tun_task = tokio::spawn(async move {
-            let mut buf = vec![0u8; MAX_PACKET_SIZE];
-            loop {
-                if shutdown_for_tasks.load(Ordering::SeqCst) {
-                    break;
-                }
+        // Proxy mode: start smoltcp + SOCKS5 instead of creating a TUN device
+        if let Some(listen_addr) = self.config.proxy_listen {
+            let vpn_ip = self
+                .config
+                .tun_config
+                .tun_addr
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+            let gateway_ip = self
+                .config
+                .tun_config
+                .server_vpn_ip
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+            let proxy_cfg = crate::proxy::ProxyConfig {
+                listen_addr,
+                vpn_ip,
+                gateway_ip,
+                prefix_len: self.config.tun_config.prefix_len,
+            };
+            let handle = crate::proxy::spawn_proxy(proxy_cfg, tun_to_udp_tx.clone())
+                .await
+                .map_err(Error::Io)?;
+            self.proxy_rx_queue = Some(Arc::clone(&handle.rx_queue));
+        }
 
-                match tun_reader.read(&mut buf).await {
-                    Ok(n) => {
-                        if n > 0 {
-                            debug!("TUN read {} bytes", n);
+        // Take the TUN reader for the spawned task (skipped in proxy mode)
+        let tun_task = if self.config.proxy_listen.is_none() {
+            let mut tun_reader = self
+                .tunnel
+                .take_reader()
+                .ok_or(Error::Session("TUN reader not available".into()))?;
+            let tun_to_udp_tx_clone = tun_to_udp_tx.clone();
+            let shutdown_for_tasks = shutdown.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; MAX_PACKET_SIZE];
+                loop {
+                    if shutdown_for_tasks.load(Ordering::SeqCst) {
+                        break;
+                    }
 
-                            #[cfg(target_os = "macos")]
-                            let payload: Vec<u8> = if n > 4 && buf[0] == 0 && buf[1] == 0 {
-                                buf[4..n].to_vec()
-                            } else {
-                                buf[..n].to_vec()
-                            };
+                    match tun_reader.read(&mut buf).await {
+                        Ok(n) => {
+                            if n > 0 {
+                                debug!("TUN read {} bytes", n);
 
-                            #[cfg(not(target_os = "macos"))]
-                            let payload: Vec<u8> = buf[..n].to_vec();
+                                #[cfg(target_os = "macos")]
+                                let payload: Vec<u8> = if n > 4 && buf[0] == 0 && buf[1] == 0 {
+                                    buf[4..n].to_vec()
+                                } else {
+                                    buf[..n].to_vec()
+                                };
 
-                            let _ = tun_to_udp_tx_clone.send(payload).await;
+                                #[cfg(not(target_os = "macos"))]
+                                let payload: Vec<u8> = buf[..n].to_vec();
+
+                                let _ = tun_to_udp_tx_clone.send(payload).await;
+                            }
+                        }
+                        Err(e) => {
+                            error!("TUN read error: {}", e);
+                            tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                     }
-                    Err(e) => {
-                        error!("TUN read error: {}", e);
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
                 }
-            }
-        });
+            })
+        } else {
+            tokio::spawn(std::future::pending::<()>())
+        };
 
         // Spawn UDP reader task
         let udp_socket = self
@@ -741,7 +824,11 @@ impl AivpnClient {
                 if ip_payload.is_empty() || (ip_payload[0] >> 4 != 4 && ip_payload[0] >> 4 != 6) {
                     return Err(Error::InvalidPacket("Invalid IP version in payload"));
                 }
-                self.tunnel.write_packet_async(&ip_payload).await?;
+                if let Some(q) = &self.proxy_rx_queue {
+                    q.lock().unwrap().push_back(ip_payload.to_vec());
+                } else {
+                    self.tunnel.write_packet_async(&ip_payload).await?;
+                }
                 self.bytes_received
                     .fetch_add(ip_payload.len() as u64, Ordering::Relaxed);
                 debug!(

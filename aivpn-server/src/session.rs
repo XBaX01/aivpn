@@ -371,11 +371,6 @@ impl Session {
         self.last_seen.elapsed() > IDLE_TIMEOUT
     }
 
-    /// Check if session is expired
-    pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > HARD_TIMEOUT
-    }
-
     /// Pre-compute tags for ratcheted keys
     pub fn update_ratcheted_tag_window(&mut self) {
         if let Some(ratcheted_keys) = &self.ratcheted_keys {

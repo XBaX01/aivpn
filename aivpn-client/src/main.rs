@@ -79,6 +79,11 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub no_fallback: bool,
 
+    /// Run as SOCKS5 proxy on this address instead of a TUN device (no root required).
+    /// Example: --proxy-listen 127.0.0.1:1080
+    #[arg(long, value_name = "HOST:PORT")]
+    pub proxy_listen: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<ClientCommand>,
 }
@@ -456,6 +461,12 @@ async fn main() {
     }
 
     let no_fallback = args.no_fallback || !bootstrap_config.channels.is_empty();
+    let proxy_listen = args.proxy_listen.as_ref().map(|s| {
+        s.parse::<std::net::SocketAddr>().unwrap_or_else(|e| {
+            error!("Invalid --proxy-listen '{}': {}", s, e);
+            std::process::exit(1);
+        })
+    });
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -526,6 +537,7 @@ async fn main() {
                 network_config,
                 full_tunnel,
             ),
+            proxy_listen,
         };
 
         match AivpnClient::new(config) {

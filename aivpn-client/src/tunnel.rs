@@ -313,7 +313,17 @@ impl Tunnel {
         }
 
         #[cfg(target_os = "macos")]
-        self.configure_macos()?;
+        {
+            self.configure_macos()?;
+            // configure_macos() only installs the VPN subnet route.  If full-tunnel
+            // mode was already active (saved_default_gw is set), the 0/1 + 128/1
+            // default-route overrides were wiped by the ifconfig/route cleanup above.
+            // Re-install them so internet traffic keeps flowing through the tunnel
+            // after a server-pushed network-config update (ServerHello override).
+            if self.config.full_tunnel && self.saved_default_gw.is_some() {
+                self.enable_full_tunnel()?;
+            }
+        }
 
         #[cfg(target_os = "linux")]
         self.configure_linux()?;
@@ -417,9 +427,12 @@ impl Tunnel {
         }
 
         // Add subnet route for 10.0.0.0/24
+        // Must use -interface <tun_name> on a P2P TUN; passing the client IP as
+        // a gateway produces "not in table" / silent failure on macOS because the
+        // kernel has no ARP resolution path for a TUN peer address.
         info!(
-            "Adding subnet route {}/{} via {} (gateway {})",
-            vpn_network_addr, self.config.prefix_len, tun_name, tun_addr
+            "Adding subnet route {}/{} via interface {}",
+            vpn_network_addr, self.config.prefix_len, tun_name
         );
         let status = Command::new("/sbin/route")
             .args([
@@ -429,7 +442,8 @@ impl Tunnel {
                 &vpn_network_addr,
                 "-netmask",
                 &tun_netmask,
-                tun_addr,
+                "-interface",
+                tun_name,
             ])
             .status()
             .map_err(|e| {
@@ -448,8 +462,8 @@ impl Tunnel {
             debug!("Subnet route may already exist or not be needed");
         } else {
             info!(
-                "✓ Added subnet route {}/{} via {} (gateway {})",
-                vpn_network_addr, self.config.prefix_len, tun_name, tun_addr
+                "Added subnet route {}/{} via interface {}",
+                vpn_network_addr, self.config.prefix_len, tun_name
             );
         }
 

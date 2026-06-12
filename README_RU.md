@@ -21,6 +21,7 @@
 | **Windows** | — | ✅ | ✅ | Через [Wintun](https://www.wintun.net/) драйвер |
 | **Android** | — | ✅ | ✅ | Kotlin-приложение через `VpnService` API |
 | **iOS** | — | ✅ | ✅ | Нативное SwiftUI-приложение через `NetworkExtension` API |
+| **MikroTik RouterOS** | — | ✅ | ✅ | Контейнер RouterOS 7.6+, arm64/armv7/amd64 |
 
 ### Текущий статус клиентов
 
@@ -29,6 +30,7 @@
 - ✅ Android-приложение: работает
 - ✅ iOS-приложение: работает (сборка требует macOS + Xcode 15+)
 - ✅ Windows-клиент: работает (GUI + CLI)
+- ✅ MikroTik RouterOS контейнер: работает (arm64/armv7/amd64)
 
 ## 📥 Готовые бинарники
 
@@ -92,6 +94,21 @@
     /opt/bin/aivpn-client -k "ваш_ключ_подключения"
     ```
 4. Эти musl-сборки статически слинкованы, поэтому на роутере не нужен Rust toolchain и дополнительные shared libraries.
+
+### Быстрый старт (MikroTik RouterOS)
+1. Включите поддержку контейнеров: `/system/device-mode/update container=yes` и перезагрузите роутер
+2. Выполните команды настройки (см. [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)):
+   ```routeros
+   /interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+   /ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+   /container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+   /container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
+   /container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
+   /container/start [find remote-image~"aivpn-mikrotik"]
+   ```
+3. Добавьте маршрут по умолчанию через контейнер: `/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2`
+
+Полная документация с настройкой policy routing и решением типичных проблем — в [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md).
 
 ### Быстрый старт (Android)
 1. Скачайте и установите `aivpn-client.apk`
@@ -309,6 +326,17 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
 sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 ```
+
+`listen_addr` управляет портом (по умолчанию: 443). Чтобы использовать другой порт:
+
+```json
+{
+  "listen_addr": "0.0.0.0:8443",
+  ...
+}
+```
+
+Порт автоматически вшивается в ключи подключения — клиентам не нужна ручная настройка. Переменная окружения `AIVPN_LISTEN` или флаг `--listen` переопределяют значение из `server.json`.
 
 ### 3.1 Управление клиентами
 
@@ -554,6 +582,29 @@ wintun.dll         # Сетевой драйвер Wintun
 ```
 
 > Клиент автоматически настроит маршруты через `route add` и корректно откатит их при завершении.
+
+### 4.1 Прокси-режим (SOCKS5, без root)
+
+Вместо TUN-устройства клиент может работать как локальный **SOCKS5-прокси**. Это позволяет пустить конкретный браузер или приложение через VPN без прав администратора/root и без установки драйвера ядра.
+
+```bash
+# Запустить SOCKS5-прокси на порту 1080 (sudo не нужен)
+aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
+```
+
+Настройте своё приложение на использование `SOCKS5` по адресу `127.0.0.1:1080`:
+
+| Приложение | Настройка |
+|------------|-----------|
+| **Firefox** | Настройки → Параметры сети → Ручная настройка прокси → SOCKS5 `127.0.0.1:1080`, включить «Проксировать DNS» |
+| **Chrome / Chromium** | Запуск с флагом `--proxy-server=socks5://127.0.0.1:1080` |
+| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
+| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
+
+**Ограничения:**
+- IPv6-адреса назначения не поддерживаются (используйте имена хостов или IPv4)
+- UDP-трафик не проксируется (только TCP CONNECT)
+- DNS разрешается локально через системный резолвер (запросы не идут через VPN)
 
 ### 5. Android
 

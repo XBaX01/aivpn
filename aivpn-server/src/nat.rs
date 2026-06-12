@@ -5,7 +5,6 @@
 //! that server restarts never accumulate duplicate firewall entries.
 
 use std::io;
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 #[cfg(target_os = "linux")]
@@ -88,7 +87,6 @@ pub struct NatForwarder {
     tun_netmask: String,
     tun_mtu: u16,
     network_config: VpnNetworkConfig,
-    writer: Option<Arc<Mutex<tun::DeviceWriter>>>,
     writer_taken: Option<Mutex<Option<tun::DeviceWriter>>>,
     reader: Option<Mutex<Option<tun::DeviceReader>>>,
     #[cfg(target_os = "linux")]
@@ -109,7 +107,6 @@ impl NatForwarder {
             tun_netmask: tun_netmask.to_string(),
             tun_mtu,
             network_config,
-            writer: None,
             writer_taken: None,
             reader: None,
             #[cfg(target_os = "linux")]
@@ -293,8 +290,8 @@ impl NatForwarder {
                 "-o",
                 tun,
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "RELATED,ESTABLISHED",
                 "-m",
                 "comment",
@@ -349,18 +346,22 @@ impl NatForwarder {
         Ok(())
     }
 
-    /// Forward a packet to the TUN interface (write path).
+    /// Forward a packet to the TUN interface (write path, fallback when writer task not spawned).
     pub async fn forward_packet(&self, packet: &[u8]) -> Result<()> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
+        let taken = self.writer_taken.as_ref().ok_or_else(|| {
             Error::Io(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "TUN device not created",
             ))
         })?;
-
-        let mut w = writer.lock().await;
-        w.write_all(packet).await?;
-
+        let mut guard = taken.lock().await;
+        let writer = guard.as_mut().ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "TUN writer already taken by writer task",
+            ))
+        })?;
+        writer.write_all(packet).await?;
         debug!("Forwarded {} bytes to TUN", packet.len());
         Ok(())
     }
@@ -391,7 +392,7 @@ impl NatForwarder {
 
 impl Drop for NatForwarder {
     fn drop(&mut self) {
-        if self.writer.is_some() {
+        if self.writer_taken.is_some() {
             info!("Closing NAT TUN device: {}", self.tun_name);
         }
 

@@ -379,8 +379,6 @@ fn battle_session_idle_detection() {
 
     // Freshly created session is not idle
     assert!(!session.lock().is_idle());
-    // Not expired either
-    assert!(!session.lock().is_expired());
 }
 
 // ============================================================================
