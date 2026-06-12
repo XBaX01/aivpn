@@ -303,6 +303,7 @@ async fn main() {
                             mtu: DEFAULT_VPN_MTU,
                             mdh_len: 20,
                             keepalive_secs: None,
+                            ipv6_address: None,
                         })
                 })
             })
@@ -358,7 +359,7 @@ async fn main() {
             .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok());
         let network_config = file_config
             .as_ref()
-            .and_then(|config| config.network_config)
+            .and_then(|config| config.network_config.clone())
             .unwrap_or_else(|| {
                 fallback_network_config(
                     file_config
@@ -534,7 +535,7 @@ async fn main() {
             initial_mask,
             tun_config: TunnelConfig::from_network_config(
                 tun_name.clone(),
-                network_config,
+                network_config.clone(),
                 full_tunnel,
             ),
             proxy_listen,
@@ -607,5 +608,6 @@ fn fallback_network_config(tun_addr: &str) -> ClientNetworkConfig {
         mtu: DEFAULT_VPN_MTU,
         mdh_len: 20,
         keepalive_secs: None,
+        ipv6_address: None,
     }
 }

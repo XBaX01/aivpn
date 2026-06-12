@@ -599,9 +599,24 @@ impl Gateway {
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
                 self.config.tun_mtu,
-                self.config.network_config,
+                self.config.network_config.clone(),
             )?;
             nat.create()?;
+
+            // IPv6 dual-stack (NAT66) — optional, off by default.
+            if self.config.network_config.ipv6_enabled {
+                let tun = self.config.tun_name.as_str();
+                let prefix = self.config.network_config.ipv6_prefix.as_str();
+                match crate::nat::setup_nat66(tun, prefix) {
+                    Ok(()) => info!("NAT66 configured for prefix {}", prefix),
+                    Err(e) => warn!("NAT66 setup failed (non-fatal): {}", e),
+                }
+                match crate::nat::assign_ipv6_to_tun(tun, "fd10:cafe::1", 48) {
+                    Ok(()) => info!("Assigned fd10:cafe::1/48 to {}", tun),
+                    Err(e) => warn!("IPv6 TUN address assignment failed (non-fatal): {}", e),
+                }
+            }
+
             self.nat_forwarder = Some(Arc::new(nat));
             info!(
                 "TUN device: {} ({}/{})",

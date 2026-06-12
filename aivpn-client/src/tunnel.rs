@@ -76,6 +76,7 @@ impl TunnelConfig {
             mtu: self.mtu,
             mdh_len: self.mdh_len,
             keepalive_secs: None,
+            ipv6_address: None,
         };
         network_config.validate()?;
         Ok(network_config)
@@ -108,6 +109,8 @@ impl TunnelConfig {
             prefix_len: self.prefix_len,
             mtu: self.mtu,
             keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: "fd10:cafe::/48".to_string(),
         };
         network_config.validate()?;
         Ok(network_config)

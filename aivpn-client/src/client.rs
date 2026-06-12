@@ -314,7 +314,7 @@ impl AivpnClient {
         let tun_name = self.config.tun_config.tun_name.clone();
         let full_tunnel = self.config.tun_config.full_tunnel;
         if self.config.proxy_listen.is_none() {
-            self.tunnel.apply_network_config(network_config)?;
+            self.tunnel.apply_network_config(network_config.clone())?;
         }
         self.config.tun_config =
             TunnelConfig::from_network_config(tun_name, network_config, full_tunnel);

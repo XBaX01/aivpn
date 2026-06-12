@@ -162,7 +162,7 @@ impl ClientDatabase {
     }
 
     pub fn network_config(&self) -> VpnNetworkConfig {
-        self.network_config
+        self.network_config.clone()
     }
 
     /// Remove a client by ID

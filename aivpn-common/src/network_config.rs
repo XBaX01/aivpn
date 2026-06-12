@@ -21,7 +21,11 @@ fn default_mtu() -> u16 {
     DEFAULT_VPN_MTU
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+fn default_ipv6_prefix() -> String {
+    "fd10:cafe::/48".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnNetworkConfig {
     #[serde(default = "default_server_vpn_ip")]
     pub server_vpn_ip: Ipv4Addr,
@@ -32,6 +36,13 @@ pub struct VpnNetworkConfig {
     /// Keepalive interval pushed to clients in ServerHello. None = client uses its default (8s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_secs: Option<u8>,
+    /// Enable IPv6 dual-stack (NAT66). When true, the server will configure
+    /// ip6tables/nftables masquerading and assign IPv6 addresses to clients.
+    #[serde(default)]
+    pub ipv6_enabled: bool,
+    /// IPv6 ULA prefix allocated to VPN clients. Must be a /48.
+    #[serde(default = "default_ipv6_prefix")]
+    pub ipv6_prefix: String,
 }
 
 impl Default for VpnNetworkConfig {
@@ -41,6 +52,8 @@ impl Default for VpnNetworkConfig {
             prefix_len: default_prefix_len(),
             mtu: default_mtu(),
             keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: default_ipv6_prefix(),
         }
     }
 }
@@ -127,6 +140,7 @@ impl VpnNetworkConfig {
             mtu: self.mtu,
             mdh_len: default_mdh_len(),
             keepalive_secs: self.keepalive_secs,
+            ipv6_address: None,
         })
     }
 
@@ -143,7 +157,7 @@ impl VpnNetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientNetworkConfig {
     pub client_ip: Ipv4Addr,
     pub server_vpn_ip: Ipv4Addr,
@@ -159,6 +173,10 @@ pub struct ClientNetworkConfig {
     /// Sent by server in ServerHello to override per-network settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_secs: Option<u8>,
+    /// Assigned IPv6 address for this client (e.g. "fd10:cafe::2").
+    /// None when the server has IPv6 disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_address: Option<String>,
 }
 
 fn default_mdh_len() -> u16 {
@@ -175,6 +193,8 @@ impl ClientNetworkConfig {
             prefix_len: self.prefix_len,
             mtu: self.mtu,
             keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: default_ipv6_prefix(),
         }
         .client_config(self.client_ip)
         .map(|_| ())
@@ -229,6 +249,7 @@ impl ClientNetworkConfig {
             client_ip: Ipv4Addr::new(data[8], data[9], data[10], data[11]),
             mdh_len: default_mdh_len(),
             keepalive_secs,
+            ipv6_address: None,
         };
         config.validate()?;
         Ok(config)
@@ -274,6 +295,7 @@ mod tests {
             mtu: 1346,
             mdh_len: 20,
             keepalive_secs: Some(4),
+            ipv6_address: None,
         };
 
         let decoded = ClientNetworkConfig::decode_wire(&config.encode_wire()).unwrap();
@@ -304,6 +326,8 @@ mod tests {
             prefix_len: 24,
             mtu: 1346,
             keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: "fd10:cafe::/48".to_string(),
         };
 
         assert_eq!(config.network_addr(), Ipv4Addr::new(10, 150, 0, 0));
