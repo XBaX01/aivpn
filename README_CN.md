@@ -37,7 +37,7 @@
 
 ### 快速开始（macOS）
 
-1. 下载并打开`aivpn-macos.dmg`
+1. 从 [GitHub Releases](https://github.com/infosave2007/aivpn/releases) 页面下载 `aivpn-macos.dmg` 并打开它
 2. 将**Aivpn.app**拖拽到应用程序文件夹
 3. 启动——应用出现在菜单栏（无坞图标）
 4. 粘贴你的连接密钥（`aivpn://...`）并点击**连接**
@@ -48,7 +48,7 @@
 ### 快速开始（Windows）
 
 #### 选项A：安装程序（推荐）
-1. 下载[aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+1. 下载[aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases)
 2. 右键点击 → **以管理员身份运行**，按照安装向导操作
 3. 从开始菜单启动**AIVPN**（自动以管理员身份运行）
 4. 粘贴你的连接密钥（`aivpn://...`）并点击**连接**
@@ -56,7 +56,7 @@
 > ⚠️ VPN客户端需要管理员权限来创建Wintun网络适配器。请始终以管理员身份运行。
 
 #### 选项B：便携归档
-1. 下载并解压[aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
+1. 下载并解压[aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)
 2. 确保`aivpn.exe`、`aivpn-client.exe`和`wintun.dll`保留在同一文件夹中
 3. 右键点击`aivpn.exe` → **以管理员身份运行**使用GUI，或通过CLI：
    ```powershell
@@ -65,7 +65,7 @@
 
 ### 快速开始（Linux）
 
-1. 下载[aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64)
+1. 下载 [aivpn-client-linux-x86_64](https://github.com/infosave2007/aivpn/releases)
 2. 使其可执行并作为root运行：
    ```bash
    chmod +x ./aivpn-client-linux-x86_64
@@ -74,7 +74,7 @@
 
 ### 快速开始（Entware路由器）
 
-1. 为MIPSel路由器下载[aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl)，或为ARMv7路由器下载[aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf)
+1. 从 [GitHub Releases](https://github.com/infosave2007/aivpn/releases) 页面下载 `aivpn-client-linux-mipsel-musl` 或 `aivpn-client-linux-armv7-musleabihf`。
 2. 将二进制文件复制到路由器，例如`/opt/bin/aivpn-client`
 3. 使其可执行并从Entware shell作为root运行：
    ```sh
@@ -558,9 +558,9 @@ sudo ./target/release/aivpn-client \
 
 ##### Windows
 
-推荐用户通过[aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)安装（包含GUI应用、CLI客户端和Wintun驱动）。
+推荐用户通过 [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases) 安装（包含GUI应用、CLI客户端和Wintun驱动）。
 
-或者下载并解压[aivpn-windows-package.zip](releases/aivpn-windows-package.zip)。归档包含：
+或者下载并解压 [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)。归档包含：
 
 ```
 aivpn.exe          # GUI应用程序

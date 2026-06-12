@@ -37,7 +37,7 @@ Pre-built binaries for all supported platforms are automatically built and attac
 
 
 ### Quick Start (macOS)
-1. Download and open `aivpn-macos.dmg`
+1. Download `aivpn-macos.dmg` from the [Releases](https://github.com/infosave2007/aivpn/releases) page and open it
 2. Drag **Aivpn.app** to Applications
 3. Launch — the app appears in the menu bar (no dock icon)
 4. Paste your connection key (`aivpn://...`) and click **Connect**
@@ -47,7 +47,7 @@ Pre-built binaries for all supported platforms are automatically built and attac
 ### Quick Start (Windows)
 
 #### Option A: Installer (recommended)
-1. Download [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+1. Download [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases)
 2. Right-click → **Run as Administrator** and follow the installer
 3. Launch **AIVPN** from the Start Menu (runs as Administrator automatically)
 4. Paste your connection key (`aivpn://...`) and click **Connect**
@@ -55,7 +55,7 @@ Pre-built binaries for all supported platforms are automatically built and attac
 > ⚠️ The VPN client requires Administrator privileges to create the Wintun network adapter. Always run as Administrator.
 
 #### Option B: Portable archive
-1. Download and extract [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
+1. Download and extract [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)
 2. Ensure `aivpn.exe`, `aivpn-client.exe`, and `wintun.dll` remain in the same folder
 3. Right-click `aivpn.exe` → **Run as Administrator** for the GUI, or use CLI:
    ```powershell
@@ -63,7 +63,7 @@ Pre-built binaries for all supported platforms are automatically built and attac
    ```
 
 ### Quick Start (Linux)
-1. Download [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64)
+1. Download [aivpn-client-linux-x86_64](https://github.com/infosave2007/aivpn/releases)
 2. Make it executable and run as root:
     ```bash
     chmod +x ./aivpn-client-linux-x86_64
@@ -71,7 +71,7 @@ Pre-built binaries for all supported platforms are automatically built and attac
     ```
 
 ### Quick Start (Entware Routers)
-1. Download [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) for MIPSel routers or [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) for ARMv7 routers.
+1. Download `aivpn-client-linux-mipsel-musl` or `aivpn-client-linux-armv7-musleabihf` from the [Releases](https://github.com/infosave2007/aivpn/releases) page.
 2. Copy the binary to the router, for example into `/opt/bin/aivpn-client`.
 3. Make it executable and run it from Entware shell as root:
     ```sh
@@ -527,9 +527,9 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Preferred for users: install via [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) (includes GUI app, CLI client, and Wintun driver).
+Preferred for users: install via [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases) (includes GUI app, CLI client, and Wintun driver).
 
-Alternatively, download and extract [aivpn-windows-package.zip](releases/aivpn-windows-package.zip). The archive contains:
+Alternatively, download and extract [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases). The archive contains:
 
 ```
 aivpn.exe          # GUI application

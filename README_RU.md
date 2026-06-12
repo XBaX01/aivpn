@@ -38,7 +38,7 @@
 
 
 ### Быстрый старт (macOS)
-1. Скачайте и откройте `aivpn-macos.dmg`
+1. Скачайте `aivpn-macos.dmg` со страницы [GitHub Releases](https://github.com/infosave2007/aivpn/releases) и откройте его
 2. Перетащите **Aivpn.app** в Applications
 3. Запустите — приложение появится в menu bar (без иконки в Dock)
 4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
@@ -48,7 +48,7 @@
 ### Быстрый старт (Windows)
 
 #### Вариант А: Установщик (рекомендуется)
-1. Скачайте [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe)
+1. Скачайте [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases)
 2. Правой кнопкой мыши → **Запустить от имени администратора**, следуйте инструкциям установщика
 3. Запустите **AIVPN** из меню «Пуск» (запускается с правами администратора автоматически)
 4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
@@ -56,7 +56,7 @@
 > ⚠️ VPN-клиенту требуются права администратора для создания сетевого адаптера Wintun. Всегда запускайте от имени администратора.
 
 #### Вариант Б: Портативный архив
-1. Скачайте и распакуйте [aivpn-windows-package.zip](releases/aivpn-windows-package.zip)
+1. Скачайте и распакуйте [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)
 2. Убедитесь, что `aivpn.exe`, `aivpn-client.exe` и `wintun.dll` лежат в одной папке
 3. Правой кнопкой на `aivpn.exe` → **Запустить от имени администратора** для GUI, или через CLI:
    ```powershell
@@ -64,7 +64,7 @@
    ```
 
 ### Быстрый старт (Linux)
-1. Скачайте [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64)
+1. Скачайте [aivpn-client-linux-x86_64](https://github.com/infosave2007/aivpn/releases)
 2. Сделайте файл исполняемым и запустите от root:
     ```bash
     chmod +x ./aivpn-client-linux-x86_64
@@ -72,7 +72,7 @@
     ```
 
 ### Быстрый старт (Entware роутеры)
-1. Скачайте [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) для MIPSel роутеров или [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) для ARMv7 роутеров.
+1. Скачайте `aivpn-client-linux-mipsel-musl` или `aivpn-client-linux-armv7-musleabihf` со страницы [GitHub Releases](https://github.com/infosave2007/aivpn/releases).
 2. Скопируйте бинарник на роутер, например в `/opt/bin/aivpn-client`.
 3. Сделайте файл исполняемым и запустите из Entware shell от root:
     ```sh
@@ -541,9 +541,9 @@ sudo ./target/release/aivpn-client \
 
 #### Windows
 
-Для пользователей предпочтительна установка через [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) (включает GUI-приложение, CLI-клиент и Wintun драйвер).
+Для пользователей предпочтительна установка через [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases) (включает GUI-приложение, CLI-клиент и Wintun драйвер).
 
-Альтернативно можно скачать и распаковать [aivpn-windows-package.zip](releases/aivpn-windows-package.zip). Архив содержит:
+Альтернативно можно скачать и распаковать [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases). Архив содержит:
 
 ```
 aivpn.exe          # GUI-приложение
