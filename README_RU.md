@@ -16,7 +16,7 @@
 
 | Платформа | Сервер | Клиент | Полный туннель | Примечания |
 |-----------|--------|--------|----------------|------------|
-| **Linux** | ✅ | ✅ | ✅ | Основная платформа, TUN через `/dev/net/tun` |
+| **Linux** | ✅ | ✅ | ✅ | Основная платформа, TUN через `/dev/net/tun`; GUI-приложение (AppImage + трей) |
 | **macOS** | — | ✅ | ✅ | Через `utun`, автоматическая настройка маршрутов |
 | **Windows** | — | ✅ | ✅ | Через [Wintun](https://www.wintun.net/) драйвер |
 | **Android** | — | ✅ | ✅ | Kotlin-приложение через `VpnService` API |
@@ -131,6 +131,101 @@ cargo install aivpn-server
 👉 https://t.me/tribute/app?startapp=dzX1
 
 Любая поддержка помогает развивать AIVPN дальше. Спасибо! 🙌
+
+## Что нового в v0.7.0
+
+### Раздельное туннелирование (Linux / macOS / Windows)
+
+Направляйте через VPN только указанные CIDR, а всё остальное — напрямую. Или наоборот: пускайте через VPN всё, кроме определённых сетей:
+
+```bash
+# Только российские CGI-NAT адреса идут через VPN, остальное — напрямую
+sudo aivpn-client -k "aivpn://..." \
+    --include-routes 100.64.0.0/10,10.0.0.0/8
+
+# Всё через VPN, кроме локальной сети офиса
+sudo aivpn-client -k "aivpn://..." --full-tunnel \
+    --exclude-routes 192.168.1.0/24
+```
+
+### Kill-Switch и защита от утечек (Linux / macOS / Windows)
+
+Блокирует весь исходящий трафик при обрыве VPN-туннеля. Пропускаются только трафик через TUN-интерфейс и соединения с физическим адресом сервера.
+
+```bash
+sudo aivpn-client -k "aivpn://..." --full-tunnel --kill-switch
+```
+
+Правила намеренно остаются после неожиданного завершения процесса (SIGKILL). Чтобы убрать остаточные правила после сбоя:
+
+```bash
+aivpn-client kill-switch clear
+```
+
+### IPv6 Dual-Stack (сервер)
+
+Включите NAT66 одновременно с IPv4 NAT для туннелирования IPv6-трафика. Добавьте в `server.json`:
+
+```json
+{
+  "network_config": {
+    "server_vpn_ip": "10.0.0.1",
+    "prefix_len": 24,
+    "mtu": 1346,
+    "ipv6_enabled": true,
+    "ipv6_prefix": "fd10:cafe::/48"
+  }
+}
+```
+
+### Авто-определение MTU (сервер)
+
+Укажите `"auto"` вместо числа в `tun_mtu` в `server.json`. Сервер сам определит MTU физического сетевого интерфейса и вычислит правильный MTU для TUN с учётом накладных расходов AIVPN:
+
+```json
+{ "tun_mtu": "auto" }
+```
+
+### Валидатор масок
+
+Проверьте JSON-файл маски на корректность структуры и статистическую правдоподобность без запуска сервера:
+
+```bash
+aivpn-server --validate-mask /var/lib/aivpn/masks/my_mask.json
+```
+
+### Новые маски для обхода DPI
+
+Шесть новых профилей трафика, имитирующих российские сервисы:
+
+| Маска | Имитирует |
+|-------|-----------|
+| `avito_api_v1` | Avito мобильное API (HTTPS/QUIC) |
+| `sber_salute_v1` | Голосовой ассистент SberSalute |
+| `vk_video_v1` | Адаптивное видео VK |
+| `webrtc_sberjazz_v1` | Аудио SberJazz WebRTC |
+| `whatsapp_voip_v1` | WhatsApp VoIP через SRTP |
+| `yandex_alice_v1` | Голосовой ассистент Яндекс Алиса |
+
+### Улучшения нейронного анти-зондирования
+
+Модуль Neural Resonance теперь отслеживает **паттерны burst**, **соотношение направлений пакетов** и **периодичность IAT** — три признака, по которым GFW/РКН активно зондирует туннели. Добавлен **60-секундный кулдаун ротации масок** для предотвращения осцилляции при продолжительном зондировании.
+
+### Linux Desktop GUI (AppImage)
+
+Нативное приложение на Iced с системным треем для Linux. Скачайте AppImage из Releases или соберите сами:
+
+```bash
+cargo build --release --manifest-path aivpn-linux/Cargo.toml
+# Или соберите AppImage:
+./aivpn-linux/build-appimage.sh
+```
+
+### eBPF/XDP фильтр на уровне NIC
+
+Когда `xdp_prog.o` установлен (компилируется вместе с `aivpn.ko`), клиент автоматически подключает XDP-фильтр к физическому сетевому интерфейсу. Фильтр отбрасывает некорректные или просроченные пакеты прямо на уровне RX NIC — до выделения буфера сокета — обеспечивая первичную защиту от DDoS независимо от состояния ядерного модуля.
+
+---
 
 ## Главная фича: Нейронный Резонанс (AI)
 
@@ -632,26 +727,31 @@ cargo build --release --target x86_64-pc-windows-msvc
 ```
 aivpn/
 ├── aivpn-common/src/
-│   ├── crypto.rs        # X25519, ChaCha20-Poly1305, BLAKE3
-│   ├── mask.rs          # Профили мимикрии (WebRTC, QUIC, DNS)
-│   └── protocol.rs      # Формат пакетов, inner types
+│   ├── crypto.rs          # X25519, ChaCha20-Poly1305, BLAKE3
+│   ├── mask.rs            # Профили мимикрии (WebRTC, QUIC, DNS)
+│   ├── protocol.rs        # Формат пакетов, inner types
+│   └── kernel_accel.rs    # API /dev/aivpn + XDP-хелперы
 ├── aivpn-client/src/
-│   ├── client.rs        # Основная логика клиента
-│   ├── tunnel.rs        # TUN-интерфейс (Linux / macOS / Windows)
-│   └── mimicry.rs       # Движок шейпинга трафика
+│   ├── client.rs          # Логика клиента (split-tunnel, kill-switch, XDP)
+│   ├── tunnel.rs          # TUN-интерфейс (Linux / macOS / Windows)
+│   ├── kill_switch.rs     # Kill-switch (nftables / pfctl / netsh)
+│   └── mimicry.rs         # Движок шейпинга трафика
 ├── aivpn-server/src/
-│   ├── gateway.rs       # UDP-шлюз, MaskCatalog, resonance loop
-│   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT-форвардер (iptables)
-│   ├── client_db.rs     # База клиентов (PSK, статический IP, статистика)
-│   ├── key_rotation.rs  # Ротация сессионных ключей
-│   └── metrics.rs       # Prometheus-мониторинг
-├── aivpn-android/       # Android-клиент (Kotlin)
-├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, мост socketpair TUN)
-├── aivpn-ios/           # iOS SwiftUI-приложение + расширение NEPacketTunnelProvider
+│   ├── gateway.rs         # UDP-шлюз, MaskCatalog, resonance loop
+│   ├── neural.rs          # Baked Mask Encoder, AnomalyDetector
+│   ├── nat.rs             # NAT-форвардер (IPv4 + IPv6 NAT66)
+│   ├── client_db.rs       # База клиентов (PSK, статический IP, статистика)
+│   ├── key_rotation.rs    # Ротация сессионных ключей
+│   └── metrics.rs         # Prometheus-мониторинг
+├── aivpn-common/mask-assets/   # 11 профилей мимикрии трафика (JSON)
+├── aivpn-linux/           # Linux Iced GUI (AppImage + системный трей)
+├── aivpn-linux-kernel/    # Опциональный ядерный модуль (aivpn.ko) + XDP-фильтр
+├── aivpn-android/         # Android-клиент (Kotlin)
+├── aivpn-ios-core/        # iOS Rust staticlib (C FFI)
+├── aivpn-ios/             # iOS SwiftUI + NEPacketTunnelProvider
 ├── Dockerfile
 ├── docker-compose.yml
-└── build.sh
+└── THREAT_MODEL.md        # Модель угроз и безопасность протокола
 ```
 
 ## Разработка и контрибы

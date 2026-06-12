@@ -15,7 +15,7 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 
 | Platform | Server | Client | Full Tunnel | Notes |
 |----------|--------|--------|-------------|-------|
-| **Linux** | ✅ | ✅ | ✅ | Primary platform, TUN via `/dev/net/tun` |
+| **Linux** | ✅ | ✅ | ✅ | Primary platform, TUN via `/dev/net/tun`; GUI app (AppImage + tray) |
 | **macOS** | — | ✅ | ✅ | Via `utun` kernel interface, auto route config |
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
@@ -152,6 +152,103 @@ If you find this project helpful, you can support its development with a donatio
 👉 https://t.me/tribute/app?startapp=dzX1
 
 Every donation helps keep AIVPN evolving. Thank you! 🙌
+
+## What's New in v0.7.0
+
+### Split-tunneling (Linux / macOS / Windows)
+
+Route only specific CIDRs through the VPN while sending everything else via your normal gateway — or do the reverse and route everything except certain CIDRs through the VPN:
+
+```bash
+# Only route Russian CGI-NAT ranges through VPN; everything else goes direct
+sudo aivpn-client -k "aivpn://..." \
+    --include-routes 100.64.0.0/10,10.0.0.0/8
+
+# Route everything except corporate LAN through VPN
+sudo aivpn-client -k "aivpn://..." --full-tunnel \
+    --exclude-routes 192.168.1.0/24
+```
+
+### Kill-Switch & Leak Protection (Linux / macOS / Windows)
+
+Blocks all outbound traffic if the VPN tunnel drops. Only VPN-interface traffic and traffic to the physical server IP are allowed through.
+
+```bash
+sudo aivpn-client -k "aivpn://..." --full-tunnel --kill-switch
+```
+
+Rules intentionally persist across unexpected process death (SIGKILL). To remove stale rules after a crash:
+
+```bash
+aivpn-client kill-switch clear
+```
+
+### IPv6 Dual-Stack (server)
+
+Enable NAT66 alongside IPv4 NAT to tunnel IPv6 traffic. Add to `server.json`:
+
+```json
+{
+  "network_config": {
+    "server_vpn_ip": "10.0.0.1",
+    "prefix_len": 24,
+    "mtu": 1346,
+    "ipv6_enabled": true,
+    "ipv6_prefix": "fd10:cafe::/48"
+  }
+}
+```
+
+### MTU Auto-Detection (server)
+
+Set `tun_mtu` to `"auto"` in `server.json` instead of a fixed number. The server probes the physical NIC MTU and computes the correct TUN MTU automatically, accounting for AIVPN overhead:
+
+```json
+{ "tun_mtu": "auto" }
+```
+
+### Mask Validator
+
+Validate a mask JSON file for structural correctness and statistical plausibility without starting the full server:
+
+```bash
+aivpn-server --validate-mask /var/lib/aivpn/masks/my_mask.json
+```
+
+### New DPI-Evasion Masks
+
+Six new traffic mimicry profiles targeting Russian-blocked services:
+
+| Mask | Mimics |
+|------|--------|
+| `avito_api_v1` | Avito mobile API (HTTPS/QUIC) |
+| `sber_salute_v1` | SberSalute voice assistant |
+| `vk_video_v1` | VK Video adaptive bitrate |
+| `webrtc_sberjazz_v1` | SberJazz WebRTC audio |
+| `whatsapp_voip_v1` | WhatsApp VoIP over SRTP |
+| `yandex_alice_v1` | Yandex Alice voice assistant |
+
+### Neural Anti-Probing Improvements
+
+The Neural Resonance module now tracks **burst patterns**, **packet direction ratio**, and **IAT periodicity** — three features commonly used by GFW/RKN active probers to fingerprint tunnels. A **60-second rotation cooldown** prevents mask oscillation under sustained probing.
+
+### Linux Desktop GUI (AppImage)
+
+A native Iced-based system-tray application for Linux. Download the AppImage from Releases or build:
+
+```bash
+cargo build --release --manifest-path aivpn-linux/Cargo.toml
+# Or build an AppImage:
+./aivpn-linux/build-appimage.sh
+```
+
+### eBPF/XDP Early Packet Filter
+
+When `xdp_prog.o` is installed (compiled alongside `aivpn.ko`), the client automatically attaches an XDP filter to the physical NIC. This drops malformed or timestamp-expired packets at NIC RX level — before socket buffer allocation — providing first-stage DDoS protection independent of the kernel module.
+
+The filter is transparent: it only drops obviously invalid packets and passes everything else to the normal stack.
+
+---
 
 ## The Main Feature: Neural Resonance (AI)
 
@@ -618,26 +715,31 @@ For Entware routers, the usual flow is: build or download the musl artifact, cop
 ```
 aivpn/
 ├── aivpn-common/src/
-│   ├── crypto.rs        # X25519, ChaCha20-Poly1305, BLAKE3
-│   ├── mask.rs          # Mimicry profiles (WebRTC, QUIC, DNS)
-│   └── protocol.rs      # Packet format, inner types
+│   ├── crypto.rs          # X25519, ChaCha20-Poly1305, BLAKE3
+│   ├── mask.rs            # Mimicry profiles (WebRTC, QUIC, DNS)
+│   ├── protocol.rs        # Packet format, inner types
+│   └── kernel_accel.rs    # /dev/aivpn ioctl API + XDP attach helpers
 ├── aivpn-client/src/
-│   ├── client.rs        # Core client logic
-│   ├── tunnel.rs        # TUN interface (Linux / macOS / Windows)
-│   └── mimicry.rs       # Traffic shaping engine
+│   ├── client.rs          # Core client logic (split-tunnel, kill-switch, XDP)
+│   ├── tunnel.rs          # TUN interface (Linux / macOS / Windows)
+│   ├── kill_switch.rs     # Kill-switch (nftables/pfctl/netsh)
+│   └── mimicry.rs         # Traffic shaping engine
 ├── aivpn-server/src/
-│   ├── gateway.rs       # UDP gateway, MaskCatalog, resonance loop
-│   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT forwarder (nftables/iptables, auto-detected)
-│   ├── client_db.rs     # Client database (PSK, static IP, stats)
-│   ├── key_rotation.rs  # Session key rotation
-│   └── metrics.rs       # Prometheus monitoring
-├── aivpn-android/       # Android client (Kotlin)
-├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, socketpair TUN bridge)
-├── aivpn-ios/           # iOS SwiftUI app + NEPacketTunnelProvider extension
+│   ├── gateway.rs         # UDP gateway, MaskCatalog, resonance loop
+│   ├── neural.rs          # Baked Mask Encoder, AnomalyDetector
+│   ├── nat.rs             # NAT forwarder (IPv4 + IPv6 NAT66)
+│   ├── client_db.rs       # Client database (PSK, static IP, stats)
+│   ├── key_rotation.rs    # Session key rotation
+│   └── metrics.rs         # Prometheus monitoring
+├── aivpn-common/mask-assets/   # 11 traffic mimicry profiles (JSON)
+├── aivpn-linux/           # Linux Iced GUI (AppImage + system tray)
+├── aivpn-linux-kernel/    # Optional kernel module (aivpn.ko) + XDP filter
+├── aivpn-android/         # Android client (Kotlin)
+├── aivpn-ios-core/        # iOS Rust staticlib (C FFI)
+├── aivpn-ios/             # iOS SwiftUI app + NEPacketTunnelProvider
 ├── Dockerfile
 ├── docker-compose.yml
-└── build.sh
+└── THREAT_MODEL.md        # Protocol security & adversary model
 ```
 
 ## Contributing
