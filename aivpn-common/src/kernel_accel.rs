@@ -161,7 +161,7 @@ impl Drop for KernelAccel {
 // ── ioctl helpers ─────────────────────────────────────────────────────────────
 
 fn ioctl_ref<T>(fd: RawFd, cmd: u64, arg: &T) -> io::Result<i32> {
-    let ret = unsafe { libc::ioctl(fd, cmd, arg as *const T) };
+    let ret = unsafe { libc::ioctl(fd, cmd as _, arg as *const T) };
     if ret < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -170,7 +170,7 @@ fn ioctl_ref<T>(fd: RawFd, cmd: u64, arg: &T) -> io::Result<i32> {
 }
 
 fn ioctl_void(fd: RawFd, cmd: u64) -> io::Result<i32> {
-    let ret = unsafe { libc::ioctl(fd, cmd, 0usize) };
+    let ret = unsafe { libc::ioctl(fd, cmd as _, 0usize) };
     if ret < 0 {
         Err(io::Error::last_os_error())
     } else {
