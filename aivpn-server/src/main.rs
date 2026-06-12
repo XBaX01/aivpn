@@ -585,11 +585,13 @@ fn resolve_config_path(args: &ServerArgs) -> Option<String> {
         return Some(path.clone());
     }
 
+    // Only auto-select a config file that can actually be opened; an existing
+    // but unreadable file (e.g. /etc/aivpn/server.json owned by root) must not
+    // trigger a hard exit — the server falls back to defaults instead.
     [DEFAULT_SERVER_CONFIG_PATH, LOCAL_SERVER_CONFIG_PATH]
         .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
-        .map(|path| path.to_string_lossy().into_owned())
+        .find(|path| std::fs::File::open(path).is_ok())
+        .map(|path| path.to_string())
 }
 
 fn resolve_network_config(
@@ -888,6 +890,7 @@ mod tests {
             server_ip: None,
             per_ip_pps_limit: 1000,
             mask_dir: None,
+            validate_mask: None,
             #[cfg(all(feature = "management-api", unix))]
             management_socket: None,
         }
@@ -926,6 +929,7 @@ mod tests {
                 mtu: 1346,
                 mdh_len: 20,
                 keepalive_secs: None,
+                ipv6_address: None,
             },
         );
         let payload = key.strip_prefix("aivpn://").unwrap();
@@ -950,6 +954,7 @@ mod tests {
                 prefix_len: 24,
                 mtu: 1400,
                 keepalive_secs: None,
+                ..Default::default()
             }),
             mask_dir: None,
             bootstrap_mask_files: None,
