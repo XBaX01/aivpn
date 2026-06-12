@@ -901,10 +901,19 @@ impl Gateway {
 
                             match result.status {
                                 ResonanceStatus::Compromised => {
+                                    if !neural_guard.can_rotate(mask_id) {
+                                        debug!(
+                                            "Mask '{}' compromised (MSE={:.4}) but rotation on cooldown — skipping",
+                                            mask_id, result.mse
+                                        );
+                                        continue;
+                                    }
                                     warn!(
                                         "Mask '{}' compromised (MSE={:.4}) — triggering rotation (Patent 3)",
                                         mask_id, result.mse
                                     );
+
+                                    neural_guard.record_rotation(mask_id);
 
                                     // Mark mask as compromised in catalog
                                     catalog.mark_compromised(mask_id);
@@ -1956,7 +1965,8 @@ impl Gateway {
             if counter & 0x0f == 0 {
                 self.neural_module
                     .lock()
-                    .record_traffic(session_id, packet_size, iat_ms, entropy);
+                    // is_rx=true: packet from client → server (uplink direction)
+                    .record_traffic(session_id, packet_size, iat_ms, entropy, true);
             }
             self.metrics.record_packet_received(packet_data.len());
         }

@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use aivpn_common::mask::MaskProfile;
@@ -41,6 +42,9 @@ pub struct NeuralConfig {
 
     /// Enable anomaly detection
     pub enable_anomaly_detection: bool,
+
+    /// Minimum seconds between mask rotations (0 = no cooldown)
+    pub rotation_cooldown_secs: u64,
 }
 
 impl Default for NeuralConfig {
@@ -51,6 +55,7 @@ impl Default for NeuralConfig {
             compromised_threshold: 0.35,
             warning_threshold: 0.15,
             enable_anomaly_detection: true,
+            rotation_cooldown_secs: 60,
         }
     }
 }
@@ -70,6 +75,10 @@ pub struct TrafficStats {
     pub pps: f64,
     /// Bytes per second
     pub bps: f64,
+    /// Packets received from client (uplink direction)
+    pub rx_packets: u64,
+    /// Packets sent to client (downlink direction)
+    pub tx_packets: u64,
 }
 
 impl TrafficStats {
@@ -80,14 +89,21 @@ impl TrafficStats {
             entropy_samples: VecDeque::with_capacity(256),
             pps: 0.0,
             bps: 0.0,
+            rx_packets: 0,
+            tx_packets: 0,
         }
     }
 
-    /// Add packet sample
-    pub fn add_packet(&mut self, size: u16, iat_ms: f64, entropy: f64) {
+    /// Add packet sample. `is_rx` = true for client→server (uplink), false for server→client.
+    pub fn add_packet(&mut self, size: u16, iat_ms: f64, entropy: f64, is_rx: bool) {
         self.packet_sizes.push_back(size);
         self.inter_arrivals.push_back(iat_ms);
         self.entropy_samples.push_back(entropy);
+        if is_rx {
+            self.rx_packets += 1;
+        } else {
+            self.tx_packets += 1;
+        }
         // Keep last 256 samples
         if self.packet_sizes.len() > 256 {
             self.packet_sizes.pop_front();
@@ -103,6 +119,8 @@ impl TrafficStats {
         self.entropy_samples.clear();
         self.pps = 0.0;
         self.bps = 0.0;
+        self.rx_packets = 0;
+        self.tx_packets = 0;
     }
 }
 
@@ -442,7 +460,42 @@ pub fn encode_features(stats: &TrafficStats) -> [f32; FEAT_DIM] {
                 0.0
             };
         }
-        // [45-47] reserved
+        // [45]: direction ratio — rx/(rx+tx); asymmetric traffic is a GFW/RKN DPI signal
+        let total_dir = (stats.rx_packets + stats.tx_packets) as f32;
+        features[45] = if total_dir > 0.0 {
+            stats.rx_packets as f32 / total_dir
+        } else {
+            0.5
+        };
+
+        // [46-47]: burst features — computed from IAT (burst = consecutive IATs < 5 ms)
+        // GFW/RKN DPI detects "data burst + silence" patterns typical of tunneled traffic.
+        if !stats.inter_arrivals.is_empty() {
+            let burst_thresh = 5.0_f64;
+            let mut burst_count = 0u32;
+            let mut total_burst_pkts = 0u32;
+            let mut in_burst = false;
+            for &iat in &stats.inter_arrivals {
+                if iat < burst_thresh {
+                    if !in_burst {
+                        burst_count += 1;
+                        in_burst = true;
+                    }
+                    total_burst_pkts += 1;
+                } else {
+                    in_burst = false;
+                }
+            }
+            let n_iat = stats.inter_arrivals.len() as f32;
+            // Burst frequency: bursts per packet (normalized)
+            features[46] = burst_count as f32 / n_iat;
+            // Mean burst length, normalized to [0, 1] with ceiling of 20 packets
+            features[47] = if burst_count > 0 {
+                (total_burst_pkts as f32 / burst_count as f32 / 20.0).min(1.0)
+            } else {
+                0.0
+            };
+        }
     }
 
     // Block 4 (48–63): Temporal features
@@ -511,7 +564,24 @@ pub fn encode_features(stats: &TrafficStats) -> [f32; FEAT_DIM] {
                 / stats.packet_sizes.len() as f32;
             features[62] = (stats.pps as f32 * mean_sz / 1_000_000.0).clamp(0.0, 1.0);
         }
-        // [63] reserved
+        // [63]: timing periodicity index — fraction of IATs within ±20% of the median.
+        // High periodicity (many IATs clustered near one value) indicates a heartbeat
+        // pattern that GFW/RKN DPI can fingerprint as a tunnel keepalive.
+        if !stats.inter_arrivals.is_empty() {
+            let mut sorted_p: Vec<f64> = stats.inter_arrivals.iter().cloned().collect();
+            sorted_p.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = sorted_p[sorted_p.len() / 2];
+            if median > 1.0 {
+                let lo = median * 0.8;
+                let hi = median * 1.2;
+                let near = stats
+                    .inter_arrivals
+                    .iter()
+                    .filter(|&&t| t >= lo && t <= hi)
+                    .count();
+                features[63] = near as f32 / stats.inter_arrivals.len() as f32;
+            }
+        }
     }
 
     features
@@ -641,6 +711,9 @@ pub struct NeuralResonanceModule {
     /// Per-mask MSE calibration (auto-updates adaptive threshold)
     mask_calibration: dashmap::DashMap<String, MaskCalibration>,
 
+    /// Per-mask last rotation timestamp — enforces rotation_cooldown_secs
+    last_rotation_time: dashmap::DashMap<String, Instant>,
+
     /// Whether the module is loaded
     loaded: bool,
 }
@@ -681,6 +754,7 @@ impl NeuralResonanceModule {
             session_stats: dashmap::DashMap::new(),
             anomaly_detector: AnomalyDetector::new(),
             mask_calibration: dashmap::DashMap::new(),
+            last_rotation_time: dashmap::DashMap::new(),
             loaded: false,
         })
     }
@@ -718,21 +792,41 @@ impl NeuralResonanceModule {
         Ok(())
     }
 
-    /// Record traffic sample for session
+    /// Record traffic sample for session.
+    /// `is_rx` = true for client→server packets, false for server→client.
     pub fn record_traffic(
         &self,
         session_id: [u8; 16],
         packet_size: u16,
         iat_ms: f64,
         entropy: f64,
+        is_rx: bool,
     ) {
         if let Some(mut stats) = self.session_stats.get_mut(&session_id) {
-            stats.add_packet(packet_size, iat_ms, entropy);
+            stats.add_packet(packet_size, iat_ms, entropy, is_rx);
         } else {
             let mut stats = TrafficStats::new();
-            stats.add_packet(packet_size, iat_ms, entropy);
+            stats.add_packet(packet_size, iat_ms, entropy, is_rx);
             self.session_stats.insert(session_id, stats);
         }
+    }
+
+    /// Returns true if enough time has passed since the last rotation for this mask.
+    pub fn can_rotate(&self, mask_id: &str) -> bool {
+        let cooldown = Duration::from_secs(self.config.rotation_cooldown_secs);
+        if cooldown.is_zero() {
+            return true;
+        }
+        self.last_rotation_time
+            .get(mask_id)
+            .map(|t| t.elapsed() >= cooldown)
+            .unwrap_or(true)
+    }
+
+    /// Record that a rotation was triggered for this mask (starts the cooldown).
+    pub fn record_rotation(&self, mask_id: &str) {
+        self.last_rotation_time
+            .insert(mask_id.to_string(), Instant::now());
     }
 
     /// Perform resonance check (Patent 1: Signal Reconstruction Resonance)
