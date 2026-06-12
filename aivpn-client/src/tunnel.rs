@@ -9,6 +9,7 @@ use tracing::{debug, error, info};
 
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::{ClientNetworkConfig, VpnNetworkConfig, LEGACY_SERVER_VPN_IP};
+use crate::kill_switch::KillSwitch;
 
 // Keep the full encrypted outer datagram within SAFE_OUTER_PACKET_BUDGET=1380.
 // Outer overhead is 34 bytes: TAG(16) + MDH(4) + pad_len(2) + Poly1305(16) -
@@ -34,6 +35,8 @@ pub struct TunnelConfig {
     pub include_routes: Vec<String>,
     /// CIDRs to bypass the VPN even in full-tunnel mode
     pub exclude_routes: Vec<String>,
+    /// Block all non-VPN traffic while the tunnel is up (kill-switch)
+    pub kill_switch: bool,
 }
 
 impl Default for TunnelConfig {
@@ -50,6 +53,7 @@ impl Default for TunnelConfig {
             mdh_len: 20u16,
             include_routes: Vec::new(),
             exclude_routes: Vec::new(),
+            kill_switch: false,
         }
     }
 }
@@ -71,6 +75,7 @@ impl TunnelConfig {
             mdh_len: network_config.mdh_len,
             include_routes: Vec::new(),
             exclude_routes: Vec::new(),
+            kill_switch: false,
         }
     }
 
@@ -146,6 +151,8 @@ pub struct Tunnel {
     wintun_if_index: Option<String>,
     /// CIDRs added by apply_split_routes — removed on Drop.
     split_routes_applied: Vec<String>,
+    /// Active kill-switch instance; deactivated on graceful Drop.
+    kill_switch_state: Option<KillSwitch>,
 }
 
 impl Tunnel {
@@ -159,6 +166,7 @@ impl Tunnel {
             saved_ipv6_iface: None,
             wintun_if_index: None,
             split_routes_applied: Vec::new(),
+            kill_switch_state: None,
         }
     }
 
@@ -1370,6 +1378,23 @@ impl Tunnel {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn remove_split_routes(&mut self) {}
 
+    // ──────────────────── Kill-switch ────────────────────
+
+    /// Activate the kill-switch if configured. Call after full-tunnel and split-routes setup.
+    pub fn activate_kill_switch(&mut self) -> Result<()> {
+        if !self.config.kill_switch {
+            return Ok(());
+        }
+        let server_ip = self
+            .server_ip
+            .clone()
+            .unwrap_or_else(|| self.config.server_vpn_ip.clone());
+        let mut ks = KillSwitch::new(self.config.tun_name.clone(), server_ip);
+        ks.activate()?;
+        self.kill_switch_state = Some(ks);
+        Ok(())
+    }
+
     /// Restore IPv6 on macOS when disconnecting
     #[cfg(target_os = "macos")]
     fn restore_ipv6(&self) {
@@ -1449,6 +1474,10 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
+        if let Some(ref mut ks) = self.kill_switch_state {
+            ks.deactivate();
+        }
+
         self.remove_split_routes();
 
         if self.config.full_tunnel && self.saved_default_gw.is_some() {

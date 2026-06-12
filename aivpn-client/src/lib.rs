@@ -9,6 +9,7 @@
 pub mod bootstrap_cache;
 pub mod bootstrap_loader;
 pub mod client;
+pub mod kill_switch;
 pub mod mimicry;
 pub mod proxy;
 pub mod record_cmd;

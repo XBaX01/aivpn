@@ -266,6 +266,9 @@ impl AivpnClient {
             {
                 self.tunnel.apply_split_routes()?;
             }
+            if self.config.tun_config.kill_switch {
+                self.tunnel.activate_kill_switch()?;
+            }
         }
 
         // Initialize mimicry engine
