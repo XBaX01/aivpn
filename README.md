@@ -31,23 +31,9 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 - ✅ Windows client: working (GUI + CLI)
 - ✅ MikroTik RouterOS container: working (arm64/armv7/amd64)
 
-## 📥 Downloads (Pre-built Binaries)
+## 📥 Downloads
 
-No need to compile — download and run:
-
-| Platform | File | Size | Notes |
-|----------|------|------|-------|
-| **macOS** | [aivpn-macos.dmg](releases/aivpn-macos.dmg) | ~1.8 MB | Menu bar app with RU/EN interface |
-| **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 MB | Native x86_64 GNU/Linux CLI binary |
-| **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 MB | Static musl client binary for ARMv7 servers and SBCs |
-| **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 MB | Static musl client binary for Entware-capable routers |
-| **Windows (installer)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 MB | One-click installer, includes GUI app + CLI + Wintun driver. **Run as Administrator** |
-| **Windows (portable)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 MB | Portable archive: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
-| **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 MB | Install and paste your connection key |
-| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 MB | Install via Xcode Devices or ios-deploy; requires free Apple ID signing (7-day) |
-| **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 MB | Prebuilt x86_64 GNU/Linux server binary for VPS or fast Docker deploy |
-| **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 MB | Static musl server binary for ARMv7 Linux hosts |
-| **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 MB | Static musl server binary for lightweight MIPSel/Entware systems |
+Pre-built binaries for all supported platforms are automatically built and attached to each release. You can download the latest versions from the [GitHub Releases](https://github.com/infosave2007/aivpn/releases) page.
 
 
 ### Quick Start (macOS)

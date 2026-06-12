@@ -32,23 +32,9 @@
 - ✅ Windows-клиент: работает (GUI + CLI)
 - ✅ MikroTik RouterOS контейнер: работает (arm64/armv7/amd64)
 
-## 📥 Готовые бинарники
+## 📥 Загрузки
 
-Не нужно ничего компилировать — скачайте и запускайте:
-
-| Платформа | Файл | Размер | Примечания |
-|-----------|------|--------|------------|
-| **macOS** | [aivpn-macos.dmg](releases/aivpn-macos.dmg) | ~1.8 МБ | Приложение в menu bar с интерфейсом RU/EN |
-| **Linux** | [aivpn-client-linux-x86_64](releases/aivpn-client-linux-x86_64) | ~4.0 МБ | Нативный x86_64 GNU/Linux CLI бинарник |
-| **Linux ARMv7** | [aivpn-client-linux-armv7-musleabihf](releases/aivpn-client-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl CLI-клиент для ARMv7 серверов и SBC |
-| **Entware / MIPSel** | [aivpn-client-linux-mipsel-musl](releases/aivpn-client-linux-mipsel-musl) | ~4-5 МБ | Статический musl CLI-клиент для роутеров с Entware |
-| **Windows (установщик)** | [aivpn-windows-installer.exe](releases/aivpn-windows-installer.exe) | ~10 МБ | Установщик в один клик: GUI-приложение + CLI + Wintun драйвер. **Запускать от администратора** |
-| **Windows (портативная)** | [aivpn-windows-package.zip](releases/aivpn-windows-package.zip) | ~7 МБ | Портативный архив: `aivpn.exe` (GUI) + `aivpn-client.exe` (CLI) + `wintun.dll` |
-| **Android** | [aivpn-client.apk](releases/aivpn-client.apk) | ~6.5 МБ | Установите и вставьте ключ подключения |
-| **iOS** | [aivpn-ios.ipa](releases/aivpn-ios.ipa) | ~5 МБ | Установка через Xcode Devices или ios-deploy; требует бесплатную подпись Apple ID (7 дней) |
-| **Linux Server** | [aivpn-server-linux-x86_64](releases/aivpn-server-linux-x86_64) | ~4.0 МБ | Готовый x86_64 GNU/Linux бинарник сервера для VPS или быстрого Docker-деплоя |
-| **Linux Server ARMv7** | [aivpn-server-linux-armv7-musleabihf](releases/aivpn-server-linux-armv7-musleabihf) | ~4-5 МБ | Статический musl бинарник сервера для ARMv7 Linux-хостов |
-| **Linux Server MIPSel** | [aivpn-server-linux-mipsel-musl](releases/aivpn-server-linux-mipsel-musl) | ~4-5 МБ | Статический musl бинарник сервера для лёгких MIPSel/Entware систем |
+Готовые бинарные файлы для всех поддерживаемых платформ автоматически собираются и прикрепляются к каждому релизу. Вы можете скачать последние версии на странице [GitHub Releases](https://github.com/infosave2007/aivpn/releases).
 
 
 ### Быстрый старт (macOS)
