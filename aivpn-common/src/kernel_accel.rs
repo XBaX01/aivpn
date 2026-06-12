@@ -5,25 +5,33 @@
 //! user-space TUN path transparently.
 
 use std::fs::OpenOptions;
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::io;
+use std::os::unix::io::{AsRawFd, RawFd};
 
 // ── UAPI ioctl numbers (must match include/uapi/aivpn.h) ─────────────────────
 
 const MAGIC: u64 = 0xAE;
-const fn iow(nr: u64, sz: u64) -> u64  { (2u64 << 30) | (MAGIC << 8) | nr | (sz << 16) }
-const fn ior(nr: u64, sz: u64) -> u64  { (1u64 << 30) | (MAGIC << 8) | nr | (sz << 16) }
-const fn iowr(nr: u64, sz: u64) -> u64 { (3u64 << 30) | (MAGIC << 8) | nr | (sz << 16) }
-const fn io_(nr: u64) -> u64           { (MAGIC << 8) | nr }
+const fn iow(nr: u64, sz: u64) -> u64 {
+    (2u64 << 30) | (MAGIC << 8) | nr | (sz << 16)
+}
+const fn ior(nr: u64, sz: u64) -> u64 {
+    (1u64 << 30) | (MAGIC << 8) | nr | (sz << 16)
+}
+const fn iowr(nr: u64, sz: u64) -> u64 {
+    (3u64 << 30) | (MAGIC << 8) | nr | (sz << 16)
+}
+const fn io_(nr: u64) -> u64 {
+    (MAGIC << 8) | nr
+}
 
-const IOC_SESSION_ADD:         u64 = iow(1,  160);
-const IOC_SESSION_DEL:         u64 = iow(2,   16);
+const IOC_SESSION_ADD: u64 = iow(1, 160);
+const IOC_SESSION_DEL: u64 = iow(2, 16);
 #[allow(dead_code)]
-const IOC_SESSION_STAT:        u64 = iowr(3,  52);
-const IOC_SET_TUN:             u64 = iow(4,    4);
-const IOC_SET_UDP_SOCK:        u64 = iow(5,    4);
-const IOC_FLUSH:               u64 = io_(6);
-const IOC_GET_VERSION:         u64 = ior(7,    4);
+const IOC_SESSION_STAT: u64 = iowr(3, 52);
+const IOC_SET_TUN: u64 = iow(4, 4);
+const IOC_SET_UDP_SOCK: u64 = iow(5, 4);
+const IOC_FLUSH: u64 = io_(6);
+const IOC_GET_VERSION: u64 = ior(7, 4);
 const IOC_SESSION_UPDATE_TAGS: u64 = iow(8, 4116);
 
 pub const API_VERSION: u32 = 2;
@@ -33,22 +41,22 @@ pub const API_VERSION: u32 = 2;
 /// Payload for AIVPN_IOC_SESSION_ADD (160 bytes).
 #[repr(C, packed)]
 pub struct SessionAdd {
-    pub session_id:   [u8; 16],
-    pub session_key:  [u8; 32],
-    pub tag_secret:   [u8; 32],
-    pub nonce_suffix: [u8; 4],    // bytes 8-11 of the 12-byte ChaCha20 nonce
-    pub _reserved:    [u8; 28],
+    pub session_id: [u8; 16],
+    pub session_key: [u8; 32],
+    pub tag_secret: [u8; 32],
+    pub nonce_suffix: [u8; 4], // bytes 8-11 of the 12-byte ChaCha20 nonce
+    pub _reserved: [u8; 28],
     pub counter_base: u64,
-    pub client_ip:    u32,
-    pub client_addr:  [u8; 28],
-    pub window_ms:    u64,
+    pub client_ip: u32,
+    pub client_addr: [u8; 28],
+    pub window_ms: u64,
 }
 
 /// One (tag, counter) pair in a tag-window batch.
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct TagWindowEntry {
-    pub tag:     [u8; 8],
+    pub tag: [u8; 8],
     pub counter: u64,
 }
 
@@ -57,8 +65,8 @@ pub struct TagWindowEntry {
 #[derive(Copy, Clone)]
 pub struct UpdateTagsPayload {
     pub session_id: [u8; 16],
-    pub count:      u32,
-    pub entries:    [TagWindowEntry; 256],
+    pub count: u32,
+    pub entries: [TagWindowEntry; 256],
 }
 
 // ── KernelAccel handle ────────────────────────────────────────────────────────
@@ -80,7 +88,9 @@ impl KernelAccel {
                         None
                     }
                     Err(e) => {
-                        tracing::warn!("aivpn: GET_VERSION ioctl failed: {e} — using user-space path");
+                        tracing::warn!(
+                            "aivpn: GET_VERSION ioctl failed: {e} — using user-space path"
+                        );
                         None
                     }
                 }
@@ -94,7 +104,9 @@ impl KernelAccel {
         }
     }
 
-    fn fd(&self) -> RawFd { self.file.as_raw_fd() }
+    fn fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
 
     pub fn api_version(&self) -> io::Result<u32> {
         let mut v: u32 = 0;
@@ -150,10 +162,18 @@ impl Drop for KernelAccel {
 
 fn ioctl_ref<T>(fd: RawFd, cmd: u64, arg: &T) -> io::Result<i32> {
     let ret = unsafe { libc::ioctl(fd, cmd, arg as *const T) };
-    if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(ret) }
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
 }
 
 fn ioctl_void(fd: RawFd, cmd: u64) -> io::Result<i32> {
     let ret = unsafe { libc::ioctl(fd, cmd, 0usize) };
-    if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(ret) }
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
 }

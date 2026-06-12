@@ -17,10 +17,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use aivpn_common::crypto::{self, decrypt_payload, encrypt_payload, NONCE_SIZE, TAG_SIZE, DEFAULT_WINDOW_MS};
-use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
-use libc;
+use aivpn_common::crypto::{
+    self, decrypt_payload, encrypt_payload, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
+};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
 };
@@ -28,6 +29,7 @@ use aivpn_common::network_config::VpnNetworkConfig;
 use aivpn_common::protocol::{
     ControlPayload, ControlSubtype, InnerHeader, InnerType, MAX_PACKET_SIZE,
 };
+use libc;
 
 use crate::client_db::ClientDatabase;
 use crate::mask_gen::generate_and_store_mask;
@@ -655,7 +657,10 @@ impl Gateway {
                         if let Err(e) = ka.set_tun(ifindex) {
                             warn!("aivpn: kernel set_tun failed: {e}");
                         } else {
-                            info!("Kernel acceleration wired to TUN {} (ifindex={ifindex})", tun_name);
+                            info!(
+                                "Kernel acceleration wired to TUN {} (ifindex={ifindex})",
+                                tun_name
+                            );
                         }
                     }
                 }
@@ -2444,15 +2449,15 @@ fn make_kernel_session_add(sess: &crate::session::Session) -> SessionAdd {
         }
     }
     SessionAdd {
-        session_id:   sess.session_id,
-        session_key:  sess.keys.session_key,
-        tag_secret:   sess.keys.tag_secret,
+        session_id: sess.session_id,
+        session_key: sess.keys.session_key,
+        tag_secret: sess.keys.tag_secret,
         nonce_suffix: sess.keys.prng_seed[..4].try_into().unwrap_or([0u8; 4]),
-        _reserved:    [0u8; 28],
+        _reserved: [0u8; 28],
         counter_base: sess.counter,
         client_ip,
-        client_addr:  ca,
-        window_ms:    DEFAULT_WINDOW_MS,
+        client_addr: ca,
+        window_ms: DEFAULT_WINDOW_MS,
     }
 }
 

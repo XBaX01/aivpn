@@ -16,9 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::proxy::device::VpnDevice;
-use crate::proxy::socks5::{
-    Socks5Session, REP_GENERAL_FAILURE, REP_HOST_UNREACHABLE, REP_SUCCESS,
-};
+use crate::proxy::socks5::{Socks5Session, REP_GENERAL_FAILURE, REP_HOST_UNREACHABLE, REP_SUCCESS};
 
 /// MTU matching WAN_SAFE_TUN_MTU in tunnel.rs
 const PROXY_MTU: usize = 1346;

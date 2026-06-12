@@ -8,9 +8,9 @@
 
 use bytes::Bytes;
 use portable_atomic::AtomicU64;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -392,17 +392,13 @@ impl AivpnClient {
                 .tun_config
                 .tun_addr
                 .parse::<std::net::Ipv4Addr>()
-                .map_err(|e| {
-                    Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                })?;
+                .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
             let gateway_ip = self
                 .config
                 .tun_config
                 .server_vpn_ip
                 .parse::<std::net::Ipv4Addr>()
-                .map_err(|e| {
-                    Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                })?;
+                .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
             let proxy_cfg = crate::proxy::ProxyConfig {
                 listen_addr,
                 vpn_ip,

@@ -451,7 +451,11 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
             });
             if app.new_key_use_proxy {
                 ui.add_space(2.0);
-                ui.label(RichText::new(t(app.lang, "proxy_addr")).size(11.0).color(DIM));
+                ui.label(
+                    RichText::new(t(app.lang, "proxy_addr"))
+                        .size(11.0)
+                        .color(DIM),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut app.new_key_proxy_listen)
                         .desired_width(f32::INFINITY)
@@ -472,15 +476,15 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     let name = app.new_key_name.clone();
                     let value = app.new_key_value.clone();
                     let full_tunnel = app.new_key_full_tunnel;
-                    let proxy_listen = if app.new_key_use_proxy
-                        && !app.new_key_proxy_listen.is_empty()
-                    {
-                        Some(app.new_key_proxy_listen.clone())
-                    } else {
-                        None
-                    };
+                    let proxy_listen =
+                        if app.new_key_use_proxy && !app.new_key_proxy_listen.is_empty() {
+                            Some(app.new_key_proxy_listen.clone())
+                        } else {
+                            None
+                        };
                     let result = if let Some(idx) = app.editing_key_idx {
-                        app.keys.update_key(idx, &name, &value, full_tunnel, proxy_listen)
+                        app.keys
+                            .update_key(idx, &name, &value, full_tunnel, proxy_listen)
                     } else {
                         app.keys.add_key(&name, &value, full_tunnel, proxy_listen)
                     };
@@ -541,7 +545,8 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         let full_tunnel = key.full_tunnel;
                         let proxy_listen = key.proxy_listen.clone();
                         if let Err(e) =
-                            app.vpn.connect(&key_str, full_tunnel, proxy_listen.as_deref())
+                            app.vpn
+                                .connect(&key_str, full_tunnel, proxy_listen.as_deref())
                         {
                             app.set_error(e);
                         }
