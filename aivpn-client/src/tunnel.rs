@@ -30,6 +30,10 @@ pub struct TunnelConfig {
     /// MDH (mask-defined header) byte count for the initial mask.
     /// Must match the server's active mask to avoid packet decode failures on connect.
     pub mdh_len: u16,
+    /// CIDRs to route through VPN in split mode (e.g. "10.0.0.0/8,192.168.1.0/24")
+    pub include_routes: Vec<String>,
+    /// CIDRs to bypass the VPN even in full-tunnel mode
+    pub exclude_routes: Vec<String>,
 }
 
 impl Default for TunnelConfig {
@@ -44,6 +48,8 @@ impl Default for TunnelConfig {
             mtu: WAN_SAFE_TUN_MTU,
             full_tunnel: false,
             mdh_len: 20u16,
+            include_routes: Vec::new(),
+            exclude_routes: Vec::new(),
         }
     }
 }
@@ -63,6 +69,8 @@ impl TunnelConfig {
             mtu: network_config.mtu,
             full_tunnel,
             mdh_len: network_config.mdh_len,
+            include_routes: Vec::new(),
+            exclude_routes: Vec::new(),
         }
     }
 
@@ -136,6 +144,8 @@ pub struct Tunnel {
     /// Only read in Windows-gated code paths; allow(dead_code) silences Linux/macOS build warnings.
     #[allow(dead_code)]
     wintun_if_index: Option<String>,
+    /// CIDRs added by apply_split_routes — removed on Drop.
+    split_routes_applied: Vec<String>,
 }
 
 impl Tunnel {
@@ -148,6 +158,7 @@ impl Tunnel {
             server_ip: None,
             saved_ipv6_iface: None,
             wintun_if_index: None,
+            split_routes_applied: Vec::new(),
         }
     }
 
@@ -1123,6 +1134,242 @@ impl Tunnel {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     fn disable_full_tunnel(&mut self) {}
 
+    // ──────────────────── Split-tunnel ────────────────────
+
+    /// Parse "a.b.c.d/n" → (net_addr, netmask) for Windows route commands.
+    #[cfg(target_os = "windows")]
+    fn cidr_to_net_mask(cidr: &str) -> Option<(String, String)> {
+        let (net, prefix) = cidr.split_once('/')?;
+        let prefix: u8 = prefix.parse().ok()?;
+        let _: std::net::Ipv4Addr = net.parse().ok()?;
+        let mask = if prefix == 0 {
+            0u32
+        } else {
+            u32::MAX.wrapping_shl(32 - prefix as u32)
+        };
+        Some((net.to_string(), std::net::Ipv4Addr::from(mask).to_string()))
+    }
+
+    /// Apply include/exclude routes for split-tunnel mode.
+    /// Call after enable_full_tunnel (if in full-tunnel mode) and after TUN is up.
+    #[cfg(target_os = "linux")]
+    pub fn apply_split_routes(&mut self) -> Result<()> {
+        use std::process::Command;
+        let tun = self.config.tun_name.clone();
+
+        for cidr in self.config.include_routes.clone() {
+            let ok = Command::new("ip")
+                .args(["route", "replace", &cidr, "dev", &tun])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                info!("Split-tunnel include: {} via {}", cidr, tun);
+                self.split_routes_applied.push(cidr);
+            } else {
+                error!("Split-tunnel: failed to add include route {}", cidr);
+            }
+        }
+
+        let gw_opt = self.saved_default_gw.clone().or_else(|| {
+            Command::new("ip")
+                .args(["route", "show", "default"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).to_string();
+                    let fields: Vec<&str> = s.split_whitespace().collect();
+                    fields
+                        .windows(2)
+                        .find(|w| w[0] == "via")
+                        .map(|w| w[1].to_string())
+                })
+        });
+
+        if let Some(gw) = gw_opt {
+            for cidr in self.config.exclude_routes.clone() {
+                let ok = Command::new("ip")
+                    .args(["route", "replace", &cidr, "via", &gw])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    info!("Split-tunnel exclude: {} via {} (bypass VPN)", cidr, gw);
+                    self.split_routes_applied.push(cidr);
+                } else {
+                    error!("Split-tunnel: failed to exclude route {}", cidr);
+                }
+            }
+        } else if !self.config.exclude_routes.is_empty() {
+            error!("Split-tunnel: no default gateway found for exclude_routes");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_split_routes(&mut self) {
+        use std::process::Command;
+        for cidr in self.split_routes_applied.drain(..) {
+            let _ = Command::new("ip").args(["route", "del", &cidr]).status();
+        }
+        if !self.config.include_routes.is_empty() || !self.config.exclude_routes.is_empty() {
+            info!("Split-tunnel routes removed");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn apply_split_routes(&mut self) -> Result<()> {
+        use std::process::Command;
+        let tun = self.config.tun_name.clone();
+
+        for cidr in self.config.include_routes.clone() {
+            let ok = Command::new("/sbin/route")
+                .args(["-n", "add", "-net", &cidr, "-interface", &tun])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                info!("Split-tunnel include: {} via {}", cidr, tun);
+                self.split_routes_applied.push(cidr);
+            } else {
+                error!("Split-tunnel: failed to add include route {}", cidr);
+            }
+        }
+
+        let gw_opt = self.saved_default_gw.clone().or_else(|| {
+            Command::new("/sbin/route")
+                .args(["-n", "get", "default"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .find(|l| l.trim().starts_with("gateway:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .map(|s| s.trim().to_string())
+                })
+        });
+
+        if let Some(gw) = gw_opt {
+            for cidr in self.config.exclude_routes.clone() {
+                let ok = Command::new("/sbin/route")
+                    .args(["-n", "add", "-net", &cidr, &gw])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    info!("Split-tunnel exclude: {} via {} (bypass VPN)", cidr, gw);
+                    self.split_routes_applied.push(cidr);
+                } else {
+                    error!("Split-tunnel: failed to exclude route {}", cidr);
+                }
+            }
+        } else if !self.config.exclude_routes.is_empty() {
+            error!("Split-tunnel: no default gateway found for exclude_routes");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn remove_split_routes(&mut self) {
+        use std::process::Command;
+        for cidr in self.split_routes_applied.drain(..) {
+            let _ = Command::new("/sbin/route")
+                .args(["-n", "delete", "-net", &cidr])
+                .status();
+        }
+        if !self.config.include_routes.is_empty() || !self.config.exclude_routes.is_empty() {
+            info!("Split-tunnel routes removed");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn apply_split_routes(&mut self) -> Result<()> {
+        use std::process::Command;
+        let peer = self.config.server_vpn_ip.clone();
+
+        for cidr in self.config.include_routes.clone() {
+            if let Some((net, mask)) = Self::cidr_to_net_mask(&cidr) {
+                let ok = if let Some(ref idx) = self.wintun_if_index.clone() {
+                    Command::new("route")
+                        .args(["add", &net, "mask", &mask, &peer, "IF", idx])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                } else {
+                    Command::new("route")
+                        .args(["add", &net, "mask", &mask, &peer])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                };
+                if ok {
+                    info!("Split-tunnel include: {} via {}", cidr, peer);
+                    self.split_routes_applied.push(cidr);
+                } else {
+                    error!("Split-tunnel: failed to add include route {}", cidr);
+                }
+            }
+        }
+
+        let gw_opt = self.saved_default_gw.clone().or_else(|| {
+            Command::new("powershell")
+                .args([
+                    "-Command",
+                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop",
+                ])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+        if let Some(gw) = gw_opt {
+            for cidr in self.config.exclude_routes.clone() {
+                if let Some((net, mask)) = Self::cidr_to_net_mask(&cidr) {
+                    let ok = Command::new("route")
+                        .args(["add", &net, "mask", &mask, &gw])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok {
+                        info!("Split-tunnel exclude: {} via {} (bypass VPN)", cidr, gw);
+                        self.split_routes_applied.push(cidr);
+                    } else {
+                        error!("Split-tunnel: failed to exclude route {}", cidr);
+                    }
+                }
+            }
+        } else if !self.config.exclude_routes.is_empty() {
+            error!("Split-tunnel: no default gateway found for exclude_routes");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn remove_split_routes(&mut self) {
+        use std::process::Command;
+        for cidr in self.split_routes_applied.drain(..) {
+            if let Some((net, mask)) = Self::cidr_to_net_mask(&cidr) {
+                let _ = Command::new("route").args(["delete", &net, "mask", &mask]).status();
+            }
+        }
+        if !self.config.include_routes.is_empty() || !self.config.exclude_routes.is_empty() {
+            info!("Split-tunnel routes removed");
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub fn apply_split_routes(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    fn remove_split_routes(&mut self) {}
+
     /// Restore IPv6 on macOS when disconnecting
     #[cfg(target_os = "macos")]
     fn restore_ipv6(&self) {
@@ -1202,6 +1449,8 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
+        self.remove_split_routes();
+
         if self.config.full_tunnel && self.saved_default_gw.is_some() {
             self.disable_full_tunnel();
         }

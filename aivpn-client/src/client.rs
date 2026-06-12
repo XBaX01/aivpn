@@ -261,6 +261,11 @@ impl AivpnClient {
             if self.config.tun_config.full_tunnel {
                 self.tunnel.enable_full_tunnel()?;
             }
+            if !self.config.tun_config.include_routes.is_empty()
+                || !self.config.tun_config.exclude_routes.is_empty()
+            {
+                self.tunnel.apply_split_routes()?;
+            }
         }
 
         // Initialize mimicry engine
