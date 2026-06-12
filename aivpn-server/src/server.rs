@@ -69,6 +69,11 @@ pub struct ServerArgs {
     #[cfg(all(feature = "management-api", unix))]
     #[arg(long, env = "AIVPN_MANAGEMENT_SOCKET")]
     pub management_socket: Option<String>,
+
+    /// Validate a mask JSON file and print a quality report.
+    /// Exits 0 on pass, 1 on structural errors.
+    #[arg(long, value_name = "PATH")]
+    pub validate_mask: Option<String>,
 }
 
 /// AIVPN Server instance

@@ -1,7 +1,7 @@
 //! AIVPN Server Binary
 
 use aivpn_common::crypto;
-use aivpn_common::mask::MaskProfile;
+use aivpn_common::mask::{IATDistType, MaskProfile, SizeDistType};
 use aivpn_common::network_config::{
     netmask_to_prefix_len, ClientNetworkConfig, VpnNetworkConfig, DEFAULT_VPN_MTU,
 };
@@ -110,6 +110,12 @@ struct ServerFileConfig {
 async fn main() {
     // Parse arguments first (before logging for CLI commands)
     let args = ServerArgs::parse_from(std::env::args());
+
+    // Mask validation doesn't need the server config or client DB.
+    if let Some(ref path) = args.validate_mask {
+        handle_validate_mask(path);
+        return;
+    }
 
     let config_path = resolve_config_path(&args);
     let file_config = load_server_file_config(config_path.as_deref());
@@ -676,6 +682,191 @@ fn resolve_mask_dir(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -
         return PathBuf::from(dir);
     }
     PathBuf::from(DEFAULT_MASK_DIR)
+}
+
+fn handle_validate_mask(path: &str) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let profile: MaskProfile = match serde_json::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: JSON parse failed in {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut issues: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // signature_vector
+    let sig_len = profile.signature_vector.len();
+    if sig_len != 64 {
+        issues.push(format!("signature_vector: {sig_len} floats (expected 64)"));
+    } else if !profile.signature_vector.iter().all(|v| v.is_finite()) {
+        issues.push("signature_vector: contains NaN or Inf".to_string());
+    } else {
+        let l2: f32 = profile
+            .signature_vector
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        if l2 == 0.0 {
+            warnings.push(
+                "signature_vector is all-zeros — neural resonance inactive for this mask"
+                    .to_string(),
+            );
+        }
+    }
+
+    // header_template vs eph_pub_offset
+    let hdr_len = profile.header_template.len();
+    if hdr_len != profile.eph_pub_offset as usize {
+        issues.push(format!(
+            "header_template length ({hdr_len}) != eph_pub_offset ({})",
+            profile.eph_pub_offset
+        ));
+    }
+    if profile.eph_pub_length != 32 {
+        warnings.push(format!(
+            "eph_pub_length = {} (expected 32 for X25519)",
+            profile.eph_pub_length
+        ));
+    }
+    let eph_end = profile.eph_pub_offset as u32 + profile.eph_pub_length as u32;
+    if eph_end > 1350 {
+        issues.push(format!(
+            "eph region ends at byte {eph_end}, which exceeds 1350"
+        ));
+    }
+
+    // size distribution bins sum
+    if matches!(profile.size_distribution.dist_type, SizeDistType::Histogram) {
+        let sum: f32 = profile.size_distribution.bins.iter().map(|b| b.2).sum();
+        if (sum - 1.0).abs() > 0.02 {
+            issues.push(format!(
+                "size_distribution bins sum = {sum:.4} (expected 1.0 ± 0.02)"
+            ));
+        }
+    }
+
+    // FSM integrity
+    let state_ids: std::collections::HashSet<u16> =
+        profile.fsm_states.iter().map(|s| s.state_id).collect();
+    if !state_ids.contains(&profile.fsm_initial_state) {
+        issues.push(format!(
+            "fsm_initial_state {} not found in fsm_states",
+            profile.fsm_initial_state
+        ));
+    }
+    for state in &profile.fsm_states {
+        for t in &state.transitions {
+            if !state_ids.contains(&t.next_state) {
+                issues.push(format!(
+                    "FSM state {}: transition to unknown state {}",
+                    state.state_id, t.next_state
+                ));
+            }
+        }
+    }
+
+    // expiry
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_str = if profile.expires_at == u64::MAX {
+        "never".to_string()
+    } else if profile.expires_at < now_secs {
+        let days = (now_secs - profile.expires_at) / 86400;
+        issues.push(format!("mask expired {days} day(s) ago"));
+        format!("EXPIRED ({days} days ago)")
+    } else {
+        let days = (profile.expires_at - now_secs) / 86400;
+        format!("{days} days remaining")
+    };
+
+    // ── Report ────────────────────────────────────────────────────────────
+    println!("═══════════════════════════════════════════════════════");
+    println!("Mask:     {} (v{})", profile.mask_id, profile.version);
+    println!("Protocol: {:?}", profile.spoof_protocol);
+    println!(
+        "Header:   {} bytes, eph_pub @ {}..{}",
+        hdr_len, profile.eph_pub_offset, eph_end
+    );
+    println!("Expires:  {expires_str}");
+
+    let l2: f32 = if sig_len == 64 {
+        profile
+            .signature_vector
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt()
+    } else {
+        0.0
+    };
+    println!("Sig vec:  {sig_len} floats, L2={l2:.3}");
+
+    println!("───────────────────────────────────────────────────────");
+
+    match profile.size_distribution.dist_type {
+        SizeDistType::Histogram => {
+            let bins = &profile.size_distribution.bins;
+            let sum: f32 = bins.iter().map(|b| b.2).sum();
+            println!("Size:     Histogram ({} bins), sum={sum:.3}", bins.len());
+            for (lo, hi, p) in bins {
+                println!("          [{lo}–{hi}]: {:.1}%", p * 100.0);
+            }
+        }
+        SizeDistType::Parametric => {
+            println!(
+                "Size:     Parametric ({:?})",
+                profile.size_distribution.parametric_type
+            );
+        }
+    }
+
+    let (jlo, jhi) = profile.iat_distribution.jitter_range_ms;
+    let iat_type = match profile.iat_distribution.dist_type {
+        IATDistType::Exponential => "Exponential",
+        IATDistType::LogNormal => "LogNormal",
+        IATDistType::Empirical => "Empirical",
+        IATDistType::Gamma => "Gamma",
+    };
+    println!(
+        "IAT:      {} params={:?} jitter=[{jlo:.1}, {jhi:.1}] ms",
+        iat_type, profile.iat_distribution.params
+    );
+
+    println!(
+        "FSM:      {} states, initial={}",
+        profile.fsm_states.len(),
+        profile.fsm_initial_state
+    );
+    println!("───────────────────────────────────────────────────────");
+
+    for w in &warnings {
+        println!("WARN:  {w}");
+    }
+    if issues.is_empty() {
+        if warnings.is_empty() {
+            println!("Result: PASS");
+        } else {
+            println!("Result: PASS (with warnings)");
+        }
+    } else {
+        for issue in &issues {
+            println!("FAIL:  {issue}");
+        }
+        println!("Result: FAIL ({} issue(s))", issues.len());
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
