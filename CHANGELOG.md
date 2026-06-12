@@ -24,18 +24,99 @@
 - **`resolve_config_path` crash**: Server no longer calls `process::exit(1)` when `/etc/aivpn/server.json` exists but is not readable (e.g. root-owned). Auto-discovery now uses `File::open().is_ok()` instead of `path.exists()`.
 - **Test fixture API alignment**: Updated `VpnNetworkConfig`, `ClientNetworkConfig`, and `ServerArgs` test literals in `client_db.rs`, `management_api_tests.rs`, and `main.rs` to match 0.7.0 struct fields.
 
+## [0.7.0] — 2026-06-13
+
+### Добавлено
+- **Раздельное туннелирование**: Флаги `--include-routes` и `--exclude-routes` для точного управления маршрутизацией по CIDR на Linux, macOS и Windows. Маршруты автоматически удаляются при отключении.
+- **Kill-Switch + защита от утечек**: Флаг `--kill-switch` устанавливает правила брандмауэра (nftables на Linux, pfctl на macOS, Windows Firewall на Windows), блокирующие весь не-VPN трафик. Правила сохраняются при неожиданном завершении процесса и удаляются командой `kill-switch clear`.
+- **IPv6 Dual-Stack**: Полная поддержка NAT66/NPTv6 на сервере (`aivpn-server`). Новые поля `ipv6_enabled` и `ipv6_prefix` в `VpnNetworkConfig`; клиенты получают IPv6-адрес в `ServerHello`.
+- **Авто-определение MTU**: `mtu: "auto"` в конфигурации сервера запускает PMTUD-определение MTU вместо фиксированных значений.
+- **Валидатор масок**: Подкоманда `--validate-mask <path>` проверяет JSON-файл маски — структуру, оценку уверенности, достижимость состояний FSM и согласованность распределения IAT.
+- **Шесть новых масок для обхода DPI**: Профили `avito`, `sber`, `vk`, `sberjazz`, `whatsapp` и `yandex` добавлены в `mask-assets/`. Оценка уверенности ≥ 0.90 у каждой.
+- **Улучшения нейронного анти-зондирования**: Модуль Neural Resonance теперь отслеживает 64 признака трафика: паттерны burst, соотношение направлений пакетов, периодичность IAT и дисперсию энтропии. Кулдаун ротации 60 с предотвращает осцилляцию при продолжительном зондировании.
+- **Linux Desktop GUI**: Нативное приложение (`aivpn-linux`) на фреймворке Iced, распространяется как AppImage с интеграцией системного трея.
+- **eBPF/XDP фильтр раннего отклонения пакетов**: Модуль `aivpn-linux-kernel` теперь компилирует XDP BPF программу (`xdp_prog.o`). При наличии подключается к NIC на уровне RX и отбрасывает некорректные или повторяющиеся UDP-пакеты до выделения буфера сокета. Конфигурация пинится по пути `/sys/fs/bpf/aivpn/xdp_config`.
+- **Документ модели угроз**: Добавлен `THREAT_MODEL.md` — модель злоумышленника, криптографический дизайн, устойчивость к анализу трафика, гарантии kill-switch, свойства XDP и известные ограничения.
+
+### Изменено
+- **API `record_traffic`**: Добавлен параметр `is_rx: bool` для направленного анализа трафика.
+- **Версия Rust Workspace**: Обновлена до 0.7.0.
+- **macOS-сборка**: CFBundleVersion обновлён до 5.
+- **iOS-сборка**: CFBundleVersion обновлён до 3.
+
+### Исправлено
+- **Падение `resolve_config_path`**: Сервер больше не вызывает `process::exit(1)`, если `/etc/aivpn/server.json` существует, но недоступен для чтения. Авто-обнаружение теперь использует `File::open().is_ok()` вместо `path.exists()`.
+- **Согласование тестовых данных**: Обновлены тестовые литералы `VpnNetworkConfig`, `ClientNetworkConfig` и `ServerArgs` в `client_db.rs`, `management_api_tests.rs` и `main.rs` под API 0.7.0.
+
+
 ## [0.6.0] - 2026-06-12
 
 ### Added
-- **SOCKS5 Proxy Mode**: Introduced userspace proxy mode using `smoltcp` stack in `aivpn-client` and added proxy option to the Windows GUI.
-- **Linux Kernel Module (`aivpn.ko`)**: Implemented a kernel-space accelerator module with user-space integration via `KernelAccel` for high-performance packet routing.
-- **MikroTik RouterOS 7 support**: Created `aivpn-mikrotik` Docker build environment and detailed guides for RouterOS deployments.
+- **MikroTik RouterOS 7 support**: Docker container (`aivpn-mikrotik`) for running the AIVPN server inside a RouterOS 7 container slot. veth+TUN topology, minimal scratch-based image, `AIVPN_KEY` env var for one-line provisioning. Full RouterOS setup guide included.
+- **Configurable listen address**: `AIVPN_LISTEN` environment variable allows overriding the server bind address and port at runtime without touching config files.
+- **SOCKS5 proxy mode (client)**: New `--proxy` / `-P` flag routes VPN traffic through a userspace TCP stack (smoltcp). For environments where raw UDP is blocked or unreliable.
+- **SOCKS5 proxy toggle (Windows GUI)**: Windows GUI exposes the proxy mode as a settings toggle.
+- **Linux kernel module (`aivpn-linux-kernel`)**: Optional `aivpn.ko` module offloads session tag lookup and packet crypto to kernel space. Dual-table RCU design, atomic nonce counters, WireGuard-style replay window, `/dev/aivpn` character device (ioctl API v2).
+- **KernelAccel integration**: Server and client auto-detect and load `aivpn.ko` on Linux. Session lifecycle and tag-window updates pushed via ioctl. Transparent fallback to userspace when module is absent.
+- **Cross-platform stop signals**: Client handles `SIGTERM`/`SIGINT` on Unix and `Ctrl+C` on Windows uniformly, with clean TUN teardown.
+- **Configurable keepalive**: Keepalive interval stored per-client in `ClientDatabase` and exposed via management API.
 
 ### Fixed
-- **Security Audit Corrections**: Resolved deep audit findings in `aivpn-server` (forward_packet boundaries, rate limit pruning, is_expired tracking) and kernel crypto operations.
-- **macOS VPN Routing**: Fixed full-tunnel cleanup and route subnet commands on disconnect/reconnect.
-- **Build Pipeline**: Resolved iOS cross-compilation target file copying bugs in `musl` build scripts.
-- **Rust Workspace version**: Bumped to 0.6.0.
+- **macOS full-tunnel routing**: Rewrote route setup — full route wipe on disconnect, correct subnet route syntax (`-net` flag).
+- **Kernel security audit (aivpn.ko)**:
+  - *Critical* — nonce no longer extracted from wire bytes; derived solely from internal atomic counter.
+  - *High* — use-after-free: session pointer no longer dereferenced after `rcu_read_unlock()` in `udp_hook`.
+  - *Medium* — AEAD authentication: AAD scatter-gather list now correctly linked into AEAD request (resonance tag was previously unauthenticated).
+  - `CAP_NET_ADMIN` capability check added to `/dev/aivpn` open path.
+- **Server security audit**:
+  - `forward_packet()` write path was broken (referenced `self.writer` always `None`); fixed to use `writer_taken`.
+  - `DashMap` unbounded growth: `rate_limits` and `handshake_cooldowns` maps pruned every 5 seconds.
+  - `Session::is_expired()` removed — always returned `true` due to `HARD_TIMEOUT = Duration::ZERO`; no callers.
+  - iptables: replaced legacy `-m state --state` with `-m conntrack --ctstate` (modern kernels).
+- **Android build**: Force-delete stale APK before signing to prevent shipping previous build.
+- **macOS build**: Create `releases/` directory before writing installer package.
+- **iOS build**: Updated bridging header to include `aivpn_core.h` via header search paths; `aivpn-ios-core` included in musl cross-build Docker context.
+- **Test stability**: Fixed time-based flakiness in `battle_session_multiple_clients` by checking adjacent tag windows.
+
+### Build / CI
+- Windows cross-compilation and iOS unsigned IPA jobs added to release asset workflow.
+- `aivpn-ios-core` workspace member added to musl Dockerfile `COPY` context.
+- `releases/` directory removed from git tracking; added to `.gitignore`.
+
+## [0.6.0] — 2026-06-12
+
+### Добавлено
+- **Поддержка MikroTik RouterOS 7**: Docker-контейнер (`aivpn-mikrotik`) для запуска сервера AIVPN в слоте контейнера RouterOS 7. Топология veth+TUN, минимальный образ на базе scratch, переменная `AIVPN_KEY` для одностроковой инициализации. Включена полная документация по настройке RouterOS.
+- **Настраиваемый адрес прослушивания**: Переменная окружения `AIVPN_LISTEN` позволяет задавать адрес и порт сервера во время выполнения без изменения конфигурационных файлов.
+- **Режим SOCKS5-прокси (клиент)**: Новый флаг `--proxy` / `-P` маршрутизирует VPN-трафик через пользовательский TCP-стек (smoltcp). Предназначен для сред, где UDP заблокирован или ненадёжен.
+- **Переключатель SOCKS5-прокси (Windows GUI)**: В настройках Windows-клиента добавлен переключатель режима прокси.
+- **Модуль ядра Linux (`aivpn-linux-kernel`)**: Опциональный модуль `aivpn.ko` переносит поиск сессионных тегов и криптографию пакетов в пространство ядра. Двутабличная RCU-архитектура, атомарные счётчики nonce, окно воспроизведения в стиле WireGuard, символьное устройство `/dev/aivpn` (ioctl API v2).
+- **Интеграция KernelAccel**: Сервер и клиент автоматически обнаруживают и загружают `aivpn.ko` под Linux. Жизненный цикл сессий и обновления окна тегов передаются через ioctl. Прозрачный откат на пользовательское пространство при отсутствии модуля.
+- **Кроссплатформенные сигналы завершения**: Клиент единообразно обрабатывает `SIGTERM`/`SIGINT` на Unix и `Ctrl+C` в Windows с корректным удалением TUN-интерфейса.
+- **Настраиваемый keepalive**: Интервал keepalive хранится отдельно для каждого клиента в `ClientDatabase` и доступен через management API.
+
+### Исправлено
+- **Полная маршрутизация macOS**: Переписана настройка маршрутов — полное удаление маршрутов при отключении, корректный синтаксис подсетевых маршрутов (`-net`).
+- **Аудит безопасности ядра (aivpn.ko)**:
+  - *Критично* — nonce больше не извлекается из входящих байтов; выводится исключительно из внутреннего атомарного счётчика.
+  - *Высокий* — use-after-free: указатель сессии больше не разыменовывается после `rcu_read_unlock()` в `udp_hook`.
+  - *Средний* — аутентификация AEAD: scatter-gather список AAD теперь корректно включён в AEAD-запрос (ранее resonance-тег не аутентифицировался).
+  - Добавлена проверка `CAP_NET_ADMIN` при открытии `/dev/aivpn`.
+- **Аудит безопасности сервера**:
+  - Путь записи-fallback `forward_packet()` был сломан (ссылался на `self.writer`, всегда равный `None`); исправлено на `writer_taken`.
+  - Неограниченный рост `DashMap`: карты `rate_limits` и `handshake_cooldowns` теперь очищаются каждые 5 секунд.
+  - Удалён `Session::is_expired()` — всегда возвращал `true` из-за `HARD_TIMEOUT = Duration::ZERO`; вызовов нет.
+  - iptables: устаревший `-m state --state` заменён на `-m conntrack --ctstate` (современные ядра).
+- **Android-сборка**: Принудительное удаление устаревшего APK перед подписью предотвращает публикацию предыдущей сборки.
+- **macOS-сборка**: Создание директории `releases/` до записи пакета установщика.
+- **iOS-сборка**: Обновлён bridging header для включения `aivpn_core.h` через пути поиска заголовков; `aivpn-ios-core` добавлен в Docker-контекст musl-сборок.
+- **Стабильность тестов**: Устранено нестабильное поведение `battle_session_multiple_clients`, зависевшее от времени выполнения.
+
+### Сборка / CI
+- В workflow GitHub Actions добавлены задания кросс-компиляции для Windows и сборки неподписанного IPA для iOS.
+- Член воркспейса `aivpn-ios-core` добавлен в `COPY`-контекст musl-Dockerfile.
+- Директория `releases/` исключена из git-трекинга и добавлена в `.gitignore`.
+
 
 ## [0.5.0] - 2026-06-11
 
