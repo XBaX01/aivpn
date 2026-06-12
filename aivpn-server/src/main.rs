@@ -9,7 +9,7 @@ use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,79 @@ use tracing::{error, info};
 const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/aivpn/server.json";
 const LOCAL_SERVER_CONFIG_PATH: &str = "config/server.json";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:443";
+
+/// `"auto"` or a fixed number in `server.json` `tun_mtu` field.
+#[derive(Debug, Clone)]
+enum MtuSetting {
+    Auto,
+    Fixed(u16),
+}
+
+impl<'de> Deserialize<'de> for MtuSetting {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        match v {
+            serde_json::Value::String(s) if s == "auto" => Ok(MtuSetting::Auto),
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .and_then(|n| if n <= 65535 { Some(n as u16) } else { None })
+                .map(MtuSetting::Fixed)
+                .ok_or_else(|| D::Error::custom("tun_mtu must be 0–65535")),
+            _ => Err(D::Error::custom("tun_mtu must be a number or \"auto\"")),
+        }
+    }
+}
+
+/// Probe the outbound-interface MTU via `/sys/class/net` and subtract VPN overhead.
+/// Falls back to `DEFAULT_TUN_MTU` on any error.
+fn detect_mtu() -> u16 {
+    let iface = (|| -> Option<String> {
+        let out = std::process::Command::new("ip")
+            .args(["route", "get", "1.1.1.1"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // "1.1.1.1 via … dev eth0 …" — extract the token after "dev"
+        let mut it = text.split_whitespace();
+        while let Some(tok) = it.next() {
+            if tok == "dev" {
+                return it.next().map(|s| s.to_string());
+            }
+        }
+        None
+    })();
+
+    let physical_mtu: Option<u16> = iface.as_deref().and_then(|dev| {
+        let path = format!("/sys/class/net/{dev}/mtu");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+    });
+
+    match physical_mtu {
+        Some(mtu) => {
+            // 20 IP + 8 UDP + 8 tag + 1 pad_len + 2 inner_hdr + 16 poly1305 = 55; round to 64
+            let overhead: u16 = 64;
+            let effective = mtu.saturating_sub(overhead).clamp(1200, 1420);
+            info!(
+                "MTU auto-detected: physical={} (dev={}) → tun={}",
+                mtu,
+                iface.as_deref().unwrap_or("?"),
+                effective
+            );
+            effective
+        }
+        None => {
+            info!(
+                "MTU auto-detection failed (iface={:?}), using default {}",
+                iface,
+                aivpn_server::nat::DEFAULT_TUN_MTU
+            );
+            aivpn_server::nat::DEFAULT_TUN_MTU
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ServerFileConfig {
@@ -30,7 +103,7 @@ struct ServerFileConfig {
     bootstrap_mask_files: Option<Vec<String>>,
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
-    tun_mtu: Option<u16>,
+    tun_mtu: Option<MtuSetting>,
 }
 
 #[tokio::main]
@@ -51,7 +124,7 @@ async fn main() {
 
     // Load client database
     let clients_db_path = Path::new(&args.clients_db);
-    let client_db = match ClientDatabase::load(clients_db_path, network_config) {
+    let client_db = match ClientDatabase::load(clients_db_path, network_config.clone()) {
         Ok(db) => Arc::new(db),
         Err(e) => {
             eprintln!("Failed to load client database: {}", e);
@@ -183,10 +256,10 @@ async fn main() {
         session_timeout_secs: file_config.as_ref().and_then(|c| c.session_timeout_secs),
         idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
         bootstrap_masks,
-        tun_mtu: file_config
-            .as_ref()
-            .and_then(|c| c.tun_mtu)
-            .unwrap_or(aivpn_server::nat::DEFAULT_TUN_MTU),
+        tun_mtu: match file_config.as_ref().and_then(|c| c.tun_mtu.as_ref()) {
+            Some(MtuSetting::Fixed(v)) => *v,
+            Some(MtuSetting::Auto) | None => detect_mtu(),
+        },
     };
 
     // Spawn management API (Unix socket, optional)
@@ -517,7 +590,7 @@ fn resolve_network_config(
     file_config: Option<&ServerFileConfig>,
 ) -> aivpn_common::error::Result<VpnNetworkConfig> {
     let config = if let Some(file_config) = file_config {
-        if let Some(network_config) = file_config.network_config {
+        if let Some(network_config) = file_config.network_config.clone() {
             network_config
         } else {
             VpnNetworkConfig {
@@ -529,6 +602,8 @@ fn resolve_network_config(
                 )?,
                 mtu: DEFAULT_VPN_MTU,
                 keepalive_secs: None,
+                ipv6_enabled: false,
+                ipv6_prefix: "fd10:cafe::/48".to_string(),
             }
         }
     } else {
