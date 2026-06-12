@@ -1112,6 +1112,15 @@ impl Tunnel {
         info!("Full tunnel routes removed");
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    pub fn enable_full_tunnel(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    fn disable_full_tunnel(&mut self) {
+    }
+
     /// Restore IPv6 on macOS when disconnecting
     #[cfg(target_os = "macos")]
     fn restore_ipv6(&self) {

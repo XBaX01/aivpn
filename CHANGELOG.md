@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0] - 2026-06-12
+
+### Added
+- **SOCKS5 Proxy Mode**: Introduced userspace proxy mode using `smoltcp` stack in `aivpn-client` and added proxy option to the Windows GUI.
+- **Linux Kernel Module (`aivpn.ko`)**: Implemented a kernel-space accelerator module with user-space integration via `KernelAccel` for high-performance packet routing.
+- **MikroTik RouterOS 7 support**: Created `aivpn-mikrotik` Docker build environment and detailed guides for RouterOS deployments.
+
+### Fixed
+- **Security Audit Corrections**: Resolved deep audit findings in `aivpn-server` (forward_packet boundaries, rate limit pruning, is_expired tracking) and kernel crypto operations.
+- **macOS VPN Routing**: Fixed full-tunnel cleanup and route subnet commands on disconnect/reconnect.
+- **Build Pipeline**: Resolved iOS cross-compilation target file copying bugs in `musl` build scripts.
+- **Rust Workspace version**: Bumped to 0.6.0.
+
 ## [0.5.0] - 2026-06-11
 
 ### Added
