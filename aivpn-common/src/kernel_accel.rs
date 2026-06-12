@@ -158,6 +158,192 @@ impl Drop for KernelAccel {
     }
 }
 
+// ── XDP early-filter helpers (Linux-only, independent of /dev/aivpn) ─────────
+
+/// Find the compiled XDP BPF program (`xdp_prog.o`).
+/// Searches next to the running binary first, then standard install paths.
+#[cfg(target_os = "linux")]
+pub fn xdp_find_prog() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("xdp_prog.o");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    for path in &[
+        "/usr/lib/aivpn/xdp_prog.o",
+        "/usr/local/lib/aivpn/xdp_prog.o",
+    ] {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Return the network interface carrying the default IPv4 route.
+#[cfg(target_os = "linux")]
+pub fn xdp_default_iface() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut iter = text.split_whitespace();
+    while let Some(w) = iter.next() {
+        if w == "dev" {
+            return iter.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Attach the XDP early-filter to `ifname` and configure the BPF map.
+///
+/// Requires `xdp_prog.o` (see [`xdp_find_prog`]), `iproute2 >= 5.17` for
+/// `pinmaps`, and bpffs mounted at `/sys/fs/bpf`.  All failures are soft:
+/// the VPN continues without XDP if this returns an error.
+#[cfg(target_os = "linux")]
+pub fn xdp_attach(ifname: &str, port: u16, window_ms: u64) -> io::Result<()> {
+    use std::process::Command;
+    use tracing::{info, warn};
+
+    const BPF_PIN_DIR: &str = "/sys/fs/bpf/aivpn";
+
+    let prog = xdp_find_prog()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "xdp_prog.o not found"))?;
+
+    let _ = std::fs::create_dir_all(BPF_PIN_DIR);
+
+    let status = Command::new("ip")
+        .args([
+            "link",
+            "set",
+            "dev",
+            ifname,
+            "xdp",
+            "obj",
+            prog.to_str().unwrap_or(""),
+            "sec",
+            "xdp",
+            "pinmaps",
+            BPF_PIN_DIR,
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "ip link xdp attach failed",
+        ));
+    }
+
+    // Update BPF map: key 0 = VPN port, key 1 = acceptance window (ms)
+    let map_path = format!("{BPF_PIN_DIR}/xdp_config");
+    match bpf_obj_get(&map_path) {
+        Ok(map_fd) => {
+            use std::os::unix::io::AsRawFd;
+            let fd = map_fd.as_raw_fd();
+            if let Err(e) = bpf_map_update_u64(fd, 0, port as u64) {
+                warn!("XDP: failed to set port in BPF map: {e}");
+            }
+            if let Err(e) = bpf_map_update_u64(fd, 1, window_ms) {
+                warn!("XDP: failed to set window_ms in BPF map: {e}");
+            }
+        }
+        Err(e) => {
+            warn!("XDP: could not open pinned map {map_path}: {e} — filter active with defaults");
+        }
+    }
+
+    info!("XDP early-filter attached to {ifname} (port={port}, window={window_ms}ms)");
+    Ok(())
+}
+
+/// Detach the XDP program from `ifname` and remove the pinned BPF map.
+#[cfg(target_os = "linux")]
+pub fn xdp_detach(ifname: &str) {
+    use std::process::Command;
+    use tracing::info;
+
+    let _ = Command::new("ip")
+        .args(["link", "set", "dev", ifname, "xdp", "off"])
+        .status();
+    let _ = std::fs::remove_file("/sys/fs/bpf/aivpn/xdp_config");
+    info!("XDP early-filter detached from {ifname}");
+}
+
+// ── BPF syscall helpers ───────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn bpf_obj_get(path: &str) -> io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::io::FromRawFd;
+    let cpath = std::ffi::CString::new(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // BPF_OBJ_GET = 7; attr layout: { pathname: u64, bpf_fd: u32, file_flags: u32 }
+    #[repr(C, align(8))]
+    struct Attr {
+        pathname: u64,
+        bpf_fd: u32,
+        file_flags: u32,
+    }
+    let attr = Attr {
+        pathname: cpath.as_ptr() as u64,
+        bpf_fd: 0,
+        file_flags: 0,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            7i32,
+            &attr as *const Attr as *const (),
+            std::mem::size_of::<Attr>() as u32,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd as i32) })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_map_update_u64(map_fd: i32, key: u32, value: u64) -> io::Result<()> {
+    // BPF_MAP_UPDATE_ELEM = 2; attr: { map_fd: u32, pad: u32, key ptr: u64, value ptr: u64, flags: u64 }
+    #[repr(C, align(8))]
+    struct Attr {
+        map_fd: u32,
+        pad: u32,
+        key: u64,
+        value: u64,
+        flags: u64,
+    }
+    let k = key;
+    let v = value;
+    let attr = Attr {
+        map_fd: map_fd as u32,
+        pad: 0,
+        key: &k as *const u32 as u64,
+        value: &v as *const u64 as u64,
+        flags: 0,
+    };
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            2i32,
+            &attr as *const Attr as *const (),
+            std::mem::size_of::<Attr>() as u32,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 // ── ioctl helpers ─────────────────────────────────────────────────────────────
 
 fn ioctl_ref<T>(fd: RawFd, cmd: u64, arg: &T) -> io::Result<i32> {
