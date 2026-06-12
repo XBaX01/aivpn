@@ -7,9 +7,9 @@ use std::io;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info};
 
+use crate::kill_switch::KillSwitch;
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::{ClientNetworkConfig, VpnNetworkConfig, LEGACY_SERVER_VPN_IP};
-use crate::kill_switch::KillSwitch;
 
 // Keep the full encrypted outer datagram within SAFE_OUTER_PACKET_BUDGET=1380.
 // Outer overhead is 34 bytes: TAG(16) + MDH(4) + pad_len(2) + Poly1305(16) -
@@ -1362,7 +1362,9 @@ impl Tunnel {
         use std::process::Command;
         for cidr in self.split_routes_applied.drain(..) {
             if let Some((net, mask)) = Self::cidr_to_net_mask(&cidr) {
-                let _ = Command::new("route").args(["delete", &net, "mask", &mask]).status();
+                let _ = Command::new("route")
+                    .args(["delete", &net, "mask", &mask])
+                    .status();
             }
         }
         if !self.config.include_routes.is_empty() || !self.config.exclude_routes.is_empty() {

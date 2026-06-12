@@ -1170,7 +1170,13 @@ fn test_neural_resonance_check_with_data() {
     let session_id = [0x11u8; 16];
     // Populate with traffic data
     for i in 0..100 {
-        module.record_traffic(session_id, 64 + (i % 200), 10.0 + (i as f64 * 0.1), 7.5, true);
+        module.record_traffic(
+            session_id,
+            64 + (i % 200),
+            10.0 + (i as f64 * 0.1),
+            7.5,
+            true,
+        );
     }
 
     let result = module

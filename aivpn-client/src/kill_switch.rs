@@ -91,7 +91,9 @@ impl KillSwitch {
                 .status()
                 .ok();
             for rule in &[
-                vec!["add", "rule", "inet", "aivpn_ks", "output", "oifname", "lo", "accept"],
+                vec![
+                    "add", "rule", "inet", "aivpn_ks", "output", "oifname", "lo", "accept",
+                ],
                 vec![
                     "add",
                     "rule",
@@ -309,10 +311,7 @@ impl KillSwitch {
         }
 
         for (name, extra) in &[
-            (
-                "AIVPN_KS_ALLOW_VPN",
-                format!("interface={}", self.tun_name),
-            ),
+            ("AIVPN_KS_ALLOW_VPN", format!("interface={}", self.tun_name)),
             (
                 "AIVPN_KS_ALLOW_SERVER",
                 format!("remoteip={}", self.server_ip),
@@ -425,7 +424,7 @@ mod tests {
         // We simulate by setting active = true manually via a helper method.
         let mut ks = KillSwitch::new("tun9".to_string(), "10.0.0.1".to_string());
         ks.active = true; // pretend it's already on
-        // Should not panic or fail
+                          // Should not panic or fail
         let result = ks.activate();
         assert!(result.is_ok());
     }

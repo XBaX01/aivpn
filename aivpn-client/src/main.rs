@@ -86,12 +86,22 @@ pub struct ClientArgs {
 
     /// Route only these CIDRs through the VPN (comma-separated, split-tunnel mode).
     /// Example: --include-routes 10.0.0.0/8,192.168.1.0/24
-    #[arg(long, value_name = "CIDR,...", use_value_delimiter = true, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_name = "CIDR,...",
+        use_value_delimiter = true,
+        value_delimiter = ','
+    )]
     pub include_routes: Vec<String>,
 
     /// Bypass the VPN for these CIDRs (comma-separated). Use with --full-tunnel to exclude subnets.
     /// Example: --exclude-routes 192.168.0.0/16,172.16.0.0/12
-    #[arg(long, value_name = "CIDR,...", use_value_delimiter = true, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_name = "CIDR,...",
+        use_value_delimiter = true,
+        value_delimiter = ','
+    )]
     pub exclude_routes: Vec<String>,
 
     /// Block all non-VPN traffic while connected (kill-switch / leak protection).
@@ -581,8 +591,11 @@ async fn main() {
                 .and_then(|c| c.exclude_routes.clone())
                 .unwrap_or_default()
         };
-        let mut tun_config =
-            TunnelConfig::from_network_config(tun_name.clone(), network_config.clone(), full_tunnel);
+        let mut tun_config = TunnelConfig::from_network_config(
+            tun_name.clone(),
+            network_config.clone(),
+            full_tunnel,
+        );
         tun_config.include_routes = include_routes;
         tun_config.exclude_routes = exclude_routes;
         tun_config.kill_switch = args.kill_switch

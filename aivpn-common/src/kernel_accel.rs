@@ -280,8 +280,8 @@ pub fn xdp_detach(ifname: &str) {
 #[cfg(target_os = "linux")]
 fn bpf_obj_get(path: &str) -> io::Result<std::os::unix::io::OwnedFd> {
     use std::os::unix::io::FromRawFd;
-    let cpath = std::ffi::CString::new(path)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let cpath =
+        std::ffi::CString::new(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     // BPF_OBJ_GET = 7; attr layout: { pathname: u64, bpf_fd: u32, file_flags: u32 }
     #[repr(C, align(8))]
     struct Attr {
