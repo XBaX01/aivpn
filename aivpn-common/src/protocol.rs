@@ -63,6 +63,12 @@ pub enum ControlSubtype {
     RecordingStatus = 0x10,
     BootstrapDescriptorUpdate = 0x11,
     PoolSync = 0x12,
+    /// Site-to-site subnet advertisement (0x13)
+    RouteSync = 0x13,
+    /// Multi-hop forwarded data packet (0x14)
+    ChainForward = 0x14,
+    /// Client mTLS certificate presentation (0x15)
+    ClientCert = 0x15,
 }
 
 impl ControlSubtype {
@@ -86,6 +92,9 @@ impl ControlSubtype {
             0x10 => Some(Self::RecordingStatus),
             0x11 => Some(Self::BootstrapDescriptorUpdate),
             0x12 => Some(Self::PoolSync),
+            0x13 => Some(Self::RouteSync),
+            0x14 => Some(Self::ChainForward),
+            0x15 => Some(Self::ClientCert),
             _ => None,
         }
     }
@@ -308,6 +317,18 @@ pub enum ControlPayload {
     PoolSync {
         clients_json: Vec<u8>,
     },
+    /// Site-to-site subnet advertisement — JSON array of CIDR strings.
+    RouteSync {
+        subnets_json: Vec<u8>,
+    },
+    /// Multi-hop chain-forward — raw inner IP payload to NAT-forward at exit node.
+    ChainForward {
+        payload: Vec<u8>,
+    },
+    /// Client mTLS certificate — 104-byte SimpleCert sent after session setup.
+    ClientCert {
+        cert_bytes: Vec<u8>,
+    },
 }
 
 impl ControlPayload {
@@ -447,6 +468,21 @@ impl ControlPayload {
                 buf.push(ControlSubtype::PoolSync as u8);
                 buf.extend_from_slice(&(clients_json.len() as u32).to_le_bytes());
                 buf.extend_from_slice(clients_json);
+            }
+            Self::RouteSync { subnets_json } => {
+                buf.push(ControlSubtype::RouteSync as u8);
+                buf.extend_from_slice(&(subnets_json.len() as u32).to_le_bytes());
+                buf.extend_from_slice(subnets_json);
+            }
+            Self::ChainForward { payload } => {
+                buf.push(ControlSubtype::ChainForward as u8);
+                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                buf.extend_from_slice(payload);
+            }
+            Self::ClientCert { cert_bytes } => {
+                buf.push(ControlSubtype::ClientCert as u8);
+                buf.extend_from_slice(&(cert_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(cert_bytes);
             }
         }
 
@@ -680,6 +716,42 @@ impl ControlPayload {
                 }
                 Ok(Self::PoolSync {
                     clients_json: data[5..5 + payload_len].to_vec(),
+                })
+            }
+            ControlSubtype::RouteSync => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("RouteSync too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("RouteSync invalid length"));
+                }
+                Ok(Self::RouteSync {
+                    subnets_json: data[5..5 + len].to_vec(),
+                })
+            }
+            ControlSubtype::ChainForward => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("ChainForward too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("ChainForward invalid length"));
+                }
+                Ok(Self::ChainForward {
+                    payload: data[5..5 + len].to_vec(),
+                })
+            }
+            ControlSubtype::ClientCert => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("ClientCert too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("ClientCert invalid length"));
+                }
+                Ok(Self::ClientCert {
+                    cert_bytes: data[5..5 + len].to_vec(),
                 })
             }
         }
