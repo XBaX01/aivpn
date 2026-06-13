@@ -59,6 +59,11 @@ pub struct PoolSyncConfig {
     /// them to this address; the exit node routes to the internet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_node: Option<String>,
+    /// Set to `true` on the node that acts as the exit point for multi-hop
+    /// traffic.  When `false` (default), incoming `ChainForward` messages are
+    /// rejected, preventing this node from being used as an open relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_node_enabled: Option<bool>,
 }
 
 /// Manages outbound peer synchronisation using the main VPN protocol.

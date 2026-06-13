@@ -119,6 +119,12 @@ pub struct Session {
     pub pre_ratchet_tags: HashMap<u64, [u8; TAG_SIZE]>,
     /// Deadline until which pre_ratchet_tags are still accepted.
     pub pre_ratchet_expire: Option<Instant>,
+
+    /// mTLS certificate gate — true means the client is cleared to send Data.
+    /// Defaults to true (non-mTLS deployments are unaffected). When the
+    /// gateway has `mtls.required = true` it resets this to false at session
+    /// creation; a valid `ClientCert` message flips it back to true.
+    pub mtls_ok: bool,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -210,6 +216,7 @@ impl Session {
             client_id: None,
             pre_ratchet_tags: HashMap::new(),
             pre_ratchet_expire: None,
+            mtls_ok: true,
         }
     }
 

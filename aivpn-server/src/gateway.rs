@@ -86,6 +86,10 @@ pub struct GatewayConfig {
     pub chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
     /// Optional mTLS certificate policy.  `None` = no cert verification.
     pub mtls: Option<crate::mtls::MtlsConfig>,
+    /// When `true`, this node accepts `ChainForward` control messages and
+    /// injects them directly into the TUN device (exit-node role).
+    /// Must be set explicitly — defaults to `false` to prevent open relay.
+    pub exit_node_enabled: bool,
 }
 
 impl Default for GatewayConfig {
@@ -115,6 +119,7 @@ impl Default for GatewayConfig {
             qos_enforcer: Arc::new(QosEnforcer::new()),
             chain_forwarder: None,
             mtls: None,
+            exit_node_enabled: false,
         }
     }
 }
@@ -1842,6 +1847,10 @@ impl Gateway {
             // which was encrypted with pre-ratchet keys.
 
             is_new_session = true;
+            // When mTLS is required, block Data until the client sends a valid ClientCert.
+            if self.config.mtls.as_ref().map_or(false, |c| c.required) {
+                session.lock().mtls_ok = false;
+            }
             debug!(
                 "New session from {} (ServerHello sent)",
                 hash_addr(&client_addr)
@@ -2114,6 +2123,15 @@ impl Gateway {
 
         match inner_header.inner_type {
             InnerType::Data => {
+                // mTLS gate: drop Data packets until cert is verified (when required).
+                if !session.lock().mtls_ok {
+                    warn!(
+                        "mtls: Data from {} rejected — certificate not yet verified",
+                        hash_addr(&client_addr)
+                    );
+                    return Ok(());
+                }
+
                 // Forward to NAT/internet via TUN write channel (lock-free)
                 debug!(
                     "DATA packet from {} ({} bytes)",
@@ -2365,19 +2383,25 @@ impl Gateway {
                 crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
             }
             ControlPayload::ChainForward { payload } => {
-                // Multi-hop exit node: inject the forwarded IP payload directly into TUN
-                // so the exit node routes it to the internet on behalf of the origin client.
-                if let Some(ref tx) = self.tun_write_tx {
-                    let _ = tx.send(payload).await;
+                if self.config.exit_node_enabled {
+                    if let Some(ref tx) = self.tun_write_tx {
+                        let _ = tx.send(payload).await;
+                    }
+                } else {
+                    warn!(
+                        "chain_forward: ChainForward from {} rejected — exit_node_enabled is false",
+                        hash_addr(&client_addr)
+                    );
                 }
             }
             ControlPayload::ClientCert { cert_bytes } => {
                 if let Some(ref mtls_cfg) = self.config.mtls {
                     let ok = crate::mtls::check_client(Some(&cert_bytes), mtls_cfg);
+                    session.lock().mtls_ok = ok;
                     if ok {
                         debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
                     } else {
-                        warn!("mtls: client {} cert rejected", hash_addr(&client_addr));
+                        warn!("mtls: client {} cert rejected — Data will be dropped", hash_addr(&client_addr));
                     }
                 }
             }

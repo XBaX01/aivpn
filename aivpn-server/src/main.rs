@@ -345,6 +345,9 @@ async fn main() {
         qos_enforcer,
         chain_forwarder: None,
         mtls: file_config.as_ref().and_then(|c| c.mtls.clone()),
+        exit_node_enabled: file_config.as_ref()
+            .and_then(|c| c.pool.as_ref())
+            .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
     };
     let _ = audit_logger; // used by management subcommands; suppress unused warning
 
@@ -413,17 +416,28 @@ async fn main() {
             if let Some(ref pool_cfg) = pool_sync_config {
                 if let Some(ref exit_node) = pool_cfg.exit_node {
                     use base64::Engine as _;
-                    let sync_key: [u8; 32] = pool_cfg.sync_key.as_deref()
+                    let sync_key_opt: Option<[u8; 32]> = pool_cfg.sync_key.as_deref()
                         .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok())
                         .and_then(|b| b.try_into().ok())
-                        .unwrap_or([0u8; 32]);
-                    if let Some(cf) = aivpn_server::chain_forwarder::ChainForwarder::new(
-                        exit_node,
-                        sync_key,
-                        server.catalog_mdh(),
-                    ).await {
-                        server.set_chain_forwarder(cf);
-                        info!("Multi-hop: chain forwarding to exit node {}", exit_node);
+                        .filter(|k: &[u8; 32]| k != &[0u8; 32]);
+                    match sync_key_opt {
+                        None => {
+                            tracing::error!(
+                                "Multi-hop: pool.sync_key is missing, invalid, or all-zero \
+                                 — chain forwarder NOT started (exit_node={})",
+                                exit_node
+                            );
+                        }
+                        Some(sync_key) => {
+                            if let Some(cf) = aivpn_server::chain_forwarder::ChainForwarder::new(
+                                exit_node,
+                                sync_key,
+                                server.catalog_mdh(),
+                            ).await {
+                                server.set_chain_forwarder(cf);
+                                info!("Multi-hop: chain forwarding to exit node {}", exit_node);
+                            }
+                        }
                     }
                 }
             }
