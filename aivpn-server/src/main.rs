@@ -284,19 +284,9 @@ async fn main() {
         .and_then(|s| serde_json::from_str(&s).ok())
         .or_else(|| file_config.as_ref().and_then(|c| c.pool.clone()));
 
-    if let Some(ref pool_cfg) = pool_sync_config {
-        let sync_port = pool_cfg.sync_port.unwrap_or_else(|| {
-            listen_addr
-                .parse::<SocketAddr>()
-                .map(|a| a.port() + 1)
-                .unwrap_or(444)
-        });
-        let syncer = PeerSyncer::new(client_db.clone(), pool_cfg.clone(), event_bus.clone());
-        tokio::spawn(async move {
-            syncer.start(sync_port);
-        });
-        info!("Pool sync started on port {}", sync_port);
-    }
+    // Clone client_db for pool sync before it is consumed by GatewayConfig.
+    let client_db_for_sync: Option<Arc<ClientDatabase>> =
+        pool_sync_config.as_ref().map(|_| client_db.clone());
 
     // Build per-client QoS enforcer, pre-loaded from the client DB
     let qos_enforcer = {
@@ -384,6 +374,19 @@ async fn main() {
     // Create and run server
     match AivpnServer::new(config) {
         Ok(server) => {
+            // Start pool sync after session_manager and mask catalog are initialised.
+            // Sync packets ride the existing VPN UDP port — no extra TCP port needed.
+            if let (Some(ref pool_cfg), Some(db)) = (&pool_sync_config, client_db_for_sync) {
+                if let Some(syncer) =
+                    PeerSyncer::new(db, pool_cfg, server.catalog_mdh(), event_bus.clone())
+                {
+                    syncer.start(server.session_manager());
+                    info!(
+                        "Pool sync active ({} peers, in-protocol UDP)",
+                        pool_cfg.peers.len()
+                    );
+                }
+            }
             info!("Server initialized successfully");
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);

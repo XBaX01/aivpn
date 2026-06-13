@@ -1,63 +1,76 @@
-//! Server pool synchronization — keeps clients.json in sync across pool nodes.
+//! Server pool synchronisation — keeps clients.json in sync across pool nodes.
 //!
-//! Pool nodes share the same `server.key`.  Each node runs both a listener
-//! (accepts inbound pushes) and outbound sync tasks (pushes to peers).
-//! Protocol: length-prefixed frames over TCP.
-//! Auth: BLAKE3 nonce challenge-response (32-byte random nonce, prevents replay).
-//! Payload: ChaCha20-Poly1305 encrypted with a per-session key derived from
-//!   blake3::derive_key("aivpn-sync-enc-v1", sync_key || nonce).
+//! ## Design
+//! Pool nodes share a secret `sync_key` (32-byte BLAKE3 key, base64 in server.json).
+//! From this key every node derives identical `SessionKeys` and registers a
+//! *synthetic cluster session* in the `SessionManager`.  Outbound sync packets are
+//! standard VPN UDP datagrams (8-byte resonance tag + MDH + ChaCha20-Poly1305
+//! ciphertext) sent to the peer's VPN port — indistinguishable from client traffic.
+//!
+//! Incoming PoolSync packets are processed by the gateway's normal receive loop
+//! and dispatched to `handle_control_message` as `ControlPayload::PoolSync`.
+//!
+//! ## Replay protection
+//! The resonance counter is set to `unix_ms / 5_000` (5-second buckets).
+//! Both sender and receiver independently compute the same counter for the same
+//! wall-clock window.  The 511-counter tag window covers ±42 minutes of clock
+//! drift, making time-based replay attacks impractical.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
 
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use rand::Rng;
+use tracing::{info, warn};
 
-use crate::client_db::ClientDatabase;
+use tokio::net::UdpSocket;
+
+use aivpn_common::crypto::{
+    self, encrypt_payload, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
+};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::event_log::{AivpnEvent, EventBus, PeerSyncAction};
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 use base64::Engine as _;
 
+use crate::client_db::ClientDatabase;
+use crate::session::SessionManager;
+
 const SYNC_INTERVAL: Duration = Duration::from_secs(5);
-const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const TAG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Pool configuration stored in server.json under `"pool"`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PoolSyncConfig {
-    /// Peer server addresses (host:port using the VPN port; sync uses port+1).
+    /// Peer server addresses in `host:vpn_port` format (same port clients use).
     #[serde(default)]
     pub peers: Vec<String>,
-    /// Override the sync TCP port.  Default = main listen port + 1.
+    /// Deprecated — pool sync now uses the VPN port directly, not a separate port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_port: Option<u16>,
-    /// 32-byte BLAKE3 key (base64).  All pool nodes must share this value.
+    /// 32-byte BLAKE3 key (base64).  All pool nodes must share this exact value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_key: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum SyncMsg {
-    FullSync { clients_json: String },
-    Ping,
-    Pong,
-    Err { message: String },
-}
-
-/// Manages inbound and outbound peer synchronization.
+/// Manages outbound peer synchronisation using the main VPN protocol.
 pub struct PeerSyncer {
     db: Arc<ClientDatabase>,
-    config: PoolSyncConfig,
+    peers: Vec<String>,
     sync_key: [u8; 32],
+    session_keys: SessionKeys,
+    mdh: Vec<u8>,
     events: EventBus,
 }
 
 impl PeerSyncer {
-    pub fn new(db: Arc<ClientDatabase>, config: PoolSyncConfig, events: EventBus) -> Arc<Self> {
+    /// Returns `None` if `sync_key` is absent or zero (sync disabled for safety).
+    pub fn new(
+        db: Arc<ClientDatabase>,
+        config: &PoolSyncConfig,
+        mdh: Vec<u8>,
+        events: EventBus,
+    ) -> Option<Arc<Self>> {
         let sync_key: [u8; 32] = config
             .sync_key
             .as_deref()
@@ -65,225 +78,135 @@ impl PeerSyncer {
             .and_then(|b| b.try_into().ok())
             .unwrap_or([0u8; 32]);
 
-        Arc::new(Self {
-            db,
-            config,
-            sync_key,
-            events,
-        })
-    }
-
-    /// Spawn listener + outbound tasks.  Returns immediately.
-    pub fn start(self: Arc<Self>, sync_port: u16) {
-        if self.sync_key == [0u8; 32] {
+        if sync_key == [0u8; 32] {
             warn!("pool_sync: sync_key not configured — pool sync disabled for security");
-            return;
+            return None;
         }
-        {
-            let me = self.clone();
-            tokio::spawn(async move { me.run_listener(sync_port).await });
-        }
-        for peer in self.config.peers.clone() {
-            let me = self.clone();
-            tokio::spawn(async move { me.outbound_loop(peer).await });
-        }
+
+        let session_keys = SessionKeys {
+            session_key: blake3::derive_key("aivpn-pool-enc-v1", &sync_key),
+            tag_secret: blake3::derive_key("aivpn-pool-tag-v1", &sync_key),
+            prng_seed: blake3::derive_key("aivpn-pool-prng-v1", &sync_key),
+        };
+
+        Some(Arc::new(Self {
+            db,
+            peers: config.peers.clone(),
+            sync_key,
+            session_keys,
+            mdh,
+            events,
+        }))
     }
 
-    async fn run_listener(self: Arc<Self>, port: u16) {
-        let addr = format!("0.0.0.0:{}", port);
-        let listener = match TcpListener::bind(&addr).await {
-            Ok(l) => {
-                info!("Pool sync listener on {}", addr);
-                l
+    /// Register the synthetic cluster session and spawn background tasks.
+    pub fn start(self: Arc<Self>, session_manager: Arc<SessionManager>) {
+        // Sentinel addr — the cluster session has no single client addr; incoming
+        // packets arrive from various peer IPs and are matched by resonance tag.
+        let sentinel: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let session_id = session_manager.create_pool_peer_session(&self.sync_key, sentinel);
+        info!("pool_sync: active ({} peers)", self.peers.len());
+
+        // Periodically refresh the time-bucket counter in the tag window.
+        let sm = session_manager.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(TAG_REFRESH_INTERVAL);
+            loop {
+                ticker.tick().await;
+                sm.refresh_pool_peer_tags(&session_id);
             }
-            Err(e) => {
-                warn!("Pool sync bind {} failed: {} — peer sync disabled", addr, e);
-                return;
-            }
-        };
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    debug!("Pool sync inbound from {}", peer_addr);
-                    let me = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = me.handle_inbound(stream).await {
-                            warn!("Pool sync inbound error: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Pool sync accept: {}", e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
+        });
+
+        // One outbound loop per configured peer.
+        for peer in self.peers.clone() {
+            let me = self.clone();
+            tokio::spawn(async move {
+                me.outbound_loop(peer).await;
+            });
         }
     }
 
     async fn outbound_loop(self: Arc<Self>, peer: String) {
-        let mut backoff = SYNC_INTERVAL;
+        let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("pool_sync: bind failed for peer {}: {}", peer, e);
+                return;
+            }
+        };
+
+        let mut ticker = tokio::time::interval(SYNC_INTERVAL);
         loop {
-            match self.push_to_peer(&peer).await {
+            ticker.tick().await;
+            match self.push_to_peer(&socket, &peer).await {
                 Ok(n) => {
-                    debug!("Pool sync pushed {} clients to {}", n, peer);
                     self.events.emit(AivpnEvent::PeerSync {
                         peer: peer.clone(),
                         action: PeerSyncAction::FullSync,
                         clients_synced: n as u32,
                     });
-                    backoff = SYNC_INTERVAL;
                 }
-                Err(e) => {
-                    warn!(
-                        "Pool sync to {} failed: {} — retry in {:?}",
-                        peer, e, backoff
-                    );
-                    backoff = (backoff * 2).min(Duration::from_secs(120));
-                }
+                Err(e) => warn!("pool_sync: send to {} failed: {}", peer, e),
             }
-            tokio::time::sleep(backoff).await;
         }
     }
 
-    async fn push_to_peer(&self, peer: &str) -> Result<usize> {
-        let sync_addr = self.peer_sync_addr(peer);
-        let stream = tokio::time::timeout(SYNC_TIMEOUT, TcpStream::connect(&sync_addr))
-            .await
-            .map_err(|_| Error::Session("peer sync connect timeout".into()))?
-            .map_err(|e| Error::Session(format!("peer sync connect: {}", e)))?;
-
-        let (mut r, mut w) = stream.into_split();
-
-        // Read server challenge nonce
-        let nonce_bytes = read_frame(&mut r).await?;
-        if nonce_bytes.len() != 32 {
-            return Err(Error::Session("peer sync: bad nonce length".into()));
-        }
-        let nonce: [u8; 32] = nonce_bytes.try_into().unwrap();
-        // Respond with nonce-keyed BLAKE3 MAC
-        write_frame(&mut w, &self.nonce_auth_token(&nonce)).await?;
-        let ack = read_frame(&mut r).await?;
-        if ack != b"ok" {
-            return Err(Error::Session("peer sync auth rejected".into()));
-        }
+    async fn push_to_peer(&self, socket: &UdpSocket, peer: &str) -> Result<usize> {
+        let peer_addr: SocketAddr = peer
+            .parse()
+            .map_err(|_| Error::Session(format!("pool_sync: invalid peer addr: {}", peer)))?;
 
         let clients = self.db.list_clients();
         let n = clients.len();
-        let clients_json = serde_json::to_string(&clients)
-            .map_err(|e| Error::Session(format!("serialize clients: {}", e)))?;
-        let msg = serde_json::to_vec(&SyncMsg::FullSync { clients_json })
-            .map_err(|e| Error::Session(format!("serialize msg: {}", e)))?;
-        let encrypted = self.encrypt_payload(&nonce, &msg)?;
-        write_frame(&mut w, &encrypted).await?;
-        let _ = read_frame(&mut r).await?;
+        let clients_json = serde_json::to_vec(&clients)
+            .map_err(|e| Error::Session(format!("pool_sync: serialize: {}", e)))?;
+
+        let payload = ControlPayload::PoolSync { clients_json };
+        let packet = self.build_sync_packet(&payload)?;
+        socket
+            .send_to(&packet, peer_addr)
+            .await
+            .map_err(|e| Error::Session(format!("pool_sync: udp send: {}", e)))?;
         Ok(n)
     }
 
-    async fn handle_inbound(&self, stream: TcpStream) -> Result<()> {
-        let (mut r, mut w) = stream.into_split();
+    /// Build a VPN UDP packet carrying a PoolSync control message.
+    /// Wire format: [8-byte resonance tag][MDH][ChaCha20-Poly1305 ciphertext]
+    fn build_sync_packet(&self, payload: &ControlPayload) -> Result<Vec<u8>> {
+        let encoded = payload.encode()?;
 
-        // Send challenge nonce — prevents replay of captured tokens
-        let nonce: [u8; 32] = rand::random();
-        write_frame(&mut w, &nonce).await?;
+        let inner_header = InnerHeader {
+            inner_type: InnerType::Control,
+            seq_num: 0,
+        };
+        let mut inner_payload = inner_header.encode().to_vec();
+        inner_payload.extend_from_slice(&encoded);
 
-        let tok = read_frame(&mut r).await?;
-        if tok.as_slice() != self.nonce_auth_token(&nonce) {
-            let _ = write_frame(&mut w, b"auth_fail").await;
-            return Err(Error::Session("peer sync: bad auth".into()));
-        }
-        write_frame(&mut w, b"ok").await?;
+        // Counter = 5-second time bucket — receiver derives the same value.
+        let counter = crypto::current_timestamp_ms() / 5_000;
+        let mut nonce = [0u8; NONCE_SIZE];
+        nonce[..8].copy_from_slice(&counter.to_le_bytes());
 
-        let data = read_frame(&mut r).await?;
-        let plaintext = self.decrypt_payload(&nonce, &data)?;
-        let msg: SyncMsg = serde_json::from_slice(&plaintext)
-            .map_err(|e| Error::Session(format!("sync msg parse: {}", e)))?;
-
-        match msg {
-            SyncMsg::FullSync { clients_json } => {
-                let n = self.db.merge_from_json(&clients_json)?;
-                info!("Pool sync: merged {} clients from peer", n);
-                self.events.emit(AivpnEvent::PeerSync {
-                    peer: "inbound".into(),
-                    action: PeerSyncAction::FullSync,
-                    clients_synced: n as u32,
-                });
-            }
-            SyncMsg::Ping => {}
-            _ => {}
+        let pad_len: u16 = 16;
+        let mut padded = Vec::with_capacity(2 + inner_payload.len() + pad_len as usize);
+        padded.extend_from_slice(&pad_len.to_le_bytes());
+        padded.extend_from_slice(&inner_payload);
+        let mut rng = rand::thread_rng();
+        for _ in 0..pad_len {
+            padded.push(rng.gen::<u8>());
         }
 
-        let ack = serde_json::to_vec(&SyncMsg::Pong).unwrap_or_default();
-        write_frame(&mut w, &ack).await?;
-        Ok(())
-    }
+        let ciphertext = encrypt_payload(&self.session_keys.session_key, &nonce, &padded)?;
 
-    fn nonce_auth_token(&self, nonce: &[u8; 32]) -> [u8; 32] {
-        let mut input = [0u8; 50];
-        input[..32].copy_from_slice(nonce);
-        input[32..].copy_from_slice(b"aivpn-pool-sync-v1");
-        *blake3::keyed_hash(&self.sync_key, &input).as_bytes()
-    }
+        let time_window =
+            crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
+        let tag =
+            crypto::generate_resonance_tag(&self.session_keys.tag_secret, counter, time_window);
 
-    fn session_cipher(&self, nonce: &[u8; 32]) -> ChaCha20Poly1305 {
-        // Derive a unique encryption key per sync session from sync_key + challenge nonce
-        let mut km = [0u8; 64];
-        km[..32].copy_from_slice(&self.sync_key);
-        km[32..].copy_from_slice(nonce);
-        let enc_key = blake3::derive_key("aivpn-sync-enc-v1", &km);
-        ChaCha20Poly1305::new(Key::from_slice(&enc_key))
+        let mut packet = Vec::with_capacity(TAG_SIZE + self.mdh.len() + ciphertext.len());
+        packet.extend_from_slice(&tag);
+        packet.extend_from_slice(&self.mdh);
+        packet.extend_from_slice(&ciphertext);
+        Ok(packet)
     }
-
-    fn encrypt_payload(&self, nonce: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
-        self.session_cipher(nonce)
-            .encrypt(Nonce::from_slice(&[0u8; 12]), plaintext)
-            .map_err(|_| Error::Session("sync payload encrypt failed".into()))
-    }
-
-    fn decrypt_payload(&self, nonce: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
-        self.session_cipher(nonce)
-            .decrypt(Nonce::from_slice(&[0u8; 12]), ciphertext)
-            .map_err(|_| {
-                Error::Session("sync payload decrypt failed — wrong key or tampered data".into())
-            })
-    }
-
-    /// Derive sync TCP address from a VPN peer address.
-    fn peer_sync_addr(&self, peer: &str) -> String {
-        if let Some(port) = self.config.sync_port {
-            // host only or host:port — replace port
-            let host = peer.rsplit_once(':').map(|(h, _)| h).unwrap_or(peer);
-            return format!("{}:{}", host, port);
-        }
-        // Default: VPN port + 1
-        if let Ok(addr) = peer.parse::<std::net::SocketAddr>() {
-            return format!("{}:{}", addr.ip(), addr.port() + 1);
-        }
-        format!("{}:444", peer)
-    }
-}
-
-async fn write_frame(w: &mut tokio::net::tcp::OwnedWriteHalf, data: &[u8]) -> Result<()> {
-    let len = (data.len() as u32).to_le_bytes();
-    w.write_all(&len)
-        .await
-        .map_err(|e| Error::Session(e.to_string()))?;
-    w.write_all(data)
-        .await
-        .map_err(|e| Error::Session(e.to_string()))
-}
-
-async fn read_frame(r: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Vec<u8>> {
-    let mut lb = [0u8; 4];
-    r.read_exact(&mut lb)
-        .await
-        .map_err(|e| Error::Session(e.to_string()))?;
-    let len = u32::from_le_bytes(lb) as usize;
-    if len > MAX_FRAME_SIZE {
-        return Err(Error::Session("sync frame too large".into()));
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)
-        .await
-        .map_err(|e| Error::Session(e.to_string()))?;
-    Ok(buf)
 }

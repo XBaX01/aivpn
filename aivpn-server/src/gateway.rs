@@ -605,6 +605,19 @@ impl Gateway {
         Ok(())
     }
 
+    /// Return a shared reference to the session manager.
+    /// Used by pool sync to register the synthetic cluster session before `run()` is called.
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.session_manager.clone()
+    }
+
+    /// Return the default mask-dependent header bytes from the mask catalog.
+    /// Pool sync packets use this MDH so the receiver can locate the ciphertext
+    /// boundary using the same session-mask heuristic as regular client packets.
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.mask_catalog.packet_mdh_bytes()
+    }
+
     /// Start the gateway
     pub async fn run(mut self) -> Result<()> {
         info!("Starting AIVPN Gateway on {}", self.config.listen_addr);
@@ -2312,6 +2325,23 @@ impl Gateway {
             }
             ControlPayload::BootstrapDescriptorUpdate { .. } => {
                 // Client-side only, ignore on server
+            }
+            ControlPayload::PoolSync { clients_json } => {
+                if let Some(ref db) = self.client_db {
+                    let json_str = String::from_utf8_lossy(&clients_json);
+                    match db.merge_from_json(&json_str) {
+                        Ok(n) => info!(
+                            "pool_sync: merged {} clients from peer {}",
+                            n,
+                            hash_addr(&client_addr)
+                        ),
+                        Err(e) => warn!(
+                            "pool_sync: merge failed from {}: {}",
+                            hash_addr(&client_addr),
+                            e
+                        ),
+                    }
+                }
             }
         }
 

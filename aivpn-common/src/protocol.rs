@@ -62,6 +62,7 @@ pub enum ControlSubtype {
     RecordingStatusRequest = 0x0F,
     RecordingStatus = 0x10,
     BootstrapDescriptorUpdate = 0x11,
+    PoolSync = 0x12,
 }
 
 impl ControlSubtype {
@@ -84,6 +85,7 @@ impl ControlSubtype {
             0x0F => Some(Self::RecordingStatusRequest),
             0x10 => Some(Self::RecordingStatus),
             0x11 => Some(Self::BootstrapDescriptorUpdate),
+            0x12 => Some(Self::PoolSync),
             _ => None,
         }
     }
@@ -302,6 +304,10 @@ pub enum ControlPayload {
     BootstrapDescriptorUpdate {
         descriptor_data: Vec<u8>,
     },
+    /// Carries a full clients.json snapshot for pool-node synchronization.
+    PoolSync {
+        clients_json: Vec<u8>,
+    },
 }
 
 impl ControlPayload {
@@ -436,6 +442,11 @@ impl ControlPayload {
                 buf.push(ControlSubtype::BootstrapDescriptorUpdate as u8);
                 buf.extend_from_slice(&(descriptor_data.len() as u16).to_le_bytes());
                 buf.extend_from_slice(descriptor_data);
+            }
+            Self::PoolSync { clients_json } => {
+                buf.push(ControlSubtype::PoolSync as u8);
+                buf.extend_from_slice(&(clients_json.len() as u32).to_le_bytes());
+                buf.extend_from_slice(clients_json);
             }
         }
 
@@ -657,6 +668,18 @@ impl ControlPayload {
                 }
                 Ok(Self::BootstrapDescriptorUpdate {
                     descriptor_data: data[3..3 + descriptor_len].to_vec(),
+                })
+            }
+            ControlSubtype::PoolSync => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("PoolSync too short"));
+                }
+                let payload_len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + payload_len {
+                    return Err(Error::InvalidPacket("PoolSync invalid length"));
+                }
+                Ok(Self::PoolSync {
+                    clients_json: data[5..5 + payload_len].to_vec(),
                 })
             }
         }

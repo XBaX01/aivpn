@@ -743,6 +743,81 @@ impl SessionManager {
         }
     }
 
+    /// Register a synthetic "cluster session" used for pool-node synchronisation.
+    ///
+    /// All pool nodes derive identical `SessionKeys` from the shared `sync_key`
+    /// (same blake3 KDF domain strings) and the resonance counter is pinned to
+    /// a 5-second wall-clock bucket, so every node independently computes the
+    /// same expected tag for the same 5-second window — no handshake required.
+    pub fn create_pool_peer_session(
+        &self,
+        sync_key: &[u8; 32],
+        peer_addr: std::net::SocketAddr,
+    ) -> [u8; 16] {
+        let keys = aivpn_common::crypto::SessionKeys {
+            session_key: blake3::derive_key("aivpn-pool-enc-v1", sync_key),
+            tag_secret: blake3::derive_key("aivpn-pool-tag-v1", sync_key),
+            prng_seed: blake3::derive_key("aivpn-pool-prng-v1", sync_key),
+        };
+
+        // Deterministic session_id — all pool nodes agree on the same value.
+        let id_hash = blake3::hash(sync_key);
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&id_hash.as_bytes()[..16]);
+
+        let counter = crypto::current_timestamp_ms() / 5_000;
+
+        let session_arc = {
+            let mut s = Session::new(session_id, peer_addr, keys, [0u8; X25519_PUBLIC_KEY_SIZE]);
+            s.state = SessionState::Active;
+            s.counter = counter;
+            s.update_tag_window();
+            Arc::new(Mutex::new(s))
+        };
+
+        {
+            let sess = session_arc.lock();
+            for tag in sess.expected_tags.values() {
+                self.tag_map.insert(*tag, session_id);
+            }
+        }
+
+        // Bypass MAX_SESSIONS cap — synthetic sessions don't count against client quota.
+        self.sessions.insert(session_id, session_arc);
+        info!(
+            "pool_sync: cluster session registered ({} tag slots)",
+            TAG_WINDOW_SIZE * 2 - 1
+        );
+        session_id
+    }
+
+    /// Advance the synthetic cluster session's tag window to the current 5-second
+    /// time bucket.  Call every ≤60 s to keep expected-tag map aligned with wall
+    /// time and to refresh `last_seen` so the session is not idle-evicted.
+    pub fn refresh_pool_peer_tags(&self, session_id: &[u8; 16]) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            let old_tags: Vec<[u8; TAG_SIZE]> = {
+                entry
+                    .value()
+                    .lock()
+                    .expected_tags
+                    .values()
+                    .cloned()
+                    .collect()
+            };
+            for t in &old_tags {
+                self.tag_map.remove(t);
+            }
+            let mut sess = entry.value().lock();
+            sess.counter = crypto::current_timestamp_ms() / 5_000;
+            sess.last_seen = std::time::Instant::now();
+            sess.update_tag_window();
+            for t in sess.expected_tags.values() {
+                self.tag_map.insert(*t, *session_id);
+            }
+        }
+    }
+
     /// Get session by tag (O(1) lookup)
     pub fn get_session_by_tag(&self, tag: &[u8; TAG_SIZE]) -> Option<Arc<Mutex<Session>>> {
         if let Some(entry) = self.tag_map.get(tag) {

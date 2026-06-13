@@ -2,6 +2,8 @@
 //!
 //! Main server entry point
 
+use std::sync::Arc;
+
 use tracing_subscriber::{self, EnvFilter};
 
 use clap::Parser;
@@ -137,6 +139,16 @@ impl AivpnServer {
     pub fn new(config: GatewayConfig) -> Result<Self> {
         let gateway = Gateway::new(config)?;
         Ok(Self { gateway })
+    }
+
+    /// Return a shared reference to the session manager (for pool sync setup).
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.gateway.session_manager()
+    }
+
+    /// Return the default MDH bytes from the mask catalog (for pool sync packets).
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.gateway.catalog_mdh()
     }
 
     /// Run the server
