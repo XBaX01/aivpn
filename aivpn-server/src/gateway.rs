@@ -2391,7 +2391,20 @@ impl Gateway {
             }
             ControlPayload::ChainForward { payload } => {
                 if self.config.exit_node_enabled {
-                    if let Some(ref tx) = self.tun_write_tx {
+                    let ip_version = payload.first().map(|b| b >> 4);
+                    let min_len = match ip_version {
+                        Some(4) => 20,
+                        Some(6) => 40,
+                        _ => usize::MAX,
+                    };
+                    if payload.len() < min_len {
+                        warn!(
+                            "chain_forward: invalid IP payload from {} (version={:?} len={}) — dropping",
+                            hash_addr(&client_addr),
+                            ip_version,
+                            payload.len()
+                        );
+                    } else if let Some(ref tx) = self.tun_write_tx {
                         let _ = tx.send(payload).await;
                     }
                 } else {
@@ -2403,7 +2416,13 @@ impl Gateway {
             }
             ControlPayload::ClientCert { cert_bytes } => {
                 if let Some(ref mtls_cfg) = self.config.mtls {
-                    let ok = crate::mtls::check_client(Some(&cert_bytes), mtls_cfg);
+                    let session_eph_pub = session.lock().eph_pub;
+                    let ok = crate::mtls::SimpleCert::from_bytes(&cert_bytes)
+                        .map(|c| {
+                            c.client_pub_key == session_eph_pub
+                                && crate::mtls::verify_cert(&c, mtls_cfg)
+                        })
+                        .unwrap_or(false);
                     session.lock().mtls_ok = ok;
                     if ok {
                         debug!("mtls: client {} cert accepted", hash_addr(&client_addr));

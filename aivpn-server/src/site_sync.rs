@@ -260,7 +260,20 @@ pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
             return;
         }
     };
-    let peer_cfg = match config.peers.iter().find(|p| p.endpoint == from_addr) {
+    // Match by IP only — the sending peer's outbound socket uses an ephemeral source port,
+    // so the received source port will not match the configured endpoint port.
+    let from_socket: std::net::SocketAddr = match from_addr.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            warn!("site_sync: unparseable sender address {} — dropping", from_addr);
+            return;
+        }
+    };
+    let peer_cfg = match config.peers.iter().find(|p| {
+        p.endpoint
+            .parse::<std::net::SocketAddr>()
+            .map_or(false, |ep| ep.ip() == from_socket.ip())
+    }) {
         Some(p) => p,
         None => {
             warn!("site_sync: RouteSync from unconfigured peer {} — dropping", from_addr);
