@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Multi-server pool / failover** — `pool` block in `server.json`; nodes share the same X25519 keypair; TCP sync listener on `port+1`; BLAKE3-keyed auth between peers; `aivpn-server enroll <peer>` command for one-shot peer enrollment (`aivpn-server/src/pool_sync.rs`)
+- **Multi-server pool / failover** — `pool` block in `server.json`; nodes share the same X25519 keypair; in-protocol UDP sync over the VPN port (`ControlPayload::PoolSync` 0x12) — sync traffic is indistinguishable from client traffic, no extra port or firewall rule required; all nodes derive identical `SessionKeys` from a shared `sync_key` via blake3 KDF; `aivpn-server enroll <peer>` command for one-shot peer enrollment (`aivpn-server/src/pool_sync.rs`)
 - **Client server pool** — failover, round-robin, weighted, and latency-based selection; optional `pool` JSON array in `aivpn://` connection key (backward-compatible — old clients ignore unknown fields) (`aivpn-client/src/server_pool.rs`)
 - **OpenWRT native package + LuCI plugin** — `aivpn-openwrt/package/aivpn/` with procd init script, UCI config template, WAN hotplug restart; `luci-app-aivpn` web UI with Status and Configuration tabs; OpenWRT setup guide at `aivpn-openwrt/docs/openwrt-setup.md`
 - **Per-client QoS / bandwidth limiting** — eBPF TC egress hook (`ebpf/tc_qos_prog.c`) with LRU_HASH `qos_rules` map, token-bucket rate limiting and DSCP marking per client VPN IP; transparent userspace fallback when BPF absent; `--set-client-qos` CLI flag (`aivpn-server/src/qos.rs`)
@@ -29,7 +29,7 @@
 
 ### Добавлено
 
-- **Пул серверов / отказоустойчивость** — блок `pool` в `server.json`; узлы используют общую пару ключей X25519; TCP-синхронизация на `port+1` с BLAKE3-аутентификацией между узлами; команда `aivpn-server enroll <peer>` для регистрации пира в один шаг (`aivpn-server/src/pool_sync.rs`)
+- **Пул серверов / отказоустойчивость** — блок `pool` в `server.json`; узлы используют общую пару ключей X25519; синхронизация встроена в основной VPN-протокол (`ControlPayload::PoolSync` 0x12) через UDP-порт VPN — трафик синхронизации неотличим от клиентского, не требует отдельного порта или правила firewall; все узлы выводят одинаковые `SessionKeys` из общего `sync_key` через blake3 KDF; команда `aivpn-server enroll <peer>` для регистрации пира в один шаг (`aivpn-server/src/pool_sync.rs`)
 - **Пул серверов на клиенте** — режимы failover, round-robin, weighted и latency-based; опциональный массив `pool` в JSON-ключе `aivpn://` (обратная совместимость — старые клиенты игнорируют неизвестные поля) (`aivpn-client/src/server_pool.rs`)
 - **Нативный пакет OpenWRT + плагин LuCI** — `aivpn-openwrt/package/aivpn/` с init-скриптом procd, шаблоном UCI-конфига, hotplug-перезапуском при поднятии WAN; веб-интерфейс `luci-app-aivpn` с вкладками Status и Configuration; руководство по установке `aivpn-openwrt/docs/openwrt-setup.md`
 - **QoS / ограничение полосы пропускания на клиента** — eBPF TC egress-хук (`ebpf/tc_qos_prog.c`) с картой `LRU_HASH qos_rules`, token-bucket ограничением скорости и DSCP-маркировкой по VPN IP клиента; прозрачный userspace-fallback при отсутствии BPF; флаг CLI `--set-client-qos` (`aivpn-server/src/qos.rs`)
