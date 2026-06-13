@@ -54,6 +54,11 @@ pub struct PoolSyncConfig {
     /// 32-byte BLAKE3 key (base64).  All pool nodes must share this exact value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_key: Option<String>,
+    /// Optional exit node for multi-hop routing (`host:port`).  When set,
+    /// the entry node wraps client IP payloads in `ChainForward` and relays
+    /// them to this address; the exit node routes to the internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_node: Option<String>,
 }
 
 /// Manages outbound peer synchronisation using the main VPN protocol.
