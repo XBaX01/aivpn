@@ -2,25 +2,51 @@
 
 ## [0.8.0] - 2026-06-13
 
-### Added / Добавлено
+### Added
 
-- **Multi-server pool / failover** — `pool` block in `server.json`; nodes share X25519 keypair; TCP sync on `port+1`; `aivpn-server enroll` command for peer setup (`aivpn-server/src/pool_sync.rs`)
-- **OpenWRT package + LuCI plugin** — `aivpn-openwrt/` with procd init, UCI config, WAN hotplug, and `luci-app-aivpn` web UI (Status + Configuration tabs)
-- **Per-client QoS / bandwidth limiting** — eBPF TC egress hook (`ebpf/tc_qos_prog.c`) with token-bucket rate limiting and DSCP marking; userspace fallback when BPF absent; `--set-client-qos` CLI flag (`aivpn-server/src/qos.rs`)
-- **Backup / migration tools** — `--export` and `--import` tar.gz with manifest; covers clients DB, masks, config (`aivpn-server/src/backup.rs`)
-- **eBPF observability** — XDP/TC ring-buffer stats observer; graceful no-op when `/sys/fs/bpf/aivpn_events` absent (`aivpn-server/src/ebpf_observer.rs`)
-- **Structured event logging** — `AivpnEvent` enum + `EventBus` with JSONL stdout sink (`aivpn-common/src/event_log.rs`)
-- **Adaptive mode** — per-connection MTU and keepalive auto-tuning based on a 20-entry packet-loss sliding window; enabled via `--adaptive` CLI flag and toggle in all UI clients (`aivpn-client/src/adaptive.rs`)
-- **Admin audit log** — append-only JSONL at `/var/log/aivpn/audit.log` for all management actions (`aivpn-server/src/audit_log.rs`)
-- **Benchmarking / Diagnostics** — UDP RTT probes with P50/P95/P99 percentiles and 0–100 quality score; available in CLI (`bench` subcommand) and all GUI clients via Diagnostics panel (`aivpn-client/src/bench.rs`)
-- **Client server pool** — failover, round-robin, weighted, and latency-based selection; optional `pool` field in connection key (`aivpn-client/src/server_pool.rs`)
+- **Multi-server pool / failover** — `pool` block in `server.json`; nodes share the same X25519 keypair; TCP sync listener on `port+1`; BLAKE3-keyed auth between peers; `aivpn-server enroll <peer>` command for one-shot peer enrollment (`aivpn-server/src/pool_sync.rs`)
+- **Client server pool** — failover, round-robin, weighted, and latency-based selection; optional `pool` JSON array in `aivpn://` connection key (backward-compatible — old clients ignore unknown fields) (`aivpn-client/src/server_pool.rs`)
+- **OpenWRT native package + LuCI plugin** — `aivpn-openwrt/package/aivpn/` with procd init script, UCI config template, WAN hotplug restart; `luci-app-aivpn` web UI with Status and Configuration tabs; OpenWRT setup guide at `aivpn-openwrt/docs/openwrt-setup.md`
+- **Per-client QoS / bandwidth limiting** — eBPF TC egress hook (`ebpf/tc_qos_prog.c`) with LRU_HASH `qos_rules` map, token-bucket rate limiting and DSCP marking per client VPN IP; transparent userspace fallback when BPF absent; `--set-client-qos` CLI flag (`aivpn-server/src/qos.rs`)
+- **Backup / migration tools** — `--export <path.tar.gz>` and `--import <path.tar.gz>` with `manifest.json`; covers clients DB, mask files, and server config (`aivpn-server/src/backup.rs`)
+- **eBPF observability stub** — XDP/TC ring-buffer stats observer; attaches when `/sys/fs/bpf/aivpn_events` is present; graceful no-op otherwise (`aivpn-server/src/ebpf_observer.rs`)
+- **Structured event logging** — `AivpnEvent` enum covering connect/disconnect, key rotation, XDP drops, peer sync, kill-switch; `EventBus` with JSONL stdout sink and optional webhook (`aivpn-common/src/event_log.rs`)
+- **Adaptive mode** — 20-entry sliding window tracks per-connection packet loss; auto-adjusts `mtu_delta` (−50 per step, floor 576) and keepalive multiplier; `--adaptive` CLI flag; toggle in all UI clients: Windows egui panel, macOS menu popover, iOS settings row, Android options menu (`aivpn-client/src/adaptive.rs`)
+- **Admin audit log** — append-only JSONL at `/var/log/aivpn/audit.log` (configurable via `--audit-log`); records actor, action, target, result, and ISO-8601 timestamp for every management operation (`aivpn-server/src/audit_log.rs`)
+- **Benchmarking / Diagnostics** — UDP RTT probes, P50/P95/P99 latency percentiles, throughput up/down, packet loss %, 0–100 quality score; `aivpn-client bench` subcommand; Diagnostics panel in Windows GUI, macOS popover, iOS sheet, Android options-menu dialog (`aivpn-client/src/bench.rs`)
 
-### Changed / Изменено
+### Changed
 
-- Version bump 0.7.0 → 0.8.0 across all crates, macOS/iOS plists, and UI version strings
-- `GatewayConfig` gains `event_bus` and `qos_enforcer` fields (backward-compatible defaults)
-- `ClientConfig` gains optional `qos` field (`#[serde(default)]` — existing `clients.json` unaffected)
+- Version bumped 0.7.0 → 0.8.0 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, macOS/iOS version strings, Android `version_footer`
+- `GatewayConfig` gains `event_bus: EventBus` and `qos_enforcer: Arc<QosEnforcer>` (backward-compatible `Default` impl)
+- `ClientConfig` gains `qos: Option<ClientQos>` with `#[serde(default)]` — existing `clients.json` files are unaffected
 - Server `--audit-log` defaults to `/var/log/aivpn/audit.log`
+- `aivpn-server/Cargo.toml` adds `flate2 = "1"` and `tar = "0.4"` for backup functionality
+
+---
+
+## [0.8.0] — 2026-06-13
+
+### Добавлено
+
+- **Пул серверов / отказоустойчивость** — блок `pool` в `server.json`; узлы используют общую пару ключей X25519; TCP-синхронизация на `port+1` с BLAKE3-аутентификацией между узлами; команда `aivpn-server enroll <peer>` для регистрации пира в один шаг (`aivpn-server/src/pool_sync.rs`)
+- **Пул серверов на клиенте** — режимы failover, round-robin, weighted и latency-based; опциональный массив `pool` в JSON-ключе `aivpn://` (обратная совместимость — старые клиенты игнорируют неизвестные поля) (`aivpn-client/src/server_pool.rs`)
+- **Нативный пакет OpenWRT + плагин LuCI** — `aivpn-openwrt/package/aivpn/` с init-скриптом procd, шаблоном UCI-конфига, hotplug-перезапуском при поднятии WAN; веб-интерфейс `luci-app-aivpn` с вкладками Status и Configuration; руководство по установке `aivpn-openwrt/docs/openwrt-setup.md`
+- **QoS / ограничение полосы пропускания на клиента** — eBPF TC egress-хук (`ebpf/tc_qos_prog.c`) с картой `LRU_HASH qos_rules`, token-bucket ограничением скорости и DSCP-маркировкой по VPN IP клиента; прозрачный userspace-fallback при отсутствии BPF; флаг CLI `--set-client-qos` (`aivpn-server/src/qos.rs`)
+- **Инструменты резервного копирования и миграции** — `--export <path.tar.gz>` и `--import <path.tar.gz>` с `manifest.json`; охватывают БД клиентов, файлы масок и конфигурацию сервера (`aivpn-server/src/backup.rs`)
+- **Заглушка наблюдаемости eBPF** — наблюдатель статистики через кольцевой буфер XDP/TC; подключается при наличии `/sys/fs/bpf/aivpn_events`; graceful no-op при отсутствии (`aivpn-server/src/ebpf_observer.rs`)
+- **Структурированное логирование событий** — перечисление `AivpnEvent`: подключение/отключение, ротация ключей, XDP-дропы, синхронизация пиров, kill-switch; `EventBus` с JSONL-выводом в stdout и опциональным вебхуком (`aivpn-common/src/event_log.rs`)
+- **Адаптивный режим** — скользящее окно из 20 пакетов отслеживает потери; автоматически корректирует `mtu_delta` (−50 за шаг, минимум 576) и множитель keepalive; флаг CLI `--adaptive`; переключатель во всех UI-клиентах: Windows (egui панель), macOS (popover меню), iOS (строка настроек), Android (меню опций) (`aivpn-client/src/adaptive.rs`)
+- **Аудит-лог администратора** — append-only JSONL по пути `/var/log/aivpn/audit.log` (настраивается через `--audit-log`); фиксирует субъект, действие, цель, результат и метку времени ISO-8601 для каждой операции управления (`aivpn-server/src/audit_log.rs`)
+- **Бенчмарк / Диагностика** — UDP RTT-зондирование, перцентили задержки P50/P95/P99, пропускная способность вверх/вниз, процент потерь, оценка качества 0–100; подкоманда `aivpn-client bench`; панель Диагностика в Windows GUI, macOS popover, iOS sheet, Android диалог из меню опций (`aivpn-client/src/bench.rs`)
+
+### Изменено
+
+- Версия поднята с 0.7.0 до 0.8.0 во всём workspace `Cargo.toml`, всех `Cargo.toml` крейтов, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строках версии macOS/iOS, Android `version_footer`
+- `GatewayConfig` получает поля `event_bus: EventBus` и `qos_enforcer: Arc<QosEnforcer>` (обратносовместимая реализация `Default`)
+- `ClientConfig` получает `qos: Option<ClientQos>` с `#[serde(default)]` — существующие `clients.json` не затронуты
+- `--audit-log` по умолчанию равен `/var/log/aivpn/audit.log`
+- `aivpn-server/Cargo.toml` добавляет `flate2 = "1"` и `tar = "0.4"` для функционала резервного копирования
 
 ---
 

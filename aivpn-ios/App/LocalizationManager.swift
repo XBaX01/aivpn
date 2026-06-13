@@ -61,6 +61,14 @@ class LocalizationManager: ObservableObject {
                                 "ru": "Нет ключей. Нажмите + для добавления."],
         "recording_ready":     ["en": "Recording availability is checked by the server when you start",
                                 "ru": "Доступ к записи проверяется сервером при запуске"],
+        "adaptive_mode":       ["en": "Adaptive Mode",          "ru": "Адаптивный режим"],
+        "adaptive_mode_help":  ["en": "Auto-adjusts MTU and keepalive on packet loss",
+                                "ru": "Автоматически адаптирует MTU и keepalive при потерях"],
+        "diagnostics":         ["en": "Diagnostics",            "ru": "Диагностика"],
+        "run_benchmark":       ["en": "Run Benchmark",          "ru": "Запустить тест"],
+        "bench_running":       ["en": "Running benchmark…",     "ru": "Тест запущен…"],
+        "bench_idle":          ["en": "Tap to measure latency and connection quality.",
+                                "ru": "Нажмите для измерения задержки и качества соединения."],
     ]
 
     init() {

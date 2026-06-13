@@ -24,7 +24,7 @@
     <string name="label_upload">Upload</string>
     <string name="label_download">Download</string>
     <string name="label_duration">Duration</string>
-    <string name="version_footer">v0.6.0 · AI-powered DPI evasion</string>
+    <string name="version_footer">v0.8.0 · AI-powered DPI evasion</string>
     <string name="notification_channel">AIVPN Tunnel</string>
     <string name="notification_channel_desc">Active VPN tunnel status</string>
     <string name="notification_connecting">Connecting…</string>

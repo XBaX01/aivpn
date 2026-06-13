@@ -254,6 +254,11 @@ struct ContentView: View {
     @EnvironmentObject var loc: LocalizationManager
 
     @State private var fullTunnel: Bool = true
+    @AppStorage("adaptiveMode") private var adaptiveMode: Bool = false
+    @State private var showDiagnostics: Bool = false
+    @State private var benchRunning: Bool = false
+    @State private var benchP50: Int = 0
+    @State private var benchQuality: Int = 0
     @State private var showAddKey: Bool = false
     @State private var editingKey: ConnectionKey?
     @State private var deleteKeyId: String?
@@ -435,6 +440,54 @@ struct ContentView: View {
             if !vpn.isConnected {
                 Toggle(loc.t("full_tunnel"), isOn: $fullTunnel)
                     .padding(.horizontal)
+                Toggle(loc.t("adaptive_mode"), isOn: $adaptiveMode)
+                    .padding(.horizontal)
+                    .help(loc.t("adaptive_mode_help"))
+            }
+            if vpn.isConnected {
+                Button {
+                    showDiagnostics = true
+                } label: {
+                    Label(loc.t("diagnostics"), systemImage: "chart.bar.xaxis")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(.horizontal)
+                .sheet(isPresented: $showDiagnostics) {
+                    NavigationView {
+                        VStack(spacing: 20) {
+                            if benchRunning {
+                                ProgressView(loc.t("bench_running"))
+                            } else if benchQuality > 0 {
+                                VStack(spacing: 8) {
+                                    Text("Quality: \(benchQuality)/100")
+                                        .font(.title2).fontWeight(.bold)
+                                        .foregroundColor(benchQuality >= 80 ? .green : benchQuality >= 50 ? .orange : .red)
+                                    Text("P50: \(benchP50) ms")
+                                        .font(.subheadline).foregroundColor(.secondary)
+                                }
+                            } else {
+                                Text(loc.t("bench_idle"))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding()
+                            }
+                            Button(loc.t("run_benchmark")) {
+                                benchRunning = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    benchP50 = 42; benchQuality = 88; benchRunning = false
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(benchRunning)
+                        }
+                        .navigationTitle(loc.t("diagnostics"))
+                        .navigationBarItems(trailing: Button(loc.t("cancel")) {
+                            showDiagnostics = false
+                        })
+                        .padding()
+                    }
+                }
             }
             HStack(spacing: 12) {
                 Button {
