@@ -622,7 +622,10 @@ async fn main() {
             base64::engine::general_purpose::STANDARD
                 .decode(s.trim())
                 .unwrap_or_else(|e| {
-                    error!("--mtls-cert is neither 104-byte binary nor valid base64: {}", e);
+                    error!(
+                        "--mtls-cert is neither 104-byte binary nor valid base64: {}",
+                        e
+                    );
                     std::process::exit(1);
                 })
         }

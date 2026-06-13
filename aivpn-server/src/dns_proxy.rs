@@ -82,7 +82,10 @@ pub async fn run(config: DnsProxyConfig, bind_ip: IpAddr, tun_iface: String) {
     {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            warn!("DNS proxy: HTTP client build failed: {} — proxy disabled", e);
+            warn!(
+                "DNS proxy: HTTP client build failed: {} — proxy disabled",
+                e
+            );
             return;
         }
     };
@@ -103,9 +106,7 @@ pub async fn run(config: DnsProxyConfig, bind_ip: IpAddr, tun_iface: String) {
         // Per-source-IP rate limit: cap at MAX_DNS_RPS queries/second.
         let from_ip = peer.ip();
         {
-            let mut entry = rate_limits
-                .entry(from_ip)
-                .or_insert((0u32, Instant::now()));
+            let mut entry = rate_limits.entry(from_ip).or_insert((0u32, Instant::now()));
             let (count, since) = entry.value_mut();
             if since.elapsed().as_secs() >= 1 {
                 *count = 0;
@@ -168,10 +169,7 @@ async fn doh_post(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<V
         return Err(format!("DoH HTTP {}", resp.status()));
     }
 
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("DoH body: {}", e))?;
+    let body = resp.bytes().await.map_err(|e| format!("DoH body: {}", e))?;
     if body.len() > MAX_DOH_RESPONSE {
         return Err(format!(
             "DoH response too large: {} bytes (max {})",
@@ -190,7 +188,10 @@ fn install_block_rule(tun_iface: &str) {
     );
     match std::process::Command::new("nft").arg(&rule).status() {
         Ok(s) if s.success() => {
-            info!("DNS proxy: plain-DNS block rule installed (iface={})", tun_iface)
+            info!(
+                "DNS proxy: plain-DNS block rule installed (iface={})",
+                tun_iface
+            )
         }
         Ok(s) => warn!("DNS proxy: nft rule exited {}, DNS leaks possible", s),
         Err(e) => warn!("DNS proxy: nft unavailable ({}), DNS leaks possible", e),

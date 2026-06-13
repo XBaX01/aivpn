@@ -123,7 +123,10 @@ pub fn verify_cert(cert: &SimpleCert, config: &MtlsConfig) -> bool {
     // Check expiry
     let now_secs = current_timestamp_ms() / 1000;
     if cert.expiry_ts < now_secs {
-        debug!("mtls: cert expired {} seconds ago", now_secs - cert.expiry_ts);
+        debug!(
+            "mtls: cert expired {} seconds ago",
+            now_secs - cert.expiry_ts
+        );
         return false;
     }
 
@@ -142,7 +145,10 @@ pub fn verify_cert(cert: &SimpleCert, config: &MtlsConfig) -> bool {
     let msg = SimpleCert::signed_message(&cert.client_pub_key, cert.expiry_ts);
     match vk.verify(&msg, &sig) {
         Ok(()) => {
-            debug!("mtls: cert valid (expires in {}s)", cert.expiry_ts.saturating_sub(now_secs));
+            debug!(
+                "mtls: cert valid (expires in {}s)",
+                cert.expiry_ts.saturating_sub(now_secs)
+            );
             true
         }
         Err(e) => {
@@ -170,7 +176,11 @@ pub fn check_client(cert_bytes: Option<&[u8]>, config: &MtlsConfig) -> bool {
         Some(bytes) => match SimpleCert::from_bytes(bytes) {
             Some(cert) => verify_cert(&cert, config),
             None => {
-                debug!("mtls: malformed cert ({} bytes, expected {})", bytes.len(), CERT_SIZE);
+                debug!(
+                    "mtls: malformed cert ({} bytes, expected {})",
+                    bytes.len(),
+                    CERT_SIZE
+                );
                 false
             }
         },
@@ -199,7 +209,10 @@ mod tests {
     use super::*;
 
     fn no_ca_config(required: bool) -> MtlsConfig {
-        MtlsConfig { ca_public_key_hex: None, required }
+        MtlsConfig {
+            ca_public_key_hex: None,
+            required,
+        }
     }
 
     #[test]
@@ -223,7 +236,10 @@ mod tests {
         assert_eq!(bytes.len(), CERT_SIZE);
         let reparsed = SimpleCert::from_bytes(&bytes).unwrap();
         let pub_hex = hex::encode(SigningKey::from_bytes(&ca_key).verifying_key().to_bytes());
-        let cfg = MtlsConfig { ca_public_key_hex: Some(pub_hex), required: true };
+        let cfg = MtlsConfig {
+            ca_public_key_hex: Some(pub_hex),
+            required: true,
+        };
         assert!(verify_cert(&reparsed, &cfg));
         assert!(check_client(Some(&bytes), &cfg));
     }
@@ -234,7 +250,10 @@ mod tests {
         let ca_key = [99u8; 32];
         let cert = issue_cert([1u8; 32], 1_000_000, &ca_key); // far past
         let pub_hex = hex::encode(SigningKey::from_bytes(&ca_key).verifying_key().to_bytes());
-        let cfg = MtlsConfig { ca_public_key_hex: Some(pub_hex), required: true };
+        let cfg = MtlsConfig {
+            ca_public_key_hex: Some(pub_hex),
+            required: true,
+        };
         assert!(!verify_cert(&cert, &cfg));
     }
 }

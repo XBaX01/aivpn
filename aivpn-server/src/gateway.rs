@@ -2434,7 +2434,10 @@ impl Gateway {
                     if ok {
                         debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
                     } else {
-                        warn!("mtls: client {} cert rejected — Data will be dropped", hash_addr(&client_addr));
+                        warn!(
+                            "mtls: client {} cert rejected — Data will be dropped",
+                            hash_addr(&client_addr)
+                        );
                         // Notify client so it can re-provision rather than inferring failure from Data drops.
                         let _ = self
                             .send_control_message(
@@ -2447,7 +2450,10 @@ impl Gateway {
             }
             ControlPayload::CertRejected {} => {
                 // Server-to-client only; the server never receives this from clients.
-                debug!("Unexpected CertRejected from client {}", hash_addr(&client_addr));
+                debug!(
+                    "Unexpected CertRejected from client {}",
+                    hash_addr(&client_addr)
+                );
             }
         }
 

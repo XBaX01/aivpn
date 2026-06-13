@@ -8,14 +8,14 @@ use aivpn_common::network_config::{
 };
 use aivpn_server::audit_log::AuditLogger;
 use aivpn_server::backup::{export_server, import_server, ExportOptions};
-use aivpn_server::gateway::GatewayConfig;
-use aivpn_server::neural::NeuralConfig;
-use aivpn_server::pool_sync::{PeerSyncer, PoolSyncConfig};
-use aivpn_server::mtls::MtlsConfig;
-use aivpn_server::site_sync::SiteToSiteConfig;
 #[cfg(feature = "dns")]
 use aivpn_server::dns_proxy::DnsProxyConfig;
+use aivpn_server::gateway::GatewayConfig;
+use aivpn_server::mtls::MtlsConfig;
+use aivpn_server::neural::NeuralConfig;
+use aivpn_server::pool_sync::{PeerSyncer, PoolSyncConfig};
 use aivpn_server::qos::{dscp_by_name, parse_bandwidth, ClientQos, QosEnforcer};
+use aivpn_server::site_sync::SiteToSiteConfig;
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
 use serde::{Deserialize, Deserializer};
@@ -315,7 +315,8 @@ async fn main() {
     let vpn_gateway_ip = std::net::IpAddr::V4(network_config.server_vpn_ip);
     #[cfg(feature = "dns")]
     let tun_iface_for_dns = tun_name.clone();
-    let s2s_config: Option<SiteToSiteConfig> = file_config.as_ref().and_then(|c| c.site_to_site.clone());
+    let s2s_config: Option<SiteToSiteConfig> =
+        file_config.as_ref().and_then(|c| c.site_to_site.clone());
     #[cfg(feature = "dns")]
     let dns_config: Option<DnsProxyConfig> = file_config.as_ref().and_then(|c| c.dns.clone());
 
@@ -345,7 +346,8 @@ async fn main() {
         qos_enforcer,
         chain_forwarder: None,
         mtls: file_config.as_ref().and_then(|c| c.mtls.clone()),
-        exit_node_enabled: file_config.as_ref()
+        exit_node_enabled: file_config
+            .as_ref()
             .and_then(|c| c.pool.as_ref())
             .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
     };
@@ -416,7 +418,9 @@ async fn main() {
             if let Some(ref pool_cfg) = pool_sync_config {
                 if let Some(ref exit_node) = pool_cfg.exit_node {
                     use base64::Engine as _;
-                    let sync_key_opt: Option<[u8; 32]> = pool_cfg.sync_key.as_deref()
+                    let sync_key_opt: Option<[u8; 32]> = pool_cfg
+                        .sync_key
+                        .as_deref()
                         .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok())
                         .and_then(|b| b.try_into().ok())
                         .filter(|k: &[u8; 32]| k != &[0u8; 32]);
@@ -433,7 +437,9 @@ async fn main() {
                                 exit_node,
                                 sync_key,
                                 server.catalog_mdh(),
-                            ).await {
+                            )
+                            .await
+                            {
                                 server.set_chain_forwarder(cf);
                                 info!("Multi-hop: chain forwarding to exit node {}", exit_node);
                             }
@@ -444,7 +450,11 @@ async fn main() {
 
             // Start site-to-site route sync — pass session_manager so peer sessions are registered.
             if let Some(ref s2s_cfg) = s2s_config {
-                aivpn_server::site_sync::start(s2s_cfg, server.catalog_mdh(), server.session_manager());
+                aivpn_server::site_sync::start(
+                    s2s_cfg,
+                    server.catalog_mdh(),
+                    server.session_manager(),
+                );
                 info!("Site-to-site active ({} peers)", s2s_cfg.peers.len());
             }
 

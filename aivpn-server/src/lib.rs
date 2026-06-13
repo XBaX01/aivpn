@@ -41,11 +41,11 @@ pub mod qos;
 pub mod tc_loader;
 
 // 0.9.0 modules
+pub mod chain_forwarder;
 #[cfg(feature = "dns")]
 pub mod dns_proxy;
-pub mod site_sync;
-pub mod chain_forwarder;
 pub mod mtls;
+pub mod site_sync;
 
 pub use client_db::ClientDatabase;
 pub use gateway::{Gateway, GatewayConfig};

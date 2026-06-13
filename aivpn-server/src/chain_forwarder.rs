@@ -86,7 +86,10 @@ impl ChainForwarder {
     }
 
     fn build_packet(&self, ip_payload: Vec<u8>) -> Result<Vec<u8>> {
-        let encoded = ControlPayload::ChainForward { payload: ip_payload }.encode()?;
+        let encoded = ControlPayload::ChainForward {
+            payload: ip_payload,
+        }
+        .encode()?;
         let mut inner = InnerHeader {
             inner_type: InnerType::Control,
             seq_num: 0,

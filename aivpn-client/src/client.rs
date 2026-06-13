@@ -322,7 +322,9 @@ impl AivpnClient {
 
         if let Some(cert) = self.config.mtls_cert.clone() {
             match self
-                .send_control(&ControlPayload::ClientCert { cert_bytes: cert.clone() })
+                .send_control(&ControlPayload::ClientCert {
+                    cert_bytes: cert.clone(),
+                })
                 .await
             {
                 Ok(()) => debug!("mTLS: ClientCert sent ({} bytes)", cert.len()),

@@ -226,10 +226,15 @@ pub fn start(config: &SiteToSiteConfig, mdh: Vec<u8>, session_manager: Arc<Sessi
             let sentinel: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
             session_manager.create_site_peer_session(&raw, sentinel, &peer_cfg.name);
         } else {
-            warn!("site_sync: peer '{}' has missing or zero sync_key — session not registered", peer_cfg.name);
+            warn!(
+                "site_sync: peer '{}' has missing or zero sync_key — session not registered",
+                peer_cfg.name
+            );
         }
 
-        if let Some(peer) = SitePeer::new(peer_cfg.clone(), config.local_subnets.clone(), mdh.clone()) {
+        if let Some(peer) =
+            SitePeer::new(peer_cfg.clone(), config.local_subnets.clone(), mdh.clone())
+        {
             peer.start();
         }
     }
@@ -265,7 +270,10 @@ pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
     let from_socket: std::net::SocketAddr = match from_addr.parse() {
         Ok(a) => a,
         Err(_) => {
-            warn!("site_sync: unparseable sender address {} — dropping", from_addr);
+            warn!(
+                "site_sync: unparseable sender address {} — dropping",
+                from_addr
+            );
             return;
         }
     };
@@ -276,7 +284,10 @@ pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
     }) {
         Some(p) => p,
         None => {
-            warn!("site_sync: RouteSync from unconfigured peer {} — dropping", from_addr);
+            warn!(
+                "site_sync: RouteSync from unconfigured peer {} — dropping",
+                from_addr
+            );
             return;
         }
     };
@@ -294,7 +305,10 @@ pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
     let subnets: Vec<String> = match serde_json::from_slice(subnets_json) {
         Ok(v) => v,
         Err(e) => {
-            warn!("site_sync: invalid RouteSync payload from {}: {}", peer_cfg.name, e);
+            warn!(
+                "site_sync: invalid RouteSync payload from {}: {}",
+                peer_cfg.name, e
+            );
             return;
         }
     };
@@ -326,7 +340,10 @@ pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
             );
             continue;
         }
-        info!("site_sync: installing route {} (peer: {})", subnet_str, peer_cfg.name);
+        info!(
+            "site_sync: installing route {} (peer: {})",
+            subnet_str, peer_cfg.name
+        );
         install_route(subnet_str, from_addr);
     }
 }
