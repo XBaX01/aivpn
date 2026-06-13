@@ -2,14 +2,19 @@
 //!
 //! Pool nodes share the same `server.key`.  Each node runs both a listener
 //! (accepts inbound pushes) and outbound sync tasks (pushes to peers).
-//! Protocol: length-prefixed JSON frames over TCP, authenticated with
-//! BLAKE3-keyed hash of the shared `sync_key`.
+//! Protocol: length-prefixed frames over TCP.
+//! Auth: BLAKE3 nonce challenge-response (32-byte random nonce, prevents replay).
+//! Payload: ChaCha20-Poly1305 encrypted with a per-session key derived from
+//!   blake3::derive_key("aivpn-sync-enc-v1", sync_key || nonce).
 
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
+
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
 use crate::client_db::ClientDatabase;
 use aivpn_common::error::{Error, Result};
@@ -168,7 +173,8 @@ impl PeerSyncer {
             .map_err(|e| Error::Session(format!("serialize clients: {}", e)))?;
         let msg = serde_json::to_vec(&SyncMsg::FullSync { clients_json })
             .map_err(|e| Error::Session(format!("serialize msg: {}", e)))?;
-        write_frame(&mut w, &msg).await?;
+        let encrypted = self.encrypt_payload(&nonce, &msg)?;
+        write_frame(&mut w, &encrypted).await?;
         let _ = read_frame(&mut r).await?;
         Ok(n)
     }
@@ -188,7 +194,8 @@ impl PeerSyncer {
         write_frame(&mut w, b"ok").await?;
 
         let data = read_frame(&mut r).await?;
-        let msg: SyncMsg = serde_json::from_slice(&data)
+        let plaintext = self.decrypt_payload(&nonce, &data)?;
+        let msg: SyncMsg = serde_json::from_slice(&plaintext)
             .map_err(|e| Error::Session(format!("sync msg parse: {}", e)))?;
 
         match msg {
@@ -215,6 +222,29 @@ impl PeerSyncer {
         input[..32].copy_from_slice(nonce);
         input[32..].copy_from_slice(b"aivpn-pool-sync-v1");
         *blake3::keyed_hash(&self.sync_key, &input).as_bytes()
+    }
+
+    fn session_cipher(&self, nonce: &[u8; 32]) -> ChaCha20Poly1305 {
+        // Derive a unique encryption key per sync session from sync_key + challenge nonce
+        let mut km = [0u8; 64];
+        km[..32].copy_from_slice(&self.sync_key);
+        km[32..].copy_from_slice(nonce);
+        let enc_key = blake3::derive_key("aivpn-sync-enc-v1", &km);
+        ChaCha20Poly1305::new(Key::from_slice(&enc_key))
+    }
+
+    fn encrypt_payload(&self, nonce: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.session_cipher(nonce)
+            .encrypt(Nonce::from_slice(&[0u8; 12]), plaintext)
+            .map_err(|_| Error::Session("sync payload encrypt failed".into()))
+    }
+
+    fn decrypt_payload(&self, nonce: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.session_cipher(nonce)
+            .decrypt(Nonce::from_slice(&[0u8; 12]), ciphertext)
+            .map_err(|_| {
+                Error::Session("sync payload decrypt failed — wrong key or tampered data".into())
+            })
     }
 
     /// Derive sync TCP address from a VPN peer address.

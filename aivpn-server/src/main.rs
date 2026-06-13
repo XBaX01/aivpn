@@ -1211,6 +1211,7 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
@@ -1241,6 +1242,7 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1273,6 +1275,7 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1342,6 +1345,7 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1441,6 +1445,7 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
