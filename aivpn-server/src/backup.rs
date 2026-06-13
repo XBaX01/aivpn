@@ -179,6 +179,15 @@ pub fn import_server(archive_path: &Path, target_dir: &Path, dry_run: bool) -> R
         if rel.to_str() == Some(MANIFEST_NAME) {
             continue;
         }
+        // Tar-slip guard: reject absolute paths and any path with ".." components
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            warn!("import: skipping dangerous archive path {:?}", rel);
+            continue;
+        }
         let dest = target_dir.join(&rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Session(format!("mkdir: {}", e)))?;

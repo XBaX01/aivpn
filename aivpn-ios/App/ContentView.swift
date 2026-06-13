@@ -479,8 +479,14 @@ struct ContentView: View {
                                 DispatchQueue.global(qos: .utility).async {
                                     runBenchPosix(serverAddr: addr) { p50, quality in
                                         DispatchQueue.main.async {
-                                            benchP50 = p50
-                                            benchQuality = quality
+                                            if p50 == -1 {
+                                                // IPv6 not yet supported
+                                                benchP50 = 0
+                                                benchQuality = 0
+                                            } else {
+                                                benchP50 = p50
+                                                benchQuality = quality
+                                            }
                                             benchRunning = false
                                         }
                                     }
@@ -569,6 +575,14 @@ struct ContentView: View {
 /// Sends UDP probes to `serverAddr` (host:port) for 5 seconds and calls
 /// completion with (p50ms, qualityScore 0-100) on the calling thread.
 func runBenchPosix(serverAddr: String, completion: (Int, Int) -> Void) {
+    // Detect IPv6 literal addresses (e.g. [::1]:443)
+    let isIPv6Bracket = serverAddr.hasPrefix("[")
+    if isIPv6Bracket {
+        // IPv6 bench not yet supported — return sentinel so caller can show a message
+        completion(-1, 0)
+        return
+    }
+
     let colonIdx = serverAddr.lastIndex(of: ":")
     guard let idx = colonIdx else { completion(0, 0); return }
     let host = String(serverAddr[serverAddr.startIndex..<idx])

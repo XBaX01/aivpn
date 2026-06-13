@@ -122,6 +122,7 @@ pub fn apply_dscp_ipv4(pkt: &mut [u8], dscp: u8) -> bool {
     if pkt.len() < 20 {
         return false;
     }
+    let dscp = dscp & 0x3F;
     let ecn = pkt[1] & 0x03;
     pkt[1] = (dscp << 2) | ecn;
     pkt[10] = 0;

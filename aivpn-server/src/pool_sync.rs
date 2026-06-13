@@ -70,6 +70,10 @@ impl PeerSyncer {
 
     /// Spawn listener + outbound tasks.  Returns immediately.
     pub fn start(self: Arc<Self>, sync_port: u16) {
+        if self.sync_key == [0u8; 32] {
+            warn!("pool_sync: sync_key not configured — pool sync disabled for security");
+            return;
+        }
         {
             let me = self.clone();
             tokio::spawn(async move { me.run_listener(sync_port).await });
@@ -145,7 +149,14 @@ impl PeerSyncer {
 
         let (mut r, mut w) = stream.into_split();
 
-        write_frame(&mut w, &self.auth_token()).await?;
+        // Read server challenge nonce
+        let nonce_bytes = read_frame(&mut r).await?;
+        if nonce_bytes.len() != 32 {
+            return Err(Error::Session("peer sync: bad nonce length".into()));
+        }
+        let nonce: [u8; 32] = nonce_bytes.try_into().unwrap();
+        // Respond with nonce-keyed BLAKE3 MAC
+        write_frame(&mut w, &self.nonce_auth_token(&nonce)).await?;
         let ack = read_frame(&mut r).await?;
         if ack != b"ok" {
             return Err(Error::Session("peer sync auth rejected".into()));
@@ -165,8 +176,12 @@ impl PeerSyncer {
     async fn handle_inbound(&self, stream: TcpStream) -> Result<()> {
         let (mut r, mut w) = stream.into_split();
 
+        // Send challenge nonce — prevents replay of captured tokens
+        let nonce: [u8; 32] = rand::random();
+        write_frame(&mut w, &nonce).await?;
+
         let tok = read_frame(&mut r).await?;
-        if tok != self.auth_token() {
+        if tok.as_slice() != self.nonce_auth_token(&nonce) {
             let _ = write_frame(&mut w, b"auth_fail").await;
             return Err(Error::Session("peer sync: bad auth".into()));
         }
@@ -195,10 +210,11 @@ impl PeerSyncer {
         Ok(())
     }
 
-    fn auth_token(&self) -> Vec<u8> {
-        blake3::keyed_hash(&self.sync_key, b"aivpn-pool-sync-v1")
-            .as_bytes()
-            .to_vec()
+    fn nonce_auth_token(&self, nonce: &[u8; 32]) -> [u8; 32] {
+        let mut input = [0u8; 50];
+        input[..32].copy_from_slice(nonce);
+        input[32..].copy_from_slice(b"aivpn-pool-sync-v1");
+        *blake3::keyed_hash(&self.sync_key, &input).as_bytes()
     }
 
     /// Derive sync TCP address from a VPN peer address.
