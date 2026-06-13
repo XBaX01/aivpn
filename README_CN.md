@@ -644,6 +644,69 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 对于Entware路由器，通常的流程是：构建或下载musl工件，将其复制到`/opt/bin`，`chmod +x`，然后直接从路由器shell运行。
 
+## v0.8.0 新功能
+
+### 多服务器池同步（内置于协议）
+
+服务器节点自动共享客户端数据库。同步作为 `PoolSync` 控制消息内置于 VPN 协议中，与客户端流量无法区分。无需额外 TCP 端口或防火墙规则。
+
+`server.json`:
+```json
+{
+  "pool": {
+    "peers": ["node2.example.com:443", "node3.example.com:443"],
+    "sync_key": "<base64编码的32字节密钥>"
+  }
+}
+```
+生成密钥：`openssl rand -base64 32`
+
+### 备份 / 迁移
+
+```bash
+# 导出（客户端数据库、掩码配置、服务器配置）
+aivpn-server --export /tmp/aivpn-backup.tar.gz
+
+# 预览并恢复
+aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
+aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+```
+
+### 客户端级 QoS
+
+```bash
+aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+```
+
+有 eBPF TC 内核支持时优先使用，否则自动回退到用户态令牌桶。
+
+### 基准测试与诊断
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+```
+
+可从命令行及所有 GUI 客户端（Windows、macOS、iOS、Android）的诊断面板使用。
+
+### 自适应模式
+
+基于实时丢包测量自动调整 MTU 和 keepalive：
+
+```bash
+aivpn-client -k "aivpn://..." --adaptive
+```
+
+### OpenWRT / LuCI
+
+原生 OpenWRT 软件包，含 procd init 脚本、UCI 配置及 LuCI Web 界面。参见 `aivpn-openwrt/docs/openwrt-setup.md`。
+
+### 管理员审计日志
+
+所有管理操作记录至 `/var/log/aivpn/audit.log`（JSONL，可通过 `--audit-log` 配置路径），包含操作者、动作、目标、结果及 ISO-8601 时间戳。
+
+---
+
 ## 项目结构
 
 ```

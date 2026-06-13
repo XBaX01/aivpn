@@ -627,6 +627,69 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 Для Entware-роутеров обычный поток такой: собрать или скачать musl-артефакт, скопировать его в `/opt/bin`, выдать `chmod +x` и запускать прямо из shell роутера.
 
+## Что нового в v0.8.0
+
+### Пул-синхронизация между серверами (встроена в протокол)
+
+Серверы автоматически синхронизируют базу клиентов. Синхронизация встроена в основной VPN-протокол как управляющее сообщение `PoolSync` — неотличима от клиентского трафика. Отдельный TCP-порт и дополнительные правила брандмауэра не нужны.
+
+`server.json`:
+```json
+{
+  "pool": {
+    "peers": ["node2.example.com:443", "node3.example.com:443"],
+    "sync_key": "<base64-ключ 32 байта>"
+  }
+}
+```
+Генерация ключа: `openssl rand -base64 32`
+
+### Резервное копирование / Миграция
+
+```bash
+# Экспорт (БД клиентов, маски, конфиг сервера)
+aivpn-server --export /tmp/aivpn-backup.tar.gz
+
+# Предпросмотр и восстановление
+aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
+aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+```
+
+### QoS на уровне клиента
+
+```bash
+aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+```
+
+Применяется через eBPF TC при наличии ядра, иначе — программный токен-баккет.
+
+### Бенчмарк и диагностика
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+```
+
+Доступен из CLI и в панели диагностики всех GUI-клиентов (Windows, macOS, iOS, Android).
+
+### Адаптивный режим
+
+Автоматическая настройка MTU и keepalive на основе измерения потерь пакетов в реальном времени:
+
+```bash
+aivpn-client -k "aivpn://..." --adaptive
+```
+
+### OpenWRT / LuCI
+
+Нативный пакет для OpenWRT: procd init-скрипт, UCI-конфигурация и веб-интерфейс LuCI. Смотри `aivpn-openwrt/docs/openwrt-setup.md`.
+
+### Журнал аудита администратора
+
+Все операции управления записываются в `/var/log/aivpn/audit.log` (JSONL, путь задаётся через `--audit-log`) с полями: актор, действие, объект, результат, ISO-8601 метка времени.
+
+---
+
 ## Структура проекта
 
 ```

@@ -613,6 +613,69 @@ These artifacts are intended for ARM Linux servers/SBCs and Entware-capable MIPS
 
 For Entware routers, the usual flow is: build or download the musl artifact, copy it into `/opt/bin`, `chmod +x`, and run it directly from the router shell.
 
+## What's New in v0.8.0
+
+### Multi-server Pool Sync (in-protocol)
+
+Run AIVPN as a pool of nodes that automatically share their client databases. Sync is carried **inside the existing VPN protocol** as a `PoolSync` control message — indistinguishable from regular client traffic. No extra TCP port, no extra firewall rule.
+
+`server.json`:
+```json
+{
+  "pool": {
+    "peers": ["node2.example.com:443", "node3.example.com:443"],
+    "sync_key": "<base64-encoded 32-byte key>"
+  }
+}
+```
+Generate a key: `openssl rand -base64 32`
+
+### Backup / Migration
+
+```bash
+# Export (clients DB, masks, server config)
+aivpn-server --export /tmp/aivpn-backup.tar.gz
+
+# Dry-run preview, then restore
+aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
+aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+```
+
+### Per-client QoS
+
+```bash
+aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+```
+
+Enforced via eBPF TC when available, automatic userspace token-bucket fallback otherwise.
+
+### Benchmarking & Diagnostics
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+```
+
+Available from CLI and from the diagnostics panel in all GUI clients (Windows, macOS, iOS, Android).
+
+### Adaptive Mode
+
+Automatic MTU and keepalive tuning based on live per-connection packet-loss measurement:
+
+```bash
+aivpn-client -k "aivpn://..." --adaptive
+```
+
+### OpenWRT / LuCI
+
+Native OpenWRT package with procd init script, UCI config, and a LuCI web UI. See `aivpn-openwrt/docs/openwrt-setup.md`.
+
+### Admin Audit Log
+
+Every management operation logged to `/var/log/aivpn/audit.log` (JSONL, configurable via `--audit-log`) with actor, action, target, result, and ISO-8601 timestamp.
+
+---
+
 ## Project Structure
 
 ```
