@@ -17,7 +17,10 @@
 //! drift, making time-based replay attacks impractical.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use rand::Rng;
@@ -61,6 +64,12 @@ pub struct PeerSyncer {
     session_keys: SessionKeys,
     mdh: Vec<u8>,
     events: EventBus,
+    /// Strictly-monotonic per-node send counter.  Initialised to the current
+    /// 5-second time bucket so the value starts inside the receiver's tag window,
+    /// then incremented atomically for every outbound packet.  This guarantees a
+    /// unique (key, nonce) pair per message and prevents nonce reuse under
+    /// ChaCha20-Poly1305.
+    send_counter: AtomicU64,
 }
 
 impl PeerSyncer {
@@ -89,6 +98,10 @@ impl PeerSyncer {
             prng_seed: blake3::derive_key("aivpn-pool-prng-v1", &sync_key),
         };
 
+        // Seed the counter at the current time bucket so it starts inside the
+        // receiver's expected-tag window; each send increments it atomically.
+        let send_counter = AtomicU64::new(crypto::current_timestamp_ms() / 5_000);
+
         Some(Arc::new(Self {
             db,
             peers: config.peers.clone(),
@@ -96,6 +109,7 @@ impl PeerSyncer {
             session_keys,
             mdh,
             events,
+            send_counter,
         }))
     }
 
@@ -182,8 +196,11 @@ impl PeerSyncer {
         let mut inner_payload = inner_header.encode().to_vec();
         inner_payload.extend_from_slice(&encoded);
 
-        // Counter = 5-second time bucket — receiver derives the same value.
-        let counter = crypto::current_timestamp_ms() / 5_000;
+        // Atomically increment the per-node send counter.  Initialised near
+        // the current 5-second time bucket so the receiver's tag window covers
+        // it; incrementing per-packet guarantees a unique (key, nonce) pair for
+        // every message, preventing ChaCha20-Poly1305 nonce reuse.
+        let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
         let mut nonce = [0u8; NONCE_SIZE];
         nonce[..8].copy_from_slice(&counter.to_le_bytes());
 
