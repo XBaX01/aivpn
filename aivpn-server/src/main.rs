@@ -1306,6 +1306,10 @@ mod tests {
             bw_down: None,
             dscp: None,
             audit_log: "/dev/null".to_string(),
+            gen_ca: false,
+            issue_cert: None,
+            ca_key: None,
+            days: 365,
         }
     }
 
