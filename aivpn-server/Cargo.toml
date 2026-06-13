@@ -62,6 +62,7 @@ default = []
 neural = []
 metrics = ["prometheus"]
 passive-distribution = ["reqwest"]
+dns = ["reqwest"]
 management-api = ["axum", "tower", "hyper", "hyper-util"]
 production-secure = []
 
