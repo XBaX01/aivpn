@@ -203,6 +203,30 @@ class LocalizationManager: ObservableObject {
             "en": "Dismiss",
             "ru": "Скрыть"
         ],
+        "adaptive_mode": [
+            "en": "Adaptive Mode",
+            "ru": "Адаптивный режим"
+        ],
+        "adaptive_mode_help": [
+            "en": "Automatically adjusts MTU and keepalive on unstable connections",
+            "ru": "Автоматически адаптирует MTU и keepalive при нестабильном соединении"
+        ],
+        "diagnostics": [
+            "en": "Diagnostics",
+            "ru": "Диагностика"
+        ],
+        "run_benchmark": [
+            "en": "Run Benchmark",
+            "ru": "Запустить тест"
+        ],
+        "bench_running": [
+            "en": "Running benchmark…",
+            "ru": "Тест запущен…"
+        ],
+        "bench_idle": [
+            "en": "Run a benchmark to check connection quality.",
+            "ru": "Запустите тест для оценки качества соединения."
+        ],
     ]
 
     init() {

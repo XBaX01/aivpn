@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.8.0] - 2026-06-13
+
+### Added / Добавлено
+
+- **Multi-server pool / failover** — `pool` block in `server.json`; nodes share X25519 keypair; TCP sync on `port+1`; `aivpn-server enroll` command for peer setup (`aivpn-server/src/pool_sync.rs`)
+- **OpenWRT package + LuCI plugin** — `aivpn-openwrt/` with procd init, UCI config, WAN hotplug, and `luci-app-aivpn` web UI (Status + Configuration tabs)
+- **Per-client QoS / bandwidth limiting** — eBPF TC egress hook (`ebpf/tc_qos_prog.c`) with token-bucket rate limiting and DSCP marking; userspace fallback when BPF absent; `--set-client-qos` CLI flag (`aivpn-server/src/qos.rs`)
+- **Backup / migration tools** — `--export` and `--import` tar.gz with manifest; covers clients DB, masks, config (`aivpn-server/src/backup.rs`)
+- **eBPF observability** — XDP/TC ring-buffer stats observer; graceful no-op when `/sys/fs/bpf/aivpn_events` absent (`aivpn-server/src/ebpf_observer.rs`)
+- **Structured event logging** — `AivpnEvent` enum + `EventBus` with JSONL stdout sink (`aivpn-common/src/event_log.rs`)
+- **Adaptive mode** — per-connection MTU and keepalive auto-tuning based on a 20-entry packet-loss sliding window; enabled via `--adaptive` CLI flag and toggle in all UI clients (`aivpn-client/src/adaptive.rs`)
+- **Admin audit log** — append-only JSONL at `/var/log/aivpn/audit.log` for all management actions (`aivpn-server/src/audit_log.rs`)
+- **Benchmarking / Diagnostics** — UDP RTT probes with P50/P95/P99 percentiles and 0–100 quality score; available in CLI (`bench` subcommand) and all GUI clients via Diagnostics panel (`aivpn-client/src/bench.rs`)
+- **Client server pool** — failover, round-robin, weighted, and latency-based selection; optional `pool` field in connection key (`aivpn-client/src/server_pool.rs`)
+
+### Changed / Изменено
+
+- Version bump 0.7.0 → 0.8.0 across all crates, macOS/iOS plists, and UI version strings
+- `GatewayConfig` gains `event_bus` and `qos_enforcer` fields (backward-compatible defaults)
+- `ClientConfig` gains optional `qos` field (`#[serde(default)]` — existing `clients.json` unaffected)
+- Server `--audit-log` defaults to `/var/log/aivpn/audit.log`
+
+---
+
+
 ## [0.7.0] - 2026-06-13
 
 ### Added

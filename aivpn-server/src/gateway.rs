@@ -32,14 +32,17 @@ use aivpn_common::protocol::{
 use libc;
 
 use crate::client_db::ClientDatabase;
+use crate::ebpf_observer::EbpfObserver;
 use crate::mask_gen::generate_and_store_mask;
 use crate::mask_store::MaskStore;
 use crate::metrics::MetricsCollector;
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralConfig, NeuralResonanceModule, ResonanceStatus};
+use crate::qos::QosEnforcer;
 use crate::recording::RecordingManager;
 use crate::recording::{RecordingStopOutcome, RecordingStopReason};
 use crate::session::{Session, SessionManager, MAX_SESSIONS};
+use aivpn_common::event_log::EventBus;
 
 struct QueuedPacket {
     packet_data: Vec<u8>,
@@ -74,6 +77,10 @@ pub struct GatewayConfig {
     pub bootstrap_masks: Vec<MaskProfile>,
     /// Server-side NAT TUN MTU. Does not affect client VPN MTU (carried in ServerHello).
     pub tun_mtu: u16,
+    /// Structured event bus — emits JSON-lines events to stdout (and optional webhook).
+    pub event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP).
+    pub qos_enforcer: Arc<QosEnforcer>,
 }
 
 impl Default for GatewayConfig {
@@ -96,6 +103,11 @@ impl Default for GatewayConfig {
             idle_timeout_secs: None,
             bootstrap_masks: Vec::new(),
             tun_mtu: crate::nat::DEFAULT_TUN_MTU,
+            event_bus: EventBus::new(aivpn_common::event_log::EventSinkConfig {
+                stdout: false,
+                webhook_url: None,
+            }),
+            qos_enforcer: Arc::new(QosEnforcer::new()),
         }
     }
 }
@@ -253,6 +265,10 @@ pub struct Gateway {
     bootstrap_descriptors: Vec<BootstrapDescriptor>,
     /// Optional kernel-module accelerator (auto-detected via /dev/aivpn).
     kernel_accel: Option<Arc<KernelAccel>>,
+    /// Structured event bus for JSON-lines output.
+    event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP marking).
+    qos_enforcer: Arc<QosEnforcer>,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -549,6 +565,9 @@ impl Gateway {
             info!("Kernel acceleration: not available — using built-in user-space data path");
         }
 
+        let event_bus = config.event_bus.clone();
+        let qos_enforcer = config.qos_enforcer.clone();
+
         Ok(Self {
             config: config.clone(),
             session_manager,
@@ -566,6 +585,8 @@ impl Gateway {
             mask_store: Some(mask_store),
             bootstrap_descriptors,
             kernel_accel,
+            event_bus,
+            qos_enforcer,
         })
     }
 
@@ -591,6 +612,9 @@ impl Gateway {
             "Per-IP UDP rate limit: {} pps",
             self.config.per_ip_pps_limit
         );
+
+        // Start eBPF observer (no-op when xdp_prog.o is absent)
+        Arc::new(EbpfObserver::new(self.event_bus.clone())).start();
 
         // Create NAT forwarder (requires root — deferred from constructor for testability)
         if self.config.enable_nat {

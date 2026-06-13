@@ -149,6 +149,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "dismiss") => "Dismiss",
         (Lang::Ru, "dismiss") => "Закрыть",
 
+        // Adaptive / diagnostics
+        (Lang::En, "adaptive_mode") => "Adaptive Mode",
+        (Lang::Ru, "adaptive_mode") => "Адаптивный режим",
+
         // Default fallback
         (_, _) => "???",
     }

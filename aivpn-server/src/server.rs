@@ -74,6 +74,57 @@ pub struct ServerArgs {
     /// Exits 0 on pass, 1 on structural errors.
     #[arg(long, value_name = "PATH")]
     pub validate_mask: Option<String>,
+
+    // ── Pool / Enroll ──────────────────────────────────────────────────────────
+    /// Enroll a peer server into the pool.
+    /// Verifies that the peer shares the same server.key fingerprint, then
+    /// pushes the full clients.json and adds the peer to the local pool config.
+    #[arg(long, value_name = "PEER_ADDR")]
+    pub enroll: Option<String>,
+
+    /// Pool configuration JSON file path.
+    /// Contains: {"peers": ["host:port", ...], "sync_port": 444, "sync_key": "hex"}
+    #[arg(long, env = "AIVPN_POOL_CONFIG")]
+    pub pool_config: Option<String>,
+
+    // ── Backup / Restore ───────────────────────────────────────────────────────
+    /// Export server state (clients DB, masks, config) to a tar.gz archive.
+    #[arg(long, value_name = "OUTPUT_PATH")]
+    pub export: Option<String>,
+
+    /// Import server state from a tar.gz archive created by --export.
+    #[arg(long, value_name = "ARCHIVE_PATH")]
+    pub import: Option<String>,
+
+    /// Dry-run mode for --import: print what would change without writing files.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    // ── Per-client QoS ─────────────────────────────────────────────────────────
+    /// Set QoS for a client (by name or ID). Use with --bw-up, --bw-down, --dscp.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub set_client_qos: Option<String>,
+
+    /// Upstream (client→server) bandwidth limit. Example: 10M, 512K, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_up: Option<String>,
+
+    /// Downstream (server→client) bandwidth limit. Example: 50M, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_down: Option<String>,
+
+    /// DSCP traffic class name. Examples: EF, AF41, CS1, BE.
+    #[arg(long, value_name = "CLASS")]
+    pub dscp: Option<String>,
+
+    // ── Audit Log ──────────────────────────────────────────────────────────────
+    /// Path to the append-only admin audit log (JSONL format).
+    #[arg(
+        long,
+        env = "AIVPN_AUDIT_LOG",
+        default_value = "/var/log/aivpn/audit.log"
+    )]
+    pub audit_log: String,
 }
 
 /// AIVPN Server instance

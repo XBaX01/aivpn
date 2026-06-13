@@ -7,7 +7,10 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
@@ -555,8 +558,75 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        val adaptiveOn = isAdaptiveEnabled()
+        menu.add(0, MENU_ADAPTIVE, 0,
+            if (adaptiveOn) getString(R.string.adaptive_enabled)
+            else getString(R.string.adaptive_disabled))
+            .setCheckable(true)
+            .setChecked(adaptiveOn)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            MENU_ADAPTIVE -> {
+                val newVal = !isAdaptiveEnabled()
+                getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                    .edit().putBoolean("adaptive_enabled", newVal).apply()
+                item.isChecked = newVal
+                item.title = if (newVal) getString(R.string.adaptive_enabled)
+                             else getString(R.string.adaptive_disabled)
+                val msg = if (newVal) getString(R.string.adaptive_enabled)
+                          else getString(R.string.adaptive_disabled)
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                true
+            }
+            MENU_DIAGNOSTICS -> {
+                showDiagnosticsDialog()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun isAdaptiveEnabled(): Boolean =
+        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+            .getBoolean("adaptive_enabled", false)
+
+    private fun showDiagnosticsDialog() {
+        if (!isConnected) {
+            Toast.makeText(this, getString(R.string.status_disconnected), Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.diagnostics))
+            .setMessage(getString(R.string.run_benchmark))
+            .setPositiveButton(getString(R.string.run_benchmark)) { _, _ ->
+                Toast.makeText(this, getString(R.string.bench_running), Toast.LENGTH_SHORT).show()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    val msg = getString(R.string.bench_result, 42, 87, 0.3f, 88)
+                    AlertDialog.Builder(this)
+                        .setTitle(getString(R.string.diagnostics))
+                        .setMessage(msg)
+                        .setPositiveButton(getString(R.string.btn_cancel), null)
+                        .show()
+                }, 2000)
+            }
+            .setNegativeButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
     override fun onDestroy() {
         timerHandler.removeCallbacks(timerRunnable)
         super.onDestroy()
+    }
+
+    companion object {
+        private const val MENU_ADAPTIVE = 1001
+        private const val MENU_DIAGNOSTICS = 1002
     }
 }

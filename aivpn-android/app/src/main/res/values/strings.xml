@@ -46,6 +46,16 @@
     <string name="confirm_delete_profile">Delete "%s"?</string>
     <string name="no_profiles">No saved keys. Tap + Add to create one.</string>
 
+    <!-- Adaptive mode / diagnostics -->
+    <string name="adaptive_mode">Adaptive Mode</string>
+    <string name="adaptive_mode_desc">Auto-adjusts MTU and keepalive on unstable connections</string>
+    <string name="adaptive_enabled">Adaptive: ON</string>
+    <string name="adaptive_disabled">Adaptive: OFF</string>
+    <string name="diagnostics">Diagnostics</string>
+    <string name="run_benchmark">Run Benchmark</string>
+    <string name="bench_running">Benchmark running…</string>
+    <string name="bench_result">P50: %1$dms  P95: %2$dms  Loss: %3$.1f%%  Quality: %4$d/100</string>
+
     <!-- Split tunneling -->
     <string name="btn_split_tunnel">Split Tunneling</string>
     <string name="split_tunnel_title">Split Tunneling</string>

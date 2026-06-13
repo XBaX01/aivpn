@@ -1,12 +1,17 @@
 //! AIVPN Server Binary
 
 use aivpn_common::crypto;
+use aivpn_common::event_log::{EventBus, EventSinkConfig};
 use aivpn_common::mask::{IATDistType, MaskProfile, SizeDistType};
 use aivpn_common::network_config::{
     netmask_to_prefix_len, ClientNetworkConfig, VpnNetworkConfig, DEFAULT_VPN_MTU,
 };
+use aivpn_server::audit_log::AuditLogger;
+use aivpn_server::backup::{export_server, import_server, ExportOptions};
 use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
+use aivpn_server::pool_sync::{PeerSyncer, PoolSyncConfig};
+use aivpn_server::qos::{dscp_by_name, parse_bandwidth, ClientQos, QosEnforcer};
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
 use serde::{Deserialize, Deserializer};
@@ -104,6 +109,8 @@ struct ServerFileConfig {
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
     tun_mtu: Option<MtuSetting>,
+    #[serde(default)]
+    pool: Option<PoolSyncConfig>,
 }
 
 #[tokio::main]
@@ -153,6 +160,22 @@ async fn main() {
     }
     if let Some(ref id) = args.show_client {
         handle_show_client(&client_db, id, &args);
+        return;
+    }
+    if let Some(ref peer_addr) = args.enroll.clone() {
+        handle_enroll(&client_db, peer_addr, &args);
+        return;
+    }
+    if let Some(ref output_path) = args.export.clone() {
+        handle_export(&args, output_path);
+        return;
+    }
+    if let Some(ref archive_path) = args.import.clone() {
+        handle_import(archive_path, args.dry_run, &args);
+        return;
+    }
+    if let Some(ref name_or_id) = args.set_client_qos.clone() {
+        handle_set_client_qos(&client_db, name_or_id, &args);
         return;
     }
 
@@ -244,6 +267,48 @@ async fn main() {
         }
     });
 
+    // Build structured event bus (stdout JSONL sink)
+    let event_bus = EventBus::new(EventSinkConfig {
+        stdout: true,
+        webhook_url: None,
+    });
+
+    // Audit logger
+    let audit_logger = AuditLogger::new(std::path::Path::new(&args.audit_log));
+
+    // Pool sync — start listener + outbound tasks if pool is configured
+    let pool_sync_config: Option<PoolSyncConfig> = args
+        .pool_config
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .or_else(|| file_config.as_ref().and_then(|c| c.pool.clone()));
+
+    if let Some(ref pool_cfg) = pool_sync_config {
+        let sync_port = pool_cfg.sync_port.unwrap_or_else(|| {
+            listen_addr
+                .parse::<SocketAddr>()
+                .map(|a| a.port() + 1)
+                .unwrap_or(444)
+        });
+        let syncer = PeerSyncer::new(client_db.clone(), pool_cfg.clone(), event_bus.clone());
+        tokio::spawn(async move {
+            syncer.start(sync_port);
+        });
+        info!("Pool sync started on port {}", sync_port);
+    }
+
+    // Build per-client QoS enforcer, pre-loaded from the client DB
+    let qos_enforcer = {
+        let enforcer = Arc::new(QosEnforcer::new());
+        for client in client_db.list_clients() {
+            if let Some(qos) = client.qos {
+                enforcer.set_client(&client.id, &qos);
+            }
+        }
+        enforcer
+    };
+
     // Create config
     let config = GatewayConfig {
         listen_addr,
@@ -266,7 +331,10 @@ async fn main() {
             Some(MtuSetting::Fixed(v)) => *v,
             Some(MtuSetting::Auto) | None => detect_mtu(),
         },
+        event_bus: event_bus.clone(),
+        qos_enforcer,
     };
+    let _ = audit_logger; // used by management subcommands; suppress unused warning
 
     // Spawn management API (Unix socket, optional)
     #[cfg(all(feature = "management-api", unix))]
@@ -686,6 +754,178 @@ fn resolve_mask_dir(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -
     PathBuf::from(DEFAULT_MASK_DIR)
 }
 
+fn handle_enroll(db: &ClientDatabase, peer_addr: &str, args: &ServerArgs) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let stream = TcpStream::connect_timeout(
+        &peer_addr.parse().unwrap_or_else(|_| {
+            eprintln!("❌ Invalid peer address: {}", peer_addr);
+            std::process::exit(1);
+        }),
+        Duration::from_secs(10),
+    );
+    let mut stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("❌ Cannot connect to peer {}: {}", peer_addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Send enroll probe: our server public key fingerprint
+    let pub_key = load_server_public_key(args);
+    let probe = serde_json::json!({
+        "action": "enroll",
+        "pub_key": pub_key.map(|k| hex::encode(k)).unwrap_or_default(),
+    })
+    .to_string();
+    let len = (probe.len() as u32).to_le_bytes();
+    let _ = stream.write_all(&len);
+    let _ = stream.write_all(probe.as_bytes());
+
+    // Read peer response
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        eprintln!("❌ Peer did not respond to enroll probe");
+        std::process::exit(1);
+    }
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    let mut msg_buf = vec![0u8; msg_len.min(1 << 20)];
+    if stream.read_exact(&mut msg_buf).is_err() {
+        eprintln!("❌ Failed to read peer response");
+        std::process::exit(1);
+    }
+    let resp: serde_json::Value = serde_json::from_slice(&msg_buf).unwrap_or_default();
+
+    if resp.get("status").and_then(|v| v.as_str()) != Some("ok") {
+        eprintln!(
+            "❌ Peer rejected enroll: {}",
+            resp.get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+        );
+        std::process::exit(1);
+    }
+
+    // Push our client database to the peer
+    let clients_json = match db.export_json() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("❌ Failed to export client DB: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let push = serde_json::json!({
+        "action": "push_clients",
+        "clients": serde_json::from_str::<serde_json::Value>(&clients_json).unwrap_or_default(),
+    })
+    .to_string();
+    let len = (push.len() as u32).to_le_bytes();
+    let _ = stream.write_all(&len);
+    let _ = stream.write_all(push.as_bytes());
+
+    println!(
+        "✅ Peer {} enrolled. Clients pushed: {}",
+        peer_addr,
+        db.list_clients().len()
+    );
+    println!("   Add '{}' to your pool config to enable sync.", peer_addr);
+}
+
+fn handle_export(args: &ServerArgs, output_path: &str) {
+    let opts = ExportOptions {
+        include_clients: true,
+        include_masks: true,
+        include_config: true,
+        config_path: Some(PathBuf::from(
+            args.config.as_deref().unwrap_or("/etc/aivpn/server.json"),
+        )),
+        mask_dir: Some(PathBuf::from(
+            args.mask_dir.as_deref().unwrap_or("/var/lib/aivpn/masks"),
+        )),
+        clients_db: Some(PathBuf::from(&args.clients_db)),
+    };
+    match export_server(&opts, std::path::Path::new(output_path)) {
+        Ok(()) => println!("✅ Export complete: {}", output_path),
+        Err(e) => {
+            eprintln!("❌ Export failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_import(archive_path: &str, dry_run: bool, args: &ServerArgs) {
+    let target_dir = args
+        .config
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).parent())
+        .unwrap_or(std::path::Path::new("/etc/aivpn"));
+    match import_server(std::path::Path::new(archive_path), target_dir, dry_run) {
+        Ok(()) => {
+            if dry_run {
+                println!("✅ Dry-run complete. No files written.");
+            } else {
+                println!("✅ Import complete.");
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Import failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_set_client_qos(db: &ClientDatabase, name_or_id: &str, args: &ServerArgs) {
+    let client = db
+        .list_clients()
+        .into_iter()
+        .find(|c| c.id == name_or_id || c.name == name_or_id);
+    let client = match client {
+        Some(c) => c,
+        None => {
+            eprintln!("❌ Client '{}' not found", name_or_id);
+            std::process::exit(1);
+        }
+    };
+
+    let bw_up = args.bw_up.as_deref().and_then(parse_bandwidth);
+    let bw_down = args.bw_down.as_deref().and_then(parse_bandwidth);
+    let dscp = args.dscp.as_deref().and_then(dscp_by_name);
+
+    if bw_up.is_none() && bw_down.is_none() && dscp.is_none() && args.dscp.is_none() {
+        eprintln!("⚠  No QoS parameters specified. Use --bw-up, --bw-down, and/or --dscp.");
+        std::process::exit(1);
+    }
+
+    let qos = ClientQos {
+        bandwidth_limit_up: bw_up,
+        bandwidth_limit_down: bw_down,
+        dscp_class: dscp,
+        priority: None,
+    };
+
+    match db.set_client_qos(&client.id, qos) {
+        Ok(()) => {
+            println!("✅ QoS updated for '{}' ({})", client.name, client.id);
+            if let Some(bw) = args.bw_up.as_deref() {
+                println!("   Upload limit:   {}", bw);
+            }
+            if let Some(bw) = args.bw_down.as_deref() {
+                println!("   Download limit: {}", bw);
+            }
+            if let Some(d) = args.dscp.as_deref() {
+                println!("   DSCP class:     {}", d);
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to set QoS: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn handle_validate_mask(path: &str) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -893,6 +1133,16 @@ mod tests {
             validate_mask: None,
             #[cfg(all(feature = "management-api", unix))]
             management_socket: None,
+            enroll: None,
+            pool_config: None,
+            export: None,
+            import: None,
+            dry_run: false,
+            set_client_qos: None,
+            bw_up: None,
+            bw_down: None,
+            dscp: None,
+            audit_log: "/dev/null".to_string(),
         }
     }
 

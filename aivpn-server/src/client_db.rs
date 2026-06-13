@@ -35,6 +35,9 @@ pub struct ClientConfig {
     pub created_at: DateTime<Utc>,
     /// Traffic and connection statistics
     pub stats: ClientStats,
+    /// Per-client QoS / bandwidth settings (0.8.0+, optional for backward compat)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<crate::qos::ClientQos>,
 }
 
 /// Per-client traffic statistics
@@ -152,6 +155,7 @@ impl ClientDatabase {
             enabled: true,
             created_at: Utc::now(),
             stats: ClientStats::default(),
+            qos: None,
         };
 
         data.clients.push(client.clone());
@@ -317,6 +321,55 @@ impl ClientDatabase {
         data.next_host_offset = new_data.next_host_offset;
 
         Ok(true)
+    }
+
+    /// Merge clients received from a pool peer into the local database.
+    /// Upserts by client ID — adds new clients, updates existing ones if PSK matches.
+    /// Returns the number of clients merged.
+    pub fn merge_from_json(&self, json: &str) -> Result<usize> {
+        let incoming: Vec<ClientConfig> = serde_json::from_str(json)
+            .map_err(|e| Error::Session(format!("merge_from_json parse: {}", e)))?;
+        let mut data = self.data.write();
+        let mut merged = 0usize;
+        for inc in incoming {
+            if let Some(existing) = data.clients.iter_mut().find(|c| c.id == inc.id) {
+                // Only update if PSK matches (same logical client)
+                if existing.psk == inc.psk {
+                    existing.name = inc.name;
+                    existing.enabled = inc.enabled;
+                    existing.qos = inc.qos;
+                    merged += 1;
+                }
+            } else {
+                data.clients.push(inc);
+                merged += 1;
+            }
+        }
+        drop(data);
+        if merged > 0 {
+            self.save()?;
+        }
+        Ok(merged)
+    }
+
+    /// Export the full client list as JSON (for pool sync or backup).
+    pub fn export_json(&self) -> Result<String> {
+        let data = self.data.read();
+        serde_json::to_string(&data.clients)
+            .map_err(|e| Error::Session(format!("export_json: {}", e)))
+    }
+
+    /// Update QoS settings for a specific client.
+    pub fn set_client_qos(&self, client_id: &str, qos: crate::qos::ClientQos) -> Result<()> {
+        let mut data = self.data.write();
+        match data.clients.iter_mut().find(|c| c.id == client_id) {
+            Some(client) => {
+                client.qos = Some(qos);
+                drop(data);
+                self.save()
+            }
+            None => Err(Error::Session(format!("Client '{}' not found", client_id))),
+        }
     }
 
     fn allocate_vpn_ip(&self, data: &mut ClientDbFile) -> Result<Ipv4Addr> {

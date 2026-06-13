@@ -32,6 +32,13 @@ pub mod mask_gen;
 pub mod mask_store;
 pub mod recording;
 
+// 0.8.0 modules
+pub mod audit_log;
+pub mod backup;
+pub mod ebpf_observer;
+pub mod pool_sync;
+pub mod qos;
+
 pub use client_db::ClientDatabase;
 pub use gateway::{Gateway, GatewayConfig};
 pub use nat::NatForwarder;

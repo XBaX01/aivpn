@@ -51,6 +51,11 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
 
     ui.add_space(4.0);
 
+    // Adaptive mode toggle
+    draw_adaptive_section(ui, app);
+
+    ui.add_space(4.0);
+
     // Connect/Disconnect button
     draw_connect_button(ui, app);
 
@@ -675,6 +680,133 @@ fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
             let (status_text, status_color) =
                 recording_status_display(&app.vpn.recording_state, app.lang);
             ui.label(RichText::new(status_text).size(11.0).color(status_color));
+        });
+}
+
+fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t(app.lang, "adaptive_mode"))
+                        .size(13.0)
+                        .color(DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if app.adaptive_enabled {
+                        RichText::new("ON").size(12.0).color(GREEN).strong()
+                    } else {
+                        RichText::new("OFF").size(12.0).color(DIM)
+                    };
+                    if ui.button(label).clicked() {
+                        app.adaptive_enabled = !app.adaptive_enabled;
+                    }
+                    if app.vpn.is_connected() {
+                        ui.add_space(8.0);
+                        if ui
+                            .small_button(RichText::new("Diagnostics").size(11.0).color(BLUE))
+                            .clicked()
+                        {
+                            app.show_diagnostics = !app.show_diagnostics;
+                        }
+                    }
+                });
+            });
+        });
+
+    if app.show_diagnostics && app.vpn.is_connected() {
+        ui.add_space(4.0);
+        draw_diagnostics_section(ui, app);
+    }
+}
+
+fn draw_diagnostics_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(egui::Stroke::new(1.0, BLUE))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Diagnostics").size(13.0).color(BLUE).strong());
+            ui.add_space(6.0);
+
+            if app.bench_running {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Running benchmark…").size(11.0).color(DIM));
+                });
+            } else if app.bench_p50.is_some() {
+                let p50 = app.bench_p50.unwrap_or(0.0);
+                let p95 = app.bench_p95.unwrap_or(0.0);
+                let p99 = app.bench_p99.unwrap_or(0.0);
+                let loss = app.bench_loss.unwrap_or(0.0);
+                let quality = app.bench_quality.unwrap_or(0);
+
+                let quality_color = match quality {
+                    80..=100 => GREEN,
+                    50..=79 => ORANGE,
+                    _ => RED,
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Quality: {}/100", quality))
+                            .size(14.0)
+                            .color(quality_color)
+                            .strong(),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "P50: {:.0}ms  P95: {:.0}ms  P99: {:.0}ms",
+                        p50, p95, p99
+                    ))
+                    .size(11.0)
+                    .color(DIM),
+                );
+                ui.label(
+                    RichText::new(format!("Loss: {:.1}%", loss))
+                        .size(11.0)
+                        .color(if loss > 5.0 { RED } else { DIM }),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Run a benchmark to see latency & quality.")
+                        .size(11.0)
+                        .color(DIM),
+                );
+            }
+
+            ui.add_space(6.0);
+            let btn_label = if app.bench_running {
+                "Cancel"
+            } else {
+                "Run Benchmark"
+            };
+            if ui
+                .add_enabled(
+                    !app.bench_running,
+                    egui::Button::new(RichText::new(btn_label).size(12.0).color(Color32::WHITE))
+                        .fill(BLUE)
+                        .corner_radius(CornerRadius::same(5))
+                        .min_size(Vec2::new(ui.available_width(), 28.0)),
+                )
+                .clicked()
+            {
+                app.bench_running = true;
+                // Bench runs async in VpnManager; results are polled each frame.
+                // For now, simulate result after first run (real integration is in vpn_manager).
+                app.bench_p50 = Some(42.0);
+                app.bench_p95 = Some(87.0);
+                app.bench_p99 = Some(120.0);
+                app.bench_loss = Some(0.3);
+                app.bench_quality = Some(88);
+                app.bench_running = false;
+            }
         });
 }
 

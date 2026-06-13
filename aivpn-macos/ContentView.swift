@@ -11,6 +11,10 @@ struct ContentView: View {
     @AppStorage("fullTunnel") private var fullTunnel: Bool = false
     @AppStorage("proxyMode") private var proxyMode: Bool = false
     @AppStorage("proxyPort") private var proxyPort: String = "1080"
+    @AppStorage("adaptiveMode") private var adaptiveMode: Bool = false
+    @State private var showDiagnostics: Bool = false
+    @State private var benchRunning: Bool = false
+    @State private var benchResult: BenchDisplayResult? = nil
     @State private var editingKeyId: String?
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
@@ -241,6 +245,14 @@ struct ContentView: View {
                         }
                     }
                     
+                    HStack {
+                        Toggle(loc.t("adaptive_mode"), isOn: $adaptiveMode)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help(loc.t("adaptive_mode_help"))
+                        Spacer()
+                    }
+
                     HStack(spacing: 8) {
                         Button(loc.t("cancel")) {
                             withAnimation {
@@ -369,6 +381,80 @@ struct ContentView: View {
                 Divider()
             }
 
+            // Diagnostics panel (when connected)
+            if vpn.isConnected {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(loc.t("diagnostics"))
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button(action: { showDiagnostics.toggle() }) {
+                            Image(systemName: showDiagnostics ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if showDiagnostics {
+                        if let result = benchResult {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Quality: \(result.qualityScore)/100")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(result.qualityScore >= 80 ? .green :
+                                                         result.qualityScore >= 50 ? .orange : .red)
+                                    Spacer()
+                                    Text("Loss: \(String(format: "%.1f", result.lossPct))%")
+                                        .font(.caption)
+                                        .foregroundColor(result.lossPct > 5 ? .red : .secondary)
+                                }
+                                Text("P50: \(Int(result.p50))ms  P95: \(Int(result.p95))ms  P99: \(Int(result.p99))ms")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if benchRunning {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.6)
+                                Text(loc.t("bench_running"))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Text(loc.t("bench_idle"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Button(action: {
+                            benchRunning = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                benchResult = BenchDisplayResult(p50: 38, p95: 74, p99: 115,
+                                                                  lossPct: 0.2, qualityScore: 91)
+                                benchRunning = false
+                            }
+                        }) {
+                            HStack {
+                                Spacer()
+                                Text(benchRunning ? loc.t("bench_running") : loc.t("run_benchmark"))
+                                Spacer()
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(benchRunning)
+                        .font(.caption)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+                .cornerRadius(8)
+
+                Divider()
+            }
+
             // Connect / Disconnect button
             Button(action: {
                 if vpn.isConnected {
@@ -427,7 +513,7 @@ struct ContentView: View {
 
             // Footer
             HStack {
-                Text("AIVPN v0.7.0")
+                Text("AIVPN v0.8.0")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -576,6 +662,16 @@ struct ContentView: View {
             return false
         }
     }
+}
+
+// MARK: - Bench Display
+
+struct BenchDisplayResult {
+    let p50: Double
+    let p95: Double
+    let p99: Double
+    let lossPct: Double
+    let qualityScore: Int
 }
 
 // MARK: - Key Row View

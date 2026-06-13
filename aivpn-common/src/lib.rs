@@ -6,6 +6,7 @@
 pub mod client_wire;
 pub mod crypto;
 pub mod error;
+pub mod event_log;
 pub mod mask;
 pub mod network_config;
 pub mod protocol;
