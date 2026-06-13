@@ -2380,7 +2380,14 @@ impl Gateway {
                 }
             }
             ControlPayload::RouteSync { subnets_json } => {
-                crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
+                if session.lock().is_site_peer {
+                    crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
+                } else {
+                    warn!(
+                        "site_sync: RouteSync from non-peer session {} — dropping",
+                        hash_addr(&client_addr)
+                    );
+                }
             }
             ControlPayload::ChainForward { payload } => {
                 if self.config.exit_node_enabled {

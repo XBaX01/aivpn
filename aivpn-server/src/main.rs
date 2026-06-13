@@ -442,9 +442,9 @@ async fn main() {
                 }
             }
 
-            // Start site-to-site route sync
+            // Start site-to-site route sync — pass session_manager so peer sessions are registered.
             if let Some(ref s2s_cfg) = s2s_config {
-                aivpn_server::site_sync::start(s2s_cfg, server.catalog_mdh());
+                aivpn_server::site_sync::start(s2s_cfg, server.catalog_mdh(), server.session_manager());
                 info!("Site-to-site active ({} peers)", s2s_cfg.peers.len());
             }
 

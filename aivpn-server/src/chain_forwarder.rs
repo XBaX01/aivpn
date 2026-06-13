@@ -29,7 +29,7 @@ use std::sync::{
     Arc,
 };
 
-use rand::Rng;
+use rand::{rngs::OsRng, Rng, RngCore};
 use tokio::net::UdpSocket;
 use tracing::debug;
 
@@ -62,7 +62,8 @@ impl ChainForwarder {
             tag_secret: blake3::derive_key("aivpn-pool-tag-v1", &sync_key),
             prng_seed: blake3::derive_key("aivpn-pool-prng-v1", &sync_key),
         };
-        let send_counter = AtomicU64::new(crypto::current_timestamp_ms() / 5_000);
+        // Counter is used only for resonance tag generation, not as AEAD nonce.
+        let send_counter = AtomicU64::new(0);
         Some(Arc::new(Self {
             exit_addr,
             session_keys,
@@ -95,8 +96,11 @@ impl ChainForwarder {
         inner.extend_from_slice(&encoded);
 
         let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
+        // Use a fresh random nonce for each packet — safe for ChaCha20-Poly1305
+        // at any realistic packet rate (2^-32 collision probability per 2^32 pkts).
+        // The counter is kept only for resonance tag generation below.
         let mut nonce = [0u8; NONCE_SIZE];
-        nonce[..8].copy_from_slice(&counter.to_le_bytes());
+        OsRng.fill_bytes(&mut nonce);
 
         let pad_len: u16 = 16;
         let mut padded = Vec::with_capacity(2 + inner.len() + pad_len as usize);

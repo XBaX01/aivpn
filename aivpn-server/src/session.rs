@@ -125,6 +125,11 @@ pub struct Session {
     /// gateway has `mtls.required = true` it resets this to false at session
     /// creation; a valid `ClientCert` message flips it back to true.
     pub mtls_ok: bool,
+
+    /// True when this session was established via a site-to-site peer sync_key
+    /// (registered by `site_sync::start()`).  Only sessions with this flag set
+    /// are allowed to carry `ControlPayload::RouteSync` messages.
+    pub is_site_peer: bool,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -217,6 +222,7 @@ impl Session {
             pre_ratchet_tags: HashMap::new(),
             pre_ratchet_expire: None,
             mtls_ok: true,
+            is_site_peer: false,
         }
     }
 
@@ -793,6 +799,55 @@ impl SessionManager {
         self.sessions.insert(session_id, session_arc);
         info!(
             "pool_sync: cluster session registered ({} tag slots)",
+            TAG_WINDOW_SIZE * 2 - 1
+        );
+        session_id
+    }
+
+    /// Register a synthetic session for an authenticated site-to-site peer.
+    /// Identical to `create_pool_peer_session` but marks `is_site_peer = true`
+    /// so the gateway will accept `RouteSync` messages from this session.
+    pub fn create_site_peer_session(
+        &self,
+        sync_key: &[u8; 32],
+        peer_addr: std::net::SocketAddr,
+        peer_name: &str,
+    ) -> [u8; 16] {
+        let keys = aivpn_common::crypto::SessionKeys {
+            session_key: blake3::derive_key("aivpn-pool-enc-v1", sync_key),
+            tag_secret: blake3::derive_key("aivpn-pool-tag-v1", sync_key),
+            prng_seed: blake3::derive_key("aivpn-pool-prng-v1", sync_key),
+        };
+
+        // Deterministic session_id per (sync_key, peer_name) pair.
+        let mut id_input = sync_key.to_vec();
+        id_input.extend_from_slice(peer_name.as_bytes());
+        let id_hash = blake3::hash(&id_input);
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&id_hash.as_bytes()[..16]);
+
+        let counter = crypto::current_timestamp_ms() / 5_000;
+
+        let session_arc = {
+            let mut s = Session::new(session_id, peer_addr, keys, [0u8; X25519_PUBLIC_KEY_SIZE]);
+            s.state = SessionState::Active;
+            s.counter = counter;
+            s.is_site_peer = true;
+            s.update_tag_window();
+            Arc::new(Mutex::new(s))
+        };
+
+        {
+            let sess = session_arc.lock();
+            for tag in sess.expected_tags.values() {
+                self.tag_map.insert(*tag, session_id);
+            }
+        }
+
+        self.sessions.insert(session_id, session_arc);
+        info!(
+            "site_sync: peer session registered for '{}' ({} tag slots)",
+            peer_name,
             TAG_WINDOW_SIZE * 2 - 1
         );
         session_id

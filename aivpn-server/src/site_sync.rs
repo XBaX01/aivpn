@@ -34,7 +34,7 @@ use std::sync::{
 use std::time::Duration;
 
 use base64::Engine as _;
-use rand::Rng;
+use rand::{rngs::OsRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
@@ -51,6 +51,8 @@ use aivpn_common::crypto::{
 };
 use aivpn_common::error::{Error, Result};
 use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
+
+use crate::session::SessionManager;
 
 const ROUTE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -102,7 +104,8 @@ impl SitePeer {
             tag_secret: blake3::derive_key("aivpn-pool-tag-v1", &raw),
             prng_seed: blake3::derive_key("aivpn-pool-prng-v1", &raw),
         };
-        let send_counter = AtomicU64::new(crypto::current_timestamp_ms() / 5_000);
+        // Counter for resonance tag only — AEAD nonce is random per-packet.
+        let send_counter = AtomicU64::new(0);
 
         Some(Arc::new(Self {
             cfg,
@@ -177,7 +180,7 @@ impl SitePeer {
 
         let counter = self.send_counter.fetch_add(1, Ordering::Relaxed);
         let mut nonce = [0u8; NONCE_SIZE];
-        nonce[..8].copy_from_slice(&counter.to_le_bytes());
+        OsRng.fill_bytes(&mut nonce);
 
         let pad_len: u16 = 16;
         let mut padded = Vec::with_capacity(2 + inner.len() + pad_len as usize);
@@ -201,11 +204,31 @@ impl SitePeer {
 }
 
 /// Start outbound route advertisement to all configured peers.
-pub fn start(config: &SiteToSiteConfig, mdh: Vec<u8>) {
-    // Store config so handle_route_sync can authenticate inbound messages.
+///
+/// `session_manager` is used to register a synthetic session per peer so that
+/// inbound `RouteSync` packets (encrypted with the peer's `sync_key`) are
+/// authenticated by the normal tag-lookup path and reach `handle_route_sync`
+/// with `session.is_site_peer = true`.
+pub fn start(config: &SiteToSiteConfig, mdh: Vec<u8>, session_manager: Arc<SessionManager>) {
+    // Store config so handle_route_sync can verify subnets and allowlists.
     SITE_CONFIG.get_or_init(|| config.clone());
 
     for peer_cfg in &config.peers {
+        // Register a synthetic session so the gateway can decrypt inbound RouteSync.
+        let raw_key: Option<[u8; 32]> = base64::engine::general_purpose::STANDARD
+            .decode(&peer_cfg.sync_key)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .filter(|k: &[u8; 32]| k != &[0u8; 32]);
+
+        if let Some(raw) = raw_key {
+            // Use a placeholder addr; actual source is matched by tag on receipt.
+            let sentinel: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+            session_manager.create_site_peer_session(&raw, sentinel, &peer_cfg.name);
+        } else {
+            warn!("site_sync: peer '{}' has missing or zero sync_key — session not registered", peer_cfg.name);
+        }
+
         if let Some(peer) = SitePeer::new(peer_cfg.clone(), config.local_subnets.clone(), mdh.clone()) {
             peer.start();
         }
