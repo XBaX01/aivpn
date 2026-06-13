@@ -223,6 +223,7 @@ pub struct AivpnApp {
     bench_loss: Option<f64>,
     bench_quality: Option<u8>,
     bench_running: bool,
+    bench_rx: Option<std::sync::mpsc::Receiver<Option<vpn_manager::BenchResult>>>,
     // Tray
     tray: Option<tray::TrayManager>,
     pub should_quit: bool,
@@ -253,6 +254,7 @@ impl AivpnApp {
             bench_loss: None,
             bench_quality: None,
             bench_running: false,
+            bench_rx: None,
             tray,
             should_quit: false,
             window_visible: true,

@@ -3,6 +3,7 @@
 //! Launches the Rust client binary in the background (no console window),
 //! monitors its process state, reads traffic stats and recording status from file.
 
+use base64::Engine as _;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Instant;
@@ -39,12 +40,24 @@ pub struct RecordingResult {
     pub details: String,
 }
 
+/// Benchmark result parsed from `aivpn-client bench --json` output.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct BenchResult {
+    pub latency_p50_ms: f64,
+    pub latency_p95_ms: f64,
+    pub latency_p99_ms: f64,
+    pub packet_loss_pct: f64,
+    pub quality_score: u8,
+}
+
 pub struct VpnManager {
     state: ConnectionState,
     child: Option<Child>,
     stats: TrafficStats,
     last_poll: Option<Instant>,
-    client_binary: PathBuf,
+    pub client_binary: PathBuf,
+    /// Server address extracted from the connection key at connect time.
+    pub server_addr: Option<String>,
     // Recording
     pub recording_state: RecordingState,
     pub can_record_masks: bool,
@@ -65,6 +78,7 @@ impl VpnManager {
             },
             last_poll: None,
             client_binary: Self::find_client_binary(),
+            server_addr: None,
             recording_state: RecordingState::Idle,
             can_record_masks: false,
             recording_capability_known: false,
@@ -112,6 +126,7 @@ impl VpnManager {
         }
 
         self.state = ConnectionState::Connecting;
+        self.server_addr = extract_server_addr(connection_key);
         // Reset recording on new connection
         self.recording_state = RecordingState::Idle;
         self.can_record_masks = false;
@@ -175,6 +190,27 @@ impl VpnManager {
         self.recording_capability_known = false;
         self.last_recording_result = None;
         self.minimum_recording_ts = 0;
+    }
+
+    /// Run a benchmark against the server using `aivpn-client bench --json`.
+    /// Blocks until the bench completes (call from a background thread).
+    pub fn run_bench_blocking(binary: &PathBuf, server_addr: &str) -> Option<BenchResult> {
+        if server_addr.is_empty() {
+            return None;
+        }
+        let out = Command::new(binary)
+            .args(["bench", "--server", server_addr, "--json"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    }
+
+    /// Return the current server address (set when connect() was called).
+    pub fn server_addr(&self) -> Option<&str> {
+        self.server_addr.as_deref()
     }
 
     /// Poll process status and read traffic stats
@@ -486,6 +522,17 @@ struct RecordingSnapshot {
     #[allow(dead_code)]
     confidence: Option<f32>,
     updated_at_ms: u64,
+}
+
+/// Extract the server address from an `aivpn://` connection key.
+/// Connection key format: `aivpn://` + base64url(JSON) where JSON["s"] = "host:port".
+fn extract_server_addr(key: &str) -> Option<String> {
+    let b64 = key.strip_prefix("aivpn://")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json["s"].as_str().map(|s| s.to_string())
 }
 
 fn current_timestamp_ms() -> u64 {

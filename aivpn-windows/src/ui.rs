@@ -724,6 +724,23 @@ fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
 }
 
 fn draw_diagnostics_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    // Poll bench background thread for results each frame
+    if app.bench_running {
+        if let Some(ref rx) = app.bench_rx {
+            if let Ok(result) = rx.try_recv() {
+                if let Some(r) = result {
+                    app.bench_p50 = Some(r.latency_p50_ms);
+                    app.bench_p95 = Some(r.latency_p95_ms);
+                    app.bench_p99 = Some(r.latency_p99_ms);
+                    app.bench_loss = Some(r.packet_loss_pct);
+                    app.bench_quality = Some(r.quality_score);
+                }
+                app.bench_running = false;
+                app.bench_rx = None;
+            }
+        }
+    }
+
     egui::Frame::new()
         .fill(CARD_BG)
         .corner_radius(CornerRadius::same(8))
@@ -797,15 +814,18 @@ fn draw_diagnostics_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                 )
                 .clicked()
             {
+                let server_addr = app.vpn.server_addr.clone().unwrap_or_default();
+                let binary = app.vpn.client_binary.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                app.bench_rx = Some(rx);
                 app.bench_running = true;
-                // Bench runs async in VpnManager; results are polled each frame.
-                // For now, simulate result after first run (real integration is in vpn_manager).
-                app.bench_p50 = Some(42.0);
-                app.bench_p95 = Some(87.0);
-                app.bench_p99 = Some(120.0);
-                app.bench_loss = Some(0.3);
-                app.bench_quality = Some(88);
-                app.bench_running = false;
+                std::thread::spawn(move || {
+                    let result = crate::vpn_manager::VpnManager::run_bench_blocking(
+                        &binary,
+                        &server_addr,
+                    );
+                    let _ = tx.send(result);
+                });
             }
         });
 }

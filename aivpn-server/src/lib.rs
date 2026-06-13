@@ -38,6 +38,7 @@ pub mod backup;
 pub mod ebpf_observer;
 pub mod pool_sync;
 pub mod qos;
+pub mod tc_loader;
 
 pub use client_db::ClientDatabase;
 pub use gateway::{Gateway, GatewayConfig};

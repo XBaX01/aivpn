@@ -768,6 +768,7 @@ impl Gateway {
                 }
 
                 let client_db = self.client_db.clone();
+                let qos_enforcer = self.qos_enforcer.clone();
                 tokio::spawn(async move {
                     Self::tun_read_loop(
                         tun_reader,
@@ -778,6 +779,7 @@ impl Gateway {
                         server_vpn_ip,
                         recorder,
                         client_db,
+                        qos_enforcer,
                     )
                     .await;
                 });
@@ -1065,6 +1067,7 @@ impl Gateway {
         server_vpn_ip: Ipv4Addr,
         recorder: Option<Arc<RecordingManager>>,
         client_db: Option<Arc<ClientDatabase>>,
+        qos_enforcer: Arc<crate::qos::QosEnforcer>,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -1098,6 +1101,15 @@ impl Gateway {
                             continue;
                         }
                     };
+
+                    // QoS: enforce downstream rate limit before expensive encryption
+                    let qos_cid = { session.lock().client_id.clone() };
+                    if let Some(ref cid) = qos_cid {
+                        if !qos_enforcer.check_downstream(cid, n as u64) {
+                            debug!("QoS: downstream rate limited, dropping packet for {}", cid);
+                            continue;
+                        }
+                    }
 
                     // Build encrypted response packet
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
@@ -2080,6 +2092,15 @@ impl Gateway {
                     hash_addr(&client_addr),
                     payload.len()
                 );
+
+                // QoS: enforce upstream rate limit before forwarding to TUN
+                let upstream_cid = session.lock().client_id.clone();
+                if let Some(ref c) = upstream_cid {
+                    if !self.qos_enforcer.check_upstream(c, payload.len() as u64) {
+                        debug!("QoS: upstream rate limited, dropping packet for {}", c);
+                        return Ok(());
+                    }
+                }
 
                 if let Some(ref tx) = self.tun_write_tx {
                     if tx.send(payload.to_vec()).await.is_err() {
