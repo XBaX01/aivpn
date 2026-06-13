@@ -613,6 +613,105 @@ These artifacts are intended for ARM Linux servers/SBCs and Entware-capable MIPS
 
 For Entware routers, the usual flow is: build or download the musl artifact, copy it into `/opt/bin`, `chmod +x`, and run it directly from the router shell.
 
+## What's New in v0.9.0
+
+### Multi-hop Chain Forwarding
+
+Route client traffic through two AIVPN server nodes without any client changes. The entry node relays encrypted IP payloads to the exit node, which routes to the internet. From the client's perspective nothing changes — it only speaks to the entry node. The internet sees the exit node's IP.
+
+**Topology:**
+```
+[Client] ──(encrypted)──► [Entry Node] ──(ChainForward)──► [Exit Node] ──► Internet
+                           port 443                          port 443
+```
+
+**Entry node** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<shared-base64-32-byte-key>",
+    "exit_node": "exit.example.com:443"
+  }
+}
+```
+
+**Exit node** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<same-shared-key>",
+    "exit_node_enabled": true
+  }
+}
+```
+
+> Both nodes must share the same `sync_key`. Generate one: `openssl rand -base64 32`
+> The exit node must explicitly set `exit_node_enabled: true` — the default is `false` to prevent open relay.
+
+### DNS-over-HTTPS Proxy
+
+Block plain DNS leaks and force all client DNS traffic through an encrypted DoH resolver served from the VPN interface.
+
+```json
+{
+  "dns": {
+    "upstream_doh": "https://cloudflare-dns.com/dns-query",
+    "fallback_doh": "https://dns.google/dns-query",
+    "block_plain_dns": true
+  }
+}
+```
+
+Build with: `cargo build --release --bin aivpn-server --features "dns"`
+
+`block_plain_dns: true` adds an nftables rule that drops UDP/53 to any interface except the VPN TUN, so clients cannot bypass the proxy even if they hard-code DNS servers.
+
+### Site-to-site VPN
+
+Connect two or more AIVPN server nodes so end-hosts on each site reach each other without VPN client software. Peers exchange subnet advertisements using the same crypto infrastructure as pool sync.
+
+```json
+{
+  "site_to_site": {
+    "local_subnets": ["192.168.1.0/24"],
+    "peers": [
+      {
+        "name": "office-b",
+        "endpoint": "office-b.example.com:443",
+        "sync_key": "<base64-32-byte-key>",
+        "remote_subnets": ["192.168.2.0/24"]
+      }
+    ]
+  }
+}
+```
+
+Routes are installed with `ip route add` when the peer advertises its subnets (every 30 s). Only subnets declared in `remote_subnets` are accepted — arbitrary route injection is blocked.
+
+### mTLS-lite Client Certificates
+
+Add an optional second authentication factor: a 104-byte ed25519-signed client certificate on top of the existing X25519 + PSK handshake. Clients without certificates are unaffected when `required: false` (default).
+
+```json
+{
+  "mtls": {
+    "ca_public_key_hex": "aabbccdd...",
+    "required": false
+  }
+}
+```
+
+- `required: false` — PSK-only clients still work; certificates are verified when present
+- `required: true` — clients without a valid cert cannot send data packets
+
+Certificate format: `client_pub_key[32] || expiry_ts_le[8] || ca_signature[64]` (104 bytes total, no new crate dependencies — uses the existing `ed25519-dalek`).
+
+### eBPF XDP Drop Telemetry
+
+The XDP early filter now tracks per-drop-reason counters (`TOO_SHORT`, `TAG_EXPIRED`, `TOTAL`) via a BPF ring buffer. `ebpf_observer.rs` reads them via raw BPF syscalls and emits delta `XdpDrop` events on the `EventBus`. Activates automatically when `/sys/fs/bpf/aivpn/drop_stats` is present (populated when the kernel module loads the XDP program).
+
+---
+
 ## What's New in v0.8.0
 
 ### Multi-server Pool Sync (in-protocol)

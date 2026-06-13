@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.9.0] - 2026-06-13
+
+### Added
+
+- **eBPF XDP drop statistics** — `xdp_prog.c` now maintains a `BPF_MAP_TYPE_ARRAY` map (`drop_stats`, 4 slots: `TOO_SHORT`, `TAG_EXPIRED`, `RESERVED`, `TOTAL`) and a 256 KB `BPF_MAP_TYPE_RINGBUF` (`events`). All XDP_DROP paths call an inline `record_drop(reason)` helper that atomically increments the counter and emits a ring-buffer event. `ebpf_observer.rs` opens the pinned map via raw `BPF_OBJ_GET` / `BPF_MAP_LOOKUP_ELEM` syscalls (no new crate dependency) and emits delta `XdpDrop` events on the `EventBus` (`aivpn-server/src/ebpf_observer.rs`, `aivpn-linux-kernel/src/xdp_prog.c`)
+- **DNS-over-HTTPS proxy** — optional in-server DoH forwarder (`feature = "dns"`); binds UDP :53 on the VPN interface and tunnels queries via RFC 8484 POST to a configurable upstream (default Cloudflare); optional secondary fallback resolver; `block_plain_dns` mode adds an nftables rule dropping UDP/53 to non-VPN interfaces so clients cannot bypass the proxy; config block `"dns"` in `server.json` (`aivpn-server/src/dns_proxy.rs`)
+- **Site-to-site VPN** — two or more AIVPN server nodes can connect their local subnets without any VPN client software; peers advertise routes via `ControlPayload::RouteSync` (0x13) using the same blake3 KDF as pool sync; outbound advertisements are sent every 30 s; incoming `RouteSync` is authenticated against the configured peer list (exact `IP:port` match), each received subnet is validated against the peer's `remote_subnets` allowlist, dangerous prefixes (default route, loopback, link-local) are rejected, payload is bounded at 4 KiB / 64 subnets; config block `"site_to_site"` in `server.json` (`aivpn-server/src/site_sync.rs`)
+- **Multi-hop chain forwarding** — transparent double-hop routing; the entry node decrypts client IP payloads and re-wraps them in `ControlPayload::ChainForward` (0x14) encrypted with the pool shared key, relaying them to a configured exit node; the exit node injects the inner payload directly into its TUN device and routes to the internet; the client is never aware of the hop; config: `pool.exit_node` on the entry node, `pool.exit_node_enabled: true` on the exit node (defaults to `false` to prevent open relay); `pool.sync_key` must be a valid non-zero 32-byte key or the chain forwarder refuses to start (`aivpn-server/src/chain_forwarder.rs`)
+- **mTLS-lite client certificate layer** — optional ed25519-signed client certificates layered over the existing X25519 + PSK handshake; certificate is a compact 104-byte token (`client_pub_key[32] || expiry_ts_le[8] || ca_signature[64]`) sent via `ControlPayload::ClientCert` (0x15); `required: false` (default) accepts PSK-only clients and verifies the cert when present; `required: true` blocks all Data packets from a session until a valid cert is received; no new crate dependency (uses existing `ed25519-dalek`); config block `"mtls"` in `server.json` (`aivpn-server/src/mtls.rs`)
+- **Protocol: three new control subtypes** — `RouteSync = 0x13`, `ChainForward = 0x14`, `ClientCert = 0x15` added to `ControlSubtype` enum and fully encoded/decoded in `ControlPayload` with 4-byte LE length-prefix framing (`aivpn-common/src/protocol.rs`)
+
+### Security
+
+- **mTLS enforcement** — `Session.mtls_ok` field tracks per-session cert state; set to `false` at session creation when `mtls.required = true`; flipped to `true` only on a valid `ClientCert` message; Data packets are silently dropped until the gate opens
+- **Exit-node relay gating** — `ChainForward` messages are rejected unless `GatewayConfig.exit_node_enabled` is `true` (`pool.exit_node_enabled` in config); prevents any server from inadvertently acting as an open relay
+- **RouteSync peer authentication** — inbound `RouteSync` is matched against configured peer endpoints (`IP:port`); packets from unknown senders are dropped; each advertised subnet is checked against the peer's declared `remote_subnets` allowlist before any `ip route add` subprocess is spawned; default routes, loopback, and link-local prefixes are unconditionally rejected; deserialization is bounded (4 KiB JSON / 64 subnets)
+- **Zero sync_key guard** — chain forwarder startup aborts with an error log if `pool.sync_key` is absent, malformed, or decodes to all-zero bytes
+
+### Changed
+
+- `GatewayConfig` gains `chain_forwarder: Option<Arc<ChainForwarder>>`, `mtls: Option<MtlsConfig>`, `exit_node_enabled: bool` (all backward-compatible via `Default`)
+- `PoolSyncConfig` gains `exit_node: Option<String>` and `exit_node_enabled: Option<bool>`
+- `ServerFileConfig` gains `site_to_site: Option<SiteToSiteConfig>`, `mtls: Option<MtlsConfig>`, `dns: Option<DnsProxyConfig>` (all `#[serde(default)]`)
+- `aivpn-server/Cargo.toml` adds `dns = ["reqwest"]` feature
+
+---
+
+## [0.9.0] — 2026-06-13
+
+### Добавлено
+
+- **Статистика дропов eBPF XDP** — `xdp_prog.c` теперь ведёт карту `BPF_MAP_TYPE_ARRAY` (`drop_stats`, 4 слота: `TOO_SHORT`, `TAG_EXPIRED`, `RESERVED`, `TOTAL`) и кольцевой буфер `BPF_MAP_TYPE_RINGBUF` объёмом 256 КБ (`events`). Все пути XDP_DROP вызывают инлайн-хелпер `record_drop(reason)`, атомарно увеличивающий счётчик и отправляющий событие в кольцевой буфер. `ebpf_observer.rs` открывает закреплённую карту через сырые syscall `BPF_OBJ_GET` / `BPF_MAP_LOOKUP_ELEM` (без новых зависимостей) и публикует дельта-события `XdpDrop` в `EventBus` (`aivpn-server/src/ebpf_observer.rs`, `aivpn-linux-kernel/src/xdp_prog.c`)
+- **DNS-over-HTTPS прокси** — опциональный встроенный DoH-форвардер (`feature = "dns"`); слушает UDP :53 на VPN-интерфейсе и пробрасывает запросы через RFC 8484 POST к настраиваемому апстриму (по умолчанию Cloudflare); поддерживается опциональный запасной резолвер; режим `block_plain_dns` добавляет правило nftables, блокирующее UDP/53 на не-VPN интерфейсах, чтобы клиенты не могли обойти прокси; блок конфигурации `"dns"` в `server.json` (`aivpn-server/src/dns_proxy.rs`)
+- **Сеть сайт-сайт (site-to-site VPN)** — два или более узла AIVPN могут соединить свои локальные подсети без клиентского ПО; пиры обмениваются маршрутами через `ControlPayload::RouteSync` (0x13), используя тот же blake3 KDF, что и пул-синхронизация; исходящие объявления отправляются каждые 30 с; входящий `RouteSync` аутентифицируется по списку настроенных пиров (точное совпадение `IP:port`), каждая полученная подсеть проверяется по allowlist `remote_subnets` пира, опасные префиксы (маршрут по умолчанию, loopback, link-local) отклоняются, полезная нагрузка ограничена 4 КиБ / 64 подсети; блок конфигурации `"site_to_site"` в `server.json` (`aivpn-server/src/site_sync.rs`)
+- **Многоскачковая цепочка (multi-hop)** — прозрачная маршрутизация через двойной скачок; входной узел расшифровывает IP-нагрузку клиента и переупаковывает её в `ControlPayload::ChainForward` (0x14), зашифрованный общим ключом пула, и пересылает на выходной узел; выходной узел вводит внутреннюю нагрузку прямо в TUN-устройство и маршрутизирует в интернет; клиент не знает о промежуточном скачке; конфигурация: `pool.exit_node` на входном узле, `pool.exit_node_enabled: true` на выходном (по умолчанию `false`, чтобы не превратиться в открытый прокси); `pool.sync_key` должен быть корректным ненулевым 32-байтным ключом, иначе chain forwarder не запустится (`aivpn-server/src/chain_forwarder.rs`)
+- **Лёгкий mTLS (mTLS-lite)** — опциональные ed25519-подписанные клиентские сертификаты поверх существующего X25519 + PSK-рукопожатия; сертификат — компактный токен в 104 байта (`client_pub_key[32] || expiry_ts_le[8] || ca_signature[64]`), передаётся через `ControlPayload::ClientCert` (0x15); `required: false` (по умолчанию) принимает клиентов без сертификата и проверяет его при наличии; `required: true` блокирует все Data-пакеты сессии до получения корректного сертификата; без новых зависимостей (используется существующий `ed25519-dalek`); блок конфигурации `"mtls"` в `server.json` (`aivpn-server/src/mtls.rs`)
+- **Протокол: три новых управляющих подтипа** — `RouteSync = 0x13`, `ChainForward = 0x14`, `ClientCert = 0x15` добавлены в перечисление `ControlSubtype` и полностью реализованы в `ControlPayload` с 4-байтовым LE-префиксом длины (`aivpn-common/src/protocol.rs`)
+
+### Безопасность
+
+- **Принудительный mTLS** — поле `Session.mtls_ok` отслеживает состояние сертификата в рамках сессии; устанавливается в `false` при создании сессии, если `mtls.required = true`; переключается в `true` только при получении корректного сообщения `ClientCert`; Data-пакеты сбрасываются до открытия ворот
+- **Ограничение ретрансляции exit-узла** — сообщения `ChainForward` отклоняются, если `GatewayConfig.exit_node_enabled` не равно `true` (`pool.exit_node_enabled` в конфиге); исключает случайное превращение сервера в открытый прокси
+- **Аутентификация пиров RouteSync** — входящий `RouteSync` сопоставляется с адресами настроенных пиров (`IP:port`); пакеты от неизвестных отправителей сбрасываются; каждая рекламируемая подсеть проверяется по allowlist `remote_subnets` пира перед любым вызовом `ip route add`; маршруты по умолчанию, loopback и link-local префиксы безусловно отклоняются; десериализация ограничена (4 КиБ JSON / 64 подсети)
+- **Защита от нулевого sync_key** — запуск chain forwarder прерывается с записью в лог об ошибке, если `pool.sync_key` отсутствует, некорректен или декодируется в последовательность нулевых байт
+
+### Изменено
+
+- `GatewayConfig` получает поля `chain_forwarder: Option<Arc<ChainForwarder>>`, `mtls: Option<MtlsConfig>`, `exit_node_enabled: bool` (обратносовместимо через `Default`)
+- `PoolSyncConfig` получает `exit_node: Option<String>` и `exit_node_enabled: Option<bool>`
+- `ServerFileConfig` получает `site_to_site: Option<SiteToSiteConfig>`, `mtls: Option<MtlsConfig>`, `dns: Option<DnsProxyConfig>` (все с `#[serde(default)]`)
+- `aivpn-server/Cargo.toml` добавляет фичу `dns = ["reqwest"]`
+
+---
+
 ## [0.8.0] - 2026-06-13
 
 ### Added

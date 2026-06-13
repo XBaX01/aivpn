@@ -644,6 +644,105 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 对于Entware路由器，通常的流程是：构建或下载musl工件，将其复制到`/opt/bin`，`chmod +x`，然后直接从路由器shell运行。
 
+## v0.9.0 新功能
+
+### 多跳链式转发（Multi-hop）
+
+无需修改客户端，即可通过两台 AIVPN 节点路由流量。入口节点将加密后的 IP 数据包转发给出口节点，由出口节点接入互联网。对客户端而言毫无变化——它只与入口节点通信，互联网看到的是出口节点的 IP。
+
+**拓扑：**
+```
+[客户端] ──(加密)──► [入口节点] ──(ChainForward)──► [出口节点] ──► 互联网
+                      端口 443                         端口 443
+```
+
+**入口节点** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<共享的 base64 32 字节密钥>",
+    "exit_node": "exit.example.com:443"
+  }
+}
+```
+
+**出口节点** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<相同密钥>",
+    "exit_node_enabled": true
+  }
+}
+```
+
+> 两节点须共享同一 `sync_key`。生成命令：`openssl rand -base64 32`
+> 出口节点必须显式设置 `exit_node_enabled: true`，默认为 `false` 以防止开放中继。
+
+### DNS-over-HTTPS 代理
+
+阻断明文 DNS 泄漏，将客户端所有 DNS 查询通过 VPN 接口上的加密 DoH 解析器转发。
+
+```json
+{
+  "dns": {
+    "upstream_doh": "https://cloudflare-dns.com/dns-query",
+    "fallback_doh": "https://dns.google/dns-query",
+    "block_plain_dns": true
+  }
+}
+```
+
+编译：`cargo build --release --bin aivpn-server --features "dns"`
+
+`block_plain_dns: true` 添加 nftables 规则，阻断非 TUN 接口的 UDP/53，防止客户端绕过代理。
+
+### 站点间 VPN（Site-to-site）
+
+无需客户端软件，即可打通多台 AIVPN 节点之间的子网。对等节点通过与池同步相同的加密基础设施交换路由通告。
+
+```json
+{
+  "site_to_site": {
+    "local_subnets": ["192.168.1.0/24"],
+    "peers": [
+      {
+        "name": "office-b",
+        "endpoint": "office-b.example.com:443",
+        "sync_key": "<base64 32 字节>",
+        "remote_subnets": ["192.168.2.0/24"]
+      }
+    ]
+  }
+}
+```
+
+收到对等节点通告（每 30 秒一次）后自动执行 `ip route add`。仅接受 `remote_subnets` 白名单中的子网——任意路由注入已被阻断。
+
+### 轻量级 mTLS（客户端证书）
+
+在现有 X25519 + PSK 握手之上叠加可选的 ed25519 签名客户端证书（104 字节）。默认 `required: false`，无证书客户端不受影响。
+
+```json
+{
+  "mtls": {
+    "ca_public_key_hex": "aabbccdd...",
+    "required": false
+  }
+}
+```
+
+- `required: false` — 无证书客户端正常接入；有证书时验证
+- `required: true` — 无有效证书则禁止发送数据
+
+证书格式：`client_pub_key[32] || expiry_ts_le[8] || ca_signature[64]`（104 字节，无新依赖，复用现有 `ed25519-dalek`）。
+
+### eBPF XDP 丢包遥测
+
+XDP 过滤器通过 BPF 环形缓冲区记录各原因丢包计数（`TOO_SHORT`、`TAG_EXPIRED`、`TOTAL`）。`ebpf_observer.rs` 通过原始 BPF 系统调用读取并向 `EventBus` 发布增量 `XdpDrop` 事件。检测到 `/sys/fs/bpf/aivpn/drop_stats` 时自动激活。
+
+---
+
 ## v0.8.0 新功能
 
 ### 多服务器池同步（内置于协议）
