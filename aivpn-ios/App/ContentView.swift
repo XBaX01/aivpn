@@ -1,5 +1,6 @@
 import SwiftUI
 import NetworkExtension
+import Darwin
 
 // MARK: - Helpers
 
@@ -473,9 +474,16 @@ struct ContentView: View {
                                     .padding()
                             }
                             Button(loc.t("run_benchmark")) {
+                                guard let addr = vpn.selectedKey?.serverAddress, !addr.isEmpty else { return }
                                 benchRunning = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                    benchP50 = 42; benchQuality = 88; benchRunning = false
+                                DispatchQueue.global(qos: .utility).async {
+                                    runBenchPosix(serverAddr: addr) { p50, quality in
+                                        DispatchQueue.main.async {
+                                            benchP50 = p50
+                                            benchQuality = quality
+                                            benchRunning = false
+                                        }
+                                    }
                                 }
                             }
                             .buttonStyle(.borderedProminent)
@@ -554,4 +562,69 @@ struct ContentView: View {
             }
         }
     }
+}
+
+// MARK: - UDP Bench (POSIX, no subprocess — iOS sandbox forbids Process)
+
+/// Sends UDP probes to `serverAddr` (host:port) for 5 seconds and calls
+/// completion with (p50ms, qualityScore 0-100) on the calling thread.
+func runBenchPosix(serverAddr: String, completion: (Int, Int) -> Void) {
+    let colonIdx = serverAddr.lastIndex(of: ":")
+    guard let idx = colonIdx else { completion(0, 0); return }
+    let host = String(serverAddr[serverAddr.startIndex..<idx])
+    let portStr = String(serverAddr[serverAddr.index(after: idx)...])
+    guard let portNum = UInt16(portStr) else { completion(0, 0); return }
+
+    var sin = sockaddr_in()
+    sin.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    sin.sin_family = sa_family_t(AF_INET)
+    sin.sin_port = portNum.bigEndian
+    guard inet_pton(AF_INET, host, &sin.sin_addr) == 1 else { completion(0, 0); return }
+
+    let fd = socket(AF_INET, SOCK_DGRAM, 0)
+    guard fd >= 0 else { completion(0, 0); return }
+    defer { Darwin.close(fd) }
+
+    var tv = timeval(tv_sec: 0, tv_usec: 500_000)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+    let probeData = Array("aivpn-bench-probe-v1".utf8)
+    var recvBuf = [UInt8](repeating: 0, count: 256)
+    let deadline = Date().addingTimeInterval(5.0)
+    var rtts: [Double] = []
+    var sent = 0
+
+    while Date() < deadline {
+        let t0 = Date()
+        sent += 1
+        withUnsafePointer(to: sin) { sinPtr in
+            sinPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                probeData.withUnsafeBytes { bp in
+                    _ = sendto(fd, bp.baseAddress, probeData.count, 0, sa,
+                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        let n = recv(fd, &recvBuf, recvBuf.count, 0)
+        let elapsed = -t0.timeIntervalSinceNow * 1000.0
+        if n > 0 {
+            rtts.append(elapsed)
+        } else if elapsed < 490 {
+            rtts.append(elapsed * 2)
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+
+    guard !rtts.isEmpty else { completion(0, 0); return }
+    let sorted = rtts.sorted()
+    let p50 = sorted[max(0, Int(Double(sorted.count) * 0.5) - 1)]
+    let lossPct = Double(max(0, sent - rtts.count)) / Double(sent) * 100.0
+    let quality: Int
+    switch (p50, lossPct) {
+    case _ where p50 < 50 && lossPct < 1:  quality = 95
+    case _ where p50 < 100 && lossPct < 3: quality = 80
+    case _ where p50 < 200 && lossPct < 10: quality = 60
+    default: quality = 30
+    }
+    completion(Int(p50), quality)
 }

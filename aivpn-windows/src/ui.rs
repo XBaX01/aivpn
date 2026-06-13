@@ -820,10 +820,8 @@ fn draw_diagnostics_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                 app.bench_rx = Some(rx);
                 app.bench_running = true;
                 std::thread::spawn(move || {
-                    let result = crate::vpn_manager::VpnManager::run_bench_blocking(
-                        &binary,
-                        &server_addr,
-                    );
+                    let result =
+                        crate::vpn_manager::VpnManager::run_bench_blocking(&binary, &server_addr);
                     let _ = tx.send(result);
                 });
             }
