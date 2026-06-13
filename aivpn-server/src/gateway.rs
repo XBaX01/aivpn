@@ -2362,8 +2362,7 @@ impl Gateway {
                 }
             }
             ControlPayload::RouteSync { subnets_json } => {
-                let peer = hash_addr(&client_addr);
-                crate::site_sync::handle_route_sync(&subnets_json, &peer);
+                crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
             }
             ControlPayload::ChainForward { payload } => {
                 // Multi-hop exit node: inject the forwarded IP payload directly into TUN

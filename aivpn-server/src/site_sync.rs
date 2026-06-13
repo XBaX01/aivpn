@@ -25,10 +25,11 @@
 //! }
 //! ```
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::Duration;
 
@@ -37,6 +38,13 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
+
+/// Caps to bound deserialization and subprocess spawning.
+const MAX_SUBNETS_JSON_BYTES: usize = 4096;
+const MAX_SUBNETS_PER_MSG: usize = 64;
+
+/// Stored once at startup so `handle_route_sync` can authenticate senders.
+static SITE_CONFIG: OnceLock<SiteToSiteConfig> = OnceLock::new();
 
 use aivpn_common::crypto::{
     self, encrypt_payload, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
@@ -194,6 +202,9 @@ impl SitePeer {
 
 /// Start outbound route advertisement to all configured peers.
 pub fn start(config: &SiteToSiteConfig, mdh: Vec<u8>) {
+    // Store config so handle_route_sync can authenticate inbound messages.
+    SITE_CONFIG.get_or_init(|| config.clone());
+
     for peer_cfg in &config.peers {
         if let Some(peer) = SitePeer::new(peer_cfg.clone(), config.local_subnets.clone(), mdh.clone()) {
             peer.start();
@@ -206,21 +217,103 @@ pub fn start(config: &SiteToSiteConfig, mdh: Vec<u8>) {
     );
 }
 
-/// Handle an incoming `RouteSync` control message — install advertised routes.
-pub fn handle_route_sync(subnets_json: &[u8], from_peer: &str) {
-    let subnets: Vec<String> = match serde_json::from_slice(subnets_json) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(
-                "site_sync: invalid RouteSync payload from {}: {}",
-                from_peer, e
-            );
+/// Handle an incoming `RouteSync` control message.
+///
+/// `from_addr` must be the full `IP:port` string of the sending socket so we
+/// can match it against configured peer endpoints.  Any of these conditions
+/// causes a silent drop with a warning:
+/// - No site-to-site config loaded
+/// - Sender not in the configured peers list
+/// - Payload exceeds 4 KiB
+/// - More than 64 subnets in one message
+/// - A subnet that is not in the peer's declared `remote_subnets` allowlist
+/// - A subnet that is a default route, loopback, or link-local prefix
+pub fn handle_route_sync(subnets_json: &[u8], from_addr: &str) {
+    // 1. Authenticate: sender must be a configured peer endpoint.
+    let config = match SITE_CONFIG.get() {
+        Some(c) => c,
+        None => {
+            warn!("site_sync: RouteSync received but site-to-site not configured — dropping");
             return;
         }
     };
-    for subnet in subnets {
-        info!("site_sync: route {} via {}", subnet, from_peer);
-        install_route(&subnet, from_peer);
+    let peer_cfg = match config.peers.iter().find(|p| p.endpoint == from_addr) {
+        Some(p) => p,
+        None => {
+            warn!("site_sync: RouteSync from unconfigured peer {} — dropping", from_addr);
+            return;
+        }
+    };
+
+    // 2. Size guard before deserialization.
+    if subnets_json.len() > MAX_SUBNETS_JSON_BYTES {
+        warn!(
+            "site_sync: RouteSync payload too large ({} bytes) from {} — dropping",
+            subnets_json.len(),
+            peer_cfg.name
+        );
+        return;
+    }
+
+    let subnets: Vec<String> = match serde_json::from_slice(subnets_json) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("site_sync: invalid RouteSync payload from {}: {}", peer_cfg.name, e);
+            return;
+        }
+    };
+
+    if subnets.len() > MAX_SUBNETS_PER_MSG {
+        warn!(
+            "site_sync: RouteSync has {} subnets (max {}) from {} — dropping",
+            subnets.len(),
+            MAX_SUBNETS_PER_MSG,
+            peer_cfg.name
+        );
+        return;
+    }
+
+    for subnet_str in &subnets {
+        // 3. Allowlist: only install routes the peer is declared to advertise.
+        if !peer_cfg.remote_subnets.iter().any(|a| a == subnet_str) {
+            warn!(
+                "site_sync: subnet {} not in allowlist for peer {} — skipped",
+                subnet_str, peer_cfg.name
+            );
+            continue;
+        }
+        // 4. Safety: reject dangerous prefixes.
+        if !is_safe_subnet(subnet_str) {
+            warn!(
+                "site_sync: unsafe subnet {} from peer {} — skipped",
+                subnet_str, peer_cfg.name
+            );
+            continue;
+        }
+        info!("site_sync: installing route {} (peer: {})", subnet_str, peer_cfg.name);
+        install_route(subnet_str, from_addr);
+    }
+}
+
+/// Reject default routes, loopback, and link-local prefixes.
+fn is_safe_subnet(s: &str) -> bool {
+    let (addr_str, prefix_len) = match s.split_once('/') {
+        Some((a, p)) => (a, p.parse::<u8>().unwrap_or(0)),
+        None => return false,
+    };
+    if prefix_len == 0 {
+        return false; // 0.0.0.0/0 or ::/0 — default route
+    }
+    let addr = match IpAddr::from_str(addr_str) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    if addr.is_loopback() {
+        return false;
+    }
+    match addr {
+        IpAddr::V4(v4) => !v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
     }
 }
 
