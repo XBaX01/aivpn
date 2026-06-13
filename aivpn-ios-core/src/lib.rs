@@ -50,11 +50,11 @@ pub extern "C" fn aivpn_run_tunnel(
         Some(arr)
     };
 
-    let mtls_cert: Option<Vec<u8>> = if cert_bytes.is_null() || cert_len <= 0 {
+    let mtls_cert: Option<Vec<u8>> = if cert_bytes.is_null() || cert_len != 104 {
         None
     } else {
-        // SAFETY: cert_bytes points to cert_len bytes passed by Swift.
-        Some(unsafe { std::slice::from_raw_parts(cert_bytes, cert_len as usize).to_vec() })
+        // SAFETY: cert_bytes points to exactly 104 bytes confirmed above.
+        Some(unsafe { std::slice::from_raw_parts(cert_bytes, 104).to_vec() })
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

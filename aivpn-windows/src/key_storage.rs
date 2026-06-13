@@ -121,6 +121,7 @@ pub struct ConnectionKey {
     pub full_tunnel: bool,
     #[serde(default)]
     pub proxy_listen: Option<String>,
+    /// Path to client mTLS cert file. Stored plaintext — only `key` is DPAPI-encrypted.
     #[serde(default)]
     pub mtls_cert_path: Option<String>,
 }

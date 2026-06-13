@@ -130,7 +130,9 @@ class AivpnService : VpnService() {
             savedVpnIp == vpnIp &&
             savedServerVpnIp == serverVpnIp &&
             savedVpnPrefixLen == normalizedPrefixLen &&
-            savedVpnMtu == normalizedMtu
+            savedVpnMtu == normalizedMtu &&
+            (savedMtlsCert == null && mtlsCert == null ||
+             savedMtlsCert != null && mtlsCert != null && savedMtlsCert.contentEquals(mtlsCert))
         val startupInFlight = restartJob?.isActive == true
         val tunnelLoopActive = serviceJob?.isActive == true
         if (sameTarget && (startupInFlight || tunnelLoopActive)) {
@@ -587,6 +589,10 @@ class AivpnService : VpnService() {
             return
         }
         val parsed = parseConnectionKeyInService(profile.key) ?: return
+        val mtlsCert: ByteArray? = profile.mtlsCertBase64?.let { b64 ->
+            try { Base64.decode(b64, Base64.DEFAULT).takeIf { it.size == 104 } }
+            catch (_: Exception) { null }
+        }
         startVpn(
             serverAddr      = parsed.server,
             serverKeyBase64 = parsed.serverKey,
@@ -595,6 +601,7 @@ class AivpnService : VpnService() {
             serverVpnIp     = parsed.serverVpnIp,
             vpnPrefixLen    = parsed.prefixLen,
             vpnMtu          = parsed.mtu,
+            mtlsCert        = mtlsCert,
         )
     }
 

@@ -74,9 +74,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let pskArr  = key.psk
             let rustFd  = self.sp[1]
 
-            // Decode optional base64-encoded mTLS cert (104 bytes)
+            // Decode optional base64-encoded mTLS cert (must be exactly 104 bytes)
             let certBytes: [UInt8]? = (cfg["mtlsCert"] as? String).flatMap {
-                Data(base64Encoded: $0).map { Array($0) }
+                guard let data = Data(base64Encoded: $0), data.count == 104 else { return nil }
+                return Array(data)
             }
 
             let thread = Thread {

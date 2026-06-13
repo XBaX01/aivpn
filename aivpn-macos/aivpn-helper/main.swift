@@ -174,6 +174,10 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         args.append("--full-tunnel")
     }
     if let certPath = mtlsCertPath {
+        guard !certPath.contains("..") && !certPath.contains("\0") else {
+            log("ERROR: invalid mtlsCertPath — rejected")
+            return HelperResponse(status: "error", message: "Invalid mTLS cert path")
+        }
         args.append("--mtls-cert")
         args.append(certPath)
     }
