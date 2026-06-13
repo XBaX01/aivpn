@@ -807,6 +807,8 @@ impl SessionManager {
     /// Register a synthetic session for an authenticated site-to-site peer.
     /// Identical to `create_pool_peer_session` but marks `is_site_peer = true`
     /// so the gateway will accept `RouteSync` messages from this session.
+    /// Like pool peers, site peers bypass the `MAX_SESSIONS` cap — synthetic sessions
+    /// must not consume the client quota.
     pub fn create_site_peer_session(
         &self,
         sync_key: &[u8; 32],

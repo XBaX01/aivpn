@@ -22,8 +22,9 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
@@ -31,6 +32,10 @@ use tracing::{debug, info, warn};
 const DNS_PORT: u16 = 53;
 const MAX_DNS_PACKET: usize = 4096;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
+/// Max DNS queries per second per VPN client IP before the request is dropped.
+const MAX_DNS_RPS: u32 = 100;
+/// Max DoH response body size — legitimate DNS responses are ≤65535 bytes.
+const MAX_DOH_RESPONSE: usize = 65535;
 
 /// DNS proxy configuration (`"dns"` block in `server.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +88,7 @@ pub async fn run(config: DnsProxyConfig, bind_ip: IpAddr, tun_iface: String) {
     };
 
     let cfg = Arc::new(config);
+    let rate_limits: Arc<DashMap<IpAddr, (u32, Instant)>> = Arc::new(DashMap::new());
     let mut buf = vec![0u8; MAX_DNS_PACKET];
 
     loop {
@@ -93,6 +99,24 @@ pub async fn run(config: DnsProxyConfig, bind_ip: IpAddr, tun_iface: String) {
                 continue;
             }
         };
+
+        // Per-source-IP rate limit: cap at MAX_DNS_RPS queries/second.
+        let from_ip = peer.ip();
+        {
+            let mut entry = rate_limits
+                .entry(from_ip)
+                .or_insert((0u32, Instant::now()));
+            let (count, since) = entry.value_mut();
+            if since.elapsed().as_secs() >= 1 {
+                *count = 0;
+                *since = Instant::now();
+            }
+            if *count >= MAX_DNS_RPS {
+                debug!("DNS proxy: rate limit exceeded for {}", from_ip);
+                continue;
+            }
+            *count += 1;
+        }
 
         let query = buf[..len].to_vec();
         let sock = socket.clone();
@@ -144,10 +168,18 @@ async fn doh_post(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<V
         return Err(format!("DoH HTTP {}", resp.status()));
     }
 
-    resp.bytes()
+    let body = resp
+        .bytes()
         .await
-        .map(|b| b.to_vec())
-        .map_err(|e| format!("DoH body: {}", e))
+        .map_err(|e| format!("DoH body: {}", e))?;
+    if body.len() > MAX_DOH_RESPONSE {
+        return Err(format!(
+            "DoH response too large: {} bytes (max {})",
+            body.len(),
+            MAX_DOH_RESPONSE
+        ));
+    }
+    Ok(body.to_vec())
 }
 
 /// Block plain-DNS egress on non-VPN interfaces via nftables.

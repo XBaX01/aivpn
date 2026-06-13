@@ -69,6 +69,8 @@ pub enum ControlSubtype {
     ChainForward = 0x14,
     /// Client mTLS certificate presentation (0x15)
     ClientCert = 0x15,
+    /// Server notification that a ClientCert was rejected (0x16)
+    CertRejected = 0x16,
 }
 
 impl ControlSubtype {
@@ -95,6 +97,7 @@ impl ControlSubtype {
             0x13 => Some(Self::RouteSync),
             0x14 => Some(Self::ChainForward),
             0x15 => Some(Self::ClientCert),
+            0x16 => Some(Self::CertRejected),
             _ => None,
         }
     }
@@ -329,6 +332,8 @@ pub enum ControlPayload {
     ClientCert {
         cert_bytes: Vec<u8>,
     },
+    /// Server rejection of a ClientCert — client should re-provision its certificate.
+    CertRejected {},
 }
 
 impl ControlPayload {
@@ -483,6 +488,9 @@ impl ControlPayload {
                 buf.push(ControlSubtype::ClientCert as u8);
                 buf.extend_from_slice(&(cert_bytes.len() as u32).to_le_bytes());
                 buf.extend_from_slice(cert_bytes);
+            }
+            Self::CertRejected {} => {
+                buf.push(ControlSubtype::CertRejected as u8);
             }
         }
 
@@ -754,6 +762,7 @@ impl ControlPayload {
                     cert_bytes: data[5..5 + len].to_vec(),
                 })
             }
+            ControlSubtype::CertRejected => Ok(Self::CertRejected {}),
         }
     }
 }

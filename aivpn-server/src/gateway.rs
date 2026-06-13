@@ -1848,6 +1848,8 @@ impl Gateway {
 
             is_new_session = true;
             // When mTLS is required, block Data until the client sends a valid ClientCert.
+            // SAFETY: process_inner_payload is skipped for is_new_session packets (see below),
+            // so mtls_ok=false is guaranteed to be visible before any Data is processed.
             if self.config.mtls.as_ref().map_or(false, |c| c.required) {
                 session.lock().mtls_ok = false;
             }
@@ -2148,9 +2150,14 @@ impl Gateway {
                     }
                 }
 
-                if let Some(ref cf) = self.chain_forwarder {
-                    // Multi-hop: relay to exit node instead of local NAT
-                    cf.forward(payload.to_vec()).await;
+                // Site peers send subnet traffic — never relay to the exit node.
+                let use_chain_forward =
+                    self.chain_forwarder.is_some() && !session.lock().is_site_peer;
+                if use_chain_forward {
+                    if let Some(ref cf) = self.chain_forwarder {
+                        // Multi-hop: relay to exit node instead of local NAT
+                        cf.forward(payload.to_vec()).await;
+                    }
                 } else if let Some(ref tx) = self.tun_write_tx {
                     if tx.send(payload.to_vec()).await.is_err() {
                         debug!("TUN write channel closed, dropping packet");
@@ -2428,8 +2435,19 @@ impl Gateway {
                         debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
                     } else {
                         warn!("mtls: client {} cert rejected — Data will be dropped", hash_addr(&client_addr));
+                        // Notify client so it can re-provision rather than inferring failure from Data drops.
+                        let _ = self
+                            .send_control_message(
+                                &aivpn_common::protocol::ControlPayload::CertRejected {},
+                                session,
+                            )
+                            .await;
                     }
                 }
+            }
+            ControlPayload::CertRejected {} => {
+                // Server-to-client only; the server never receives this from clients.
+                debug!("Unexpected CertRejected from client {}", hash_addr(&client_addr));
             }
         }
 

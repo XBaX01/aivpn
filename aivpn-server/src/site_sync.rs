@@ -348,8 +348,20 @@ fn is_safe_subnet(s: &str) -> bool {
         return false;
     }
     match addr {
-        IpAddr::V4(v4) => !v4.is_link_local(),
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+        IpAddr::V4(v4) => {
+            // Reject overly broad prefixes that could hijack major internet blocks or
+            // overlap the server's own VPN subnet range.
+            if prefix_len < 8 {
+                return false;
+            }
+            !v4.is_link_local()
+        }
+        IpAddr::V6(v6) => {
+            if prefix_len < 16 {
+                return false;
+            }
+            (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
     }
 }
 
