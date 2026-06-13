@@ -11,6 +11,10 @@ use aivpn_server::backup::{export_server, import_server, ExportOptions};
 use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
 use aivpn_server::pool_sync::{PeerSyncer, PoolSyncConfig};
+use aivpn_server::mtls::MtlsConfig;
+use aivpn_server::site_sync::SiteToSiteConfig;
+#[cfg(feature = "dns")]
+use aivpn_server::dns_proxy::DnsProxyConfig;
 use aivpn_server::qos::{dscp_by_name, parse_bandwidth, ClientQos, QosEnforcer};
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
@@ -111,6 +115,13 @@ struct ServerFileConfig {
     tun_mtu: Option<MtuSetting>,
     #[serde(default)]
     pool: Option<PoolSyncConfig>,
+    #[serde(default)]
+    site_to_site: Option<SiteToSiteConfig>,
+    #[serde(default)]
+    mtls: Option<MtlsConfig>,
+    #[cfg(feature = "dns")]
+    #[serde(default)]
+    dns: Option<DnsProxyConfig>,
 }
 
 #[tokio::main]
@@ -299,6 +310,15 @@ async fn main() {
         enforcer
     };
 
+    // Extract values needed after GatewayConfig consumes its inputs
+    #[cfg(feature = "dns")]
+    let vpn_gateway_ip = std::net::IpAddr::V4(network_config.server_vpn_ip);
+    #[cfg(feature = "dns")]
+    let tun_iface_for_dns = tun_name.clone();
+    let s2s_config: Option<SiteToSiteConfig> = file_config.as_ref().and_then(|c| c.site_to_site.clone());
+    #[cfg(feature = "dns")]
+    let dns_config: Option<DnsProxyConfig> = file_config.as_ref().and_then(|c| c.dns.clone());
+
     // Create config
     let config = GatewayConfig {
         listen_addr,
@@ -323,6 +343,8 @@ async fn main() {
         },
         event_bus: event_bus.clone(),
         qos_enforcer,
+        chain_forwarder: None,
+        mtls: file_config.as_ref().and_then(|c| c.mtls.clone()),
     };
     let _ = audit_logger; // used by management subcommands; suppress unused warning
 
@@ -373,7 +395,7 @@ async fn main() {
 
     // Create and run server
     match AivpnServer::new(config) {
-        Ok(server) => {
+        Ok(mut server) => {
             // Start pool sync after session_manager and mask catalog are initialised.
             // Sync packets ride the existing VPN UDP port — no extra TCP port needed.
             if let (Some(ref pool_cfg), Some(db)) = (&pool_sync_config, client_db_for_sync) {
@@ -387,6 +409,41 @@ async fn main() {
                     );
                 }
             }
+            // Multi-hop: create chain forwarder if exit_node is configured
+            if let Some(ref pool_cfg) = pool_sync_config {
+                if let Some(ref exit_node) = pool_cfg.exit_node {
+                    use base64::Engine as _;
+                    let sync_key: [u8; 32] = pool_cfg.sync_key.as_deref()
+                        .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok())
+                        .and_then(|b| b.try_into().ok())
+                        .unwrap_or([0u8; 32]);
+                    if let Some(cf) = aivpn_server::chain_forwarder::ChainForwarder::new(
+                        exit_node,
+                        sync_key,
+                        server.catalog_mdh(),
+                    ).await {
+                        server.set_chain_forwarder(cf);
+                        info!("Multi-hop: chain forwarding to exit node {}", exit_node);
+                    }
+                }
+            }
+
+            // Start site-to-site route sync
+            if let Some(ref s2s_cfg) = s2s_config {
+                aivpn_server::site_sync::start(s2s_cfg, server.catalog_mdh());
+                info!("Site-to-site active ({} peers)", s2s_cfg.peers.len());
+            }
+
+            // Start DNS-over-HTTPS proxy
+            #[cfg(feature = "dns")]
+            if let Some(dns_cfg) = dns_config {
+                let gw_ip = vpn_gateway_ip;
+                let iface = tun_iface_for_dns;
+                tokio::spawn(async move {
+                    aivpn_server::dns_proxy::run(dns_cfg, gw_ip, iface).await;
+                });
+            }
+
             info!("Server initialized successfully");
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);
@@ -1215,6 +1272,7 @@ mod tests {
             idle_timeout_secs: None,
             tun_mtu: None,
             pool: None,
+            ..Default::default()
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
@@ -1246,6 +1304,7 @@ mod tests {
             idle_timeout_secs: None,
             tun_mtu: None,
             pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1279,6 +1338,7 @@ mod tests {
             idle_timeout_secs: None,
             tun_mtu: None,
             pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1349,6 +1409,7 @@ mod tests {
             idle_timeout_secs: None,
             tun_mtu: None,
             pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1449,6 +1510,7 @@ mod tests {
             idle_timeout_secs: None,
             tun_mtu: None,
             pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));

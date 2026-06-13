@@ -81,6 +81,11 @@ pub struct GatewayConfig {
     pub event_bus: EventBus,
     /// Per-client QoS enforcer (token bucket + DSCP).
     pub qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder.  When `Some`, client Data packets are
+    /// relayed to the exit node instead of being NAT-forwarded locally.
+    pub chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
+    /// Optional mTLS certificate policy.  `None` = no cert verification.
+    pub mtls: Option<crate::mtls::MtlsConfig>,
 }
 
 impl Default for GatewayConfig {
@@ -108,6 +113,8 @@ impl Default for GatewayConfig {
                 webhook_url: None,
             }),
             qos_enforcer: Arc::new(QosEnforcer::new()),
+            chain_forwarder: None,
+            mtls: None,
         }
     }
 }
@@ -269,6 +276,8 @@ pub struct Gateway {
     event_bus: EventBus,
     /// Per-client QoS enforcer (token bucket + DSCP marking).
     qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder (None = local NAT).
+    chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -587,7 +596,13 @@ impl Gateway {
             kernel_accel,
             event_bus,
             qos_enforcer,
+            chain_forwarder: config.chain_forwarder.clone(),
         })
+    }
+
+    /// Set (or replace) the multi-hop chain forwarder after server construction.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.chain_forwarder = Some(cf);
     }
 
     async fn send_bootstrap_descriptors(
@@ -2115,7 +2130,10 @@ impl Gateway {
                     }
                 }
 
-                if let Some(ref tx) = self.tun_write_tx {
+                if let Some(ref cf) = self.chain_forwarder {
+                    // Multi-hop: relay to exit node instead of local NAT
+                    cf.forward(payload.to_vec()).await;
+                } else if let Some(ref tx) = self.tun_write_tx {
                     if tx.send(payload.to_vec()).await.is_err() {
                         debug!("TUN write channel closed, dropping packet");
                     }
@@ -2340,6 +2358,27 @@ impl Gateway {
                             hash_addr(&client_addr),
                             e
                         ),
+                    }
+                }
+            }
+            ControlPayload::RouteSync { subnets_json } => {
+                let peer = hash_addr(&client_addr);
+                crate::site_sync::handle_route_sync(&subnets_json, &peer);
+            }
+            ControlPayload::ChainForward { payload } => {
+                // Multi-hop exit node: inject the forwarded IP payload directly into TUN
+                // so the exit node routes it to the internet on behalf of the origin client.
+                if let Some(ref tx) = self.tun_write_tx {
+                    let _ = tx.send(payload).await;
+                }
+            }
+            ControlPayload::ClientCert { cert_bytes } => {
+                if let Some(ref mtls_cfg) = self.config.mtls {
+                    let ok = crate::mtls::check_client(Some(&cert_bytes), mtls_cfg);
+                    if ok {
+                        debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
+                    } else {
+                        warn!("mtls: client {} cert rejected", hash_addr(&client_addr));
                     }
                 }
             }

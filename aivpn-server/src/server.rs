@@ -151,6 +151,11 @@ impl AivpnServer {
         self.gateway.catalog_mdh()
     }
 
+    /// Set multi-hop chain forwarder.  Must be called before `run()`.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.gateway.set_chain_forwarder(cf);
+    }
+
     /// Run the server
     pub async fn run(self) -> Result<()> {
         self.gateway.run().await
