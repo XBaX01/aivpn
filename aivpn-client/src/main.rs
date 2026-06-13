@@ -87,6 +87,11 @@ pub struct ClientArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub proxy_listen: Option<String>,
 
+    /// Path to a 104-byte mTLS client certificate (raw binary or base64-encoded).
+    /// Required when the server has `mtls.required = true`.
+    #[arg(long, value_name = "FILE")]
+    pub mtls_cert: Option<std::path::PathBuf>,
+
     /// Route only these CIDRs through the VPN (comma-separated, split-tunnel mode).
     /// Example: --include-routes 10.0.0.0/8,192.168.1.0/24
     #[arg(
@@ -603,6 +608,25 @@ async fn main() {
             std::process::exit(1);
         })
     });
+    let mtls_cert: Option<Vec<u8>> = args.mtls_cert.as_ref().map(|path| {
+        let raw = std::fs::read(path).unwrap_or_else(|e| {
+            error!("Cannot read --mtls-cert '{}': {}", path.display(), e);
+            std::process::exit(1);
+        });
+        // Accept raw 104-byte binary or base64-encoded text.
+        if raw.len() == 104 {
+            raw
+        } else {
+            let s = String::from_utf8_lossy(&raw);
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .unwrap_or_else(|e| {
+                    error!("--mtls-cert is neither 104-byte binary nor valid base64: {}", e);
+                    std::process::exit(1);
+                })
+        }
+    });
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -706,6 +730,7 @@ async fn main() {
             initial_mask,
             tun_config,
             proxy_listen,
+            mtls_cert: mtls_cert.clone(),
         };
 
         match AivpnClient::new(config) {
