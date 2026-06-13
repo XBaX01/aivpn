@@ -161,6 +161,7 @@ pub async fn run_tunnel_ios(
     server_port: u16,
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
+    mtls_cert: Option<Vec<u8>>,
     on_ready: Option<OnReadyFn>,
     ctx: SendCtx,
 ) -> Result<()> {
@@ -260,6 +261,18 @@ pub async fn run_tunnel_ios(
         if let Ok(c_host) = CString::new(server_host.as_str()) {
             unsafe { cb(c_host.as_ptr(), ctx.0) };
         }
+    }
+
+    if let Some(cert) = mtls_cert {
+        let cert_payload = ControlPayload::ClientCert {
+            cert_bytes: cert.clone(),
+        }
+        .encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &cert_payload);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+        log::debug!("mTLS: ClientCert sent ({} bytes)", cert.len());
     }
 
     // 6. Main forwarding loop

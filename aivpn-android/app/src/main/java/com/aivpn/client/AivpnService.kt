@@ -69,6 +69,7 @@ class AivpnService : VpnService() {
     @Volatile private var savedServerAddr: String? = null
     @Volatile private var savedServerKey: String?  = null
     @Volatile private var savedPsk: String?        = null
+    @Volatile private var savedMtlsCert: ByteArray? = null
     @Volatile private var savedVpnIp: String?      = null
     @Volatile private var savedServerVpnIp: String? = null
     @Volatile private var savedVpnPrefixLen: Int = LEGACY_PREFIX_LEN
@@ -115,6 +116,7 @@ class AivpnService : VpnService() {
         serverVpnIp: String? = null,
         vpnPrefixLen: Int = LEGACY_PREFIX_LEN,
         vpnMtu: Int = DEFAULT_TUN_MTU,
+        mtlsCert: ByteArray? = null,
     ) {
         Log.d(TAG, "startVpn: server=$serverAddr")
 
@@ -139,6 +141,7 @@ class AivpnService : VpnService() {
         savedServerAddr  = serverAddr
         savedServerKey   = serverKeyBase64
         savedPsk         = pskBase64
+        savedMtlsCert    = mtlsCert
         savedVpnIp       = vpnIp
         savedServerVpnIp = serverVpnIp
         savedVpnPrefixLen = normalizedPrefixLen
@@ -273,7 +276,7 @@ class AivpnService : VpnService() {
 
         try {
             val error = withContext(Dispatchers.IO) {
-                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk)
+                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert)
             }
             if (error.isNotEmpty()) throw RuntimeException(error)
         } finally {

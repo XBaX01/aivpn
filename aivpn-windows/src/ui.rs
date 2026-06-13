@@ -395,6 +395,7 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         app.new_key_full_tunnel = key.full_tunnel;
                         app.new_key_use_proxy = key.proxy_listen.is_some();
                         app.new_key_proxy_listen = key.proxy_listen.clone().unwrap_or_default();
+                        app.new_key_mtls_cert = key.mtls_cert_path.clone().unwrap_or_default();
                         app.editing_key_idx = Some(idx);
                         app.show_add_key = true;
                     }
@@ -468,6 +469,18 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                 );
             }
 
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("mTLS cert (optional path to .cert file)")
+                    .size(11.0)
+                    .color(DIM),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.new_key_mtls_cert)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("C:\\path\\to\\client.cert"),
+            );
+
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let save_clicked = ui
@@ -487,11 +500,23 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         } else {
                             None
                         };
-                    let result = if let Some(idx) = app.editing_key_idx {
-                        app.keys
-                            .update_key(idx, &name, &value, full_tunnel, proxy_listen)
+                    let mtls_cert_path = if app.new_key_mtls_cert.is_empty() {
+                        None
                     } else {
-                        app.keys.add_key(&name, &value, full_tunnel, proxy_listen)
+                        Some(app.new_key_mtls_cert.clone())
+                    };
+                    let result = if let Some(idx) = app.editing_key_idx {
+                        app.keys.update_key(
+                            idx,
+                            &name,
+                            &value,
+                            full_tunnel,
+                            proxy_listen,
+                            mtls_cert_path,
+                        )
+                    } else {
+                        app.keys
+                            .add_key(&name, &value, full_tunnel, proxy_listen, mtls_cert_path)
                     };
                     match result {
                         Ok(()) => {
@@ -502,6 +527,7 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             app.new_key_full_tunnel = false;
                             app.new_key_use_proxy = false;
                             app.new_key_proxy_listen.clear();
+                            app.new_key_mtls_cert.clear();
                         }
                         Err(e) => app.set_error(e),
                     }
@@ -514,6 +540,7 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     app.new_key_full_tunnel = false;
                     app.new_key_use_proxy = false;
                     app.new_key_proxy_listen.clear();
+                    app.new_key_mtls_cert.clear();
                 }
             });
         });
@@ -549,10 +576,13 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         let key_str = key.key.clone();
                         let full_tunnel = key.full_tunnel;
                         let proxy_listen = key.proxy_listen.clone();
-                        if let Err(e) =
-                            app.vpn
-                                .connect(&key_str, full_tunnel, proxy_listen.as_deref())
-                        {
+                        let mtls_cert_path = key.mtls_cert_path.clone();
+                        if let Err(e) = app.vpn.connect(
+                            &key_str,
+                            full_tunnel,
+                            proxy_listen.as_deref(),
+                            mtls_cert_path.as_deref(),
+                        ) {
                             app.set_error(e);
                         }
                     }

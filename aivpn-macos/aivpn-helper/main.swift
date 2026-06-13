@@ -29,6 +29,7 @@ struct HelperRequest: Codable {
     let fullTunnel: Bool?    // full tunnel mode (for connect)
     let binaryPath: String?  // custom binary path (for connect/dev)
     let service: String?     // service name (for record_start)
+    let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
 }
 
 struct HelperResponse: Codable {
@@ -147,7 +148,7 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil) -> HelperResponse {
     killExistingClient()
 
     let clientPath = binaryPath ?? DEFAULT_CLIENT_PATH
@@ -171,6 +172,10 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperRe
     var args: [String] = [clientPath, "-k", key]
     if fullTunnel {
         args.append("--full-tunnel")
+    }
+    if let certPath = mtlsCertPath {
+        args.append("--mtls-cert")
+        args.append(certPath)
     }
 
     // Use posix_spawn for reliable process management
@@ -539,7 +544,8 @@ func handleConnection(_ clientFD: Int32) {
         }
         response = startClient(key: key,
                                fullTunnel: request.fullTunnel ?? false,
-                               binaryPath: request.binaryPath)
+                               binaryPath: request.binaryPath,
+                               mtlsCertPath: request.mtlsCertPath)
 
     case "disconnect":
         response = stopClient()

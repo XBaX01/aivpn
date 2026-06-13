@@ -186,6 +186,7 @@ pub async fn run_tunnel_android(
     server_port: u16,
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
+    mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
@@ -308,6 +309,18 @@ pub async fn run_tunnel_android(
     let mut transition_recv_win = std::mem::take(&mut recv_win);
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
+
+    if let Some(cert) = mtls_cert {
+        let cert_payload = ControlPayload::ClientCert {
+            cert_bytes: cert.clone(),
+        }
+        .encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &cert_payload);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+        log::debug!("mTLS: ClientCert sent ({} bytes)", cert.len());
+    }
 
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];

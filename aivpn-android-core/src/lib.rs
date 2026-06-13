@@ -44,7 +44,8 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_host: JString<'local>,
     server_port: jint,
     server_key_arr: JByteArray<'local>,
-    psk_obj: JObject<'local>, // nullable JByteArray
+    psk_obj: JObject<'local>,       // nullable JByteArray
+    mtls_cert_obj: JObject<'local>, // nullable JByteArray
 ) -> jstring {
     // ── Unpack arguments ──
     let host = match env.get_string(&server_host) {
@@ -90,6 +91,27 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         }
     };
 
+    let mtls_cert: Option<Vec<u8>> = if mtls_cert_obj.is_null() {
+        None
+    } else {
+        match env.is_instance_of(&mtls_cert_obj, "[B") {
+            Ok(true) => {}
+            Ok(false) => return make_str(&mut env, "mtls_cert must be a byte array (byte[])"),
+            Err(e) => return make_str(&mut env, &format!("mtls_cert type check failed: {e}")),
+        }
+        let arr: JByteArray<'local> = unsafe { JByteArray::from_raw(mtls_cert_obj.as_raw()) };
+        match env.convert_byte_array(&arr) {
+            Ok(b) if b.len() == 104 => Some(b),
+            Ok(b) => {
+                return make_str(
+                    &mut env,
+                    &format!("mtls_cert must be 104 bytes, got {}", b.len()),
+                )
+            }
+            Err(e) => return make_str(&mut env, &format!("bad mtls_cert: {e}")),
+        }
+    };
+
     // ── Get JavaVM for use inside the tokio runtime ──
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
@@ -117,6 +139,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         server_port as u16,
         key_bytes,
         psk,
+        mtls_cert,
         DEFAULT_MDH_LEN,
     ));
 

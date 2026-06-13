@@ -113,6 +113,7 @@ impl VpnManager {
         connection_key: &str,
         full_tunnel: bool,
         proxy_listen: Option<&str>,
+        mtls_cert_path: Option<&str>,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
@@ -143,6 +144,10 @@ impl VpnManager {
 
         if let Some(addr) = proxy_listen {
             cmd.arg("--proxy-listen").arg(addr);
+        }
+
+        if let Some(cert) = mtls_cert_path {
+            cmd.arg("--mtls-cert").arg(cert);
         }
 
         // Hide console window on Windows

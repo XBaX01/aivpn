@@ -21,6 +21,8 @@ pub extern "C" fn aivpn_run_tunnel(
     server_port: libc::c_int,
     server_key: *const u8,
     psk: *const u8,
+    cert_bytes: *const u8,
+    cert_len: libc::c_int,
     on_ready: Option<OnReadyFn>,
     ctx: *mut libc::c_void,
 ) -> libc::c_int {
@@ -48,6 +50,13 @@ pub extern "C" fn aivpn_run_tunnel(
         Some(arr)
     };
 
+    let mtls_cert: Option<Vec<u8>> = if cert_bytes.is_null() || cert_len <= 0 {
+        None
+    } else {
+        // SAFETY: cert_bytes points to cert_len bytes passed by Swift.
+        Some(unsafe { std::slice::from_raw_parts(cert_bytes, cert_len as usize).to_vec() })
+    };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -62,6 +71,7 @@ pub extern "C" fn aivpn_run_tunnel(
         server_port as u16,
         key_bytes,
         psk_opt,
+        mtls_cert,
         on_ready,
         SendCtx(ctx),
     )) {

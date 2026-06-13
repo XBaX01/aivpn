@@ -10,6 +10,7 @@ struct HelperRequest: Codable {
     let fullTunnel: Bool?
     let binaryPath: String?
     let service: String?
+    let mtlsCertPath: String?
 }
 
 struct HelperResponse: Codable {
@@ -363,7 +364,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -390,7 +391,8 @@ class VPNManager: ObservableObject {
             key: normalizedKey,
             fullTunnel: fullTunnel,
             binaryPath: binaryPath,
-            service: nil
+            service: nil,
+            mtlsCertPath: mtlsCertPath
         )
 
         sendToHelper(request) { [weak self] response in
