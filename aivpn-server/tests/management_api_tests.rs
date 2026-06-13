@@ -40,6 +40,7 @@ fn test_network_config() -> VpnNetworkConfig {
         prefix_len: 24,
         mtu: 1400,
         keepalive_secs: None,
+        ..Default::default()
     }
 }
 

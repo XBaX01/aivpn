@@ -16,7 +16,7 @@
 
 | Платформа | Сервер | Клиент | Полный туннель | Примечания |
 |-----------|--------|--------|----------------|------------|
-| **Linux** | ✅ | ✅ | ✅ | Основная платформа, TUN через `/dev/net/tun` |
+| **Linux** | ✅ | ✅ | ✅ | Основная платформа, TUN через `/dev/net/tun`; GUI-приложение (AppImage + трей) |
 | **macOS** | — | ✅ | ✅ | Через `utun`, автоматическая настройка маршрутов |
 | **Windows** | — | ✅ | ✅ | Через [Wintun](https://www.wintun.net/) драйвер |
 | **Android** | — | ✅ | ✅ | Kotlin-приложение через `VpnService` API |
@@ -632,26 +632,31 @@ cargo build --release --target x86_64-pc-windows-msvc
 ```
 aivpn/
 ├── aivpn-common/src/
-│   ├── crypto.rs        # X25519, ChaCha20-Poly1305, BLAKE3
-│   ├── mask.rs          # Профили мимикрии (WebRTC, QUIC, DNS)
-│   └── protocol.rs      # Формат пакетов, inner types
+│   ├── crypto.rs          # X25519, ChaCha20-Poly1305, BLAKE3
+│   ├── mask.rs            # Профили мимикрии (WebRTC, QUIC, DNS)
+│   ├── protocol.rs        # Формат пакетов, inner types
+│   └── kernel_accel.rs    # API /dev/aivpn + XDP-хелперы
 ├── aivpn-client/src/
-│   ├── client.rs        # Основная логика клиента
-│   ├── tunnel.rs        # TUN-интерфейс (Linux / macOS / Windows)
-│   └── mimicry.rs       # Движок шейпинга трафика
+│   ├── client.rs          # Логика клиента (split-tunnel, kill-switch, XDP)
+│   ├── tunnel.rs          # TUN-интерфейс (Linux / macOS / Windows)
+│   ├── kill_switch.rs     # Kill-switch (nftables / pfctl / netsh)
+│   └── mimicry.rs         # Движок шейпинга трафика
 ├── aivpn-server/src/
-│   ├── gateway.rs       # UDP-шлюз, MaskCatalog, resonance loop
-│   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT-форвардер (iptables)
-│   ├── client_db.rs     # База клиентов (PSK, статический IP, статистика)
-│   ├── key_rotation.rs  # Ротация сессионных ключей
-│   └── metrics.rs       # Prometheus-мониторинг
-├── aivpn-android/       # Android-клиент (Kotlin)
-├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, мост socketpair TUN)
-├── aivpn-ios/           # iOS SwiftUI-приложение + расширение NEPacketTunnelProvider
+│   ├── gateway.rs         # UDP-шлюз, MaskCatalog, resonance loop
+│   ├── neural.rs          # Baked Mask Encoder, AnomalyDetector
+│   ├── nat.rs             # NAT-форвардер (IPv4 + IPv6 NAT66)
+│   ├── client_db.rs       # База клиентов (PSK, статический IP, статистика)
+│   ├── key_rotation.rs    # Ротация сессионных ключей
+│   └── metrics.rs         # Prometheus-мониторинг
+├── aivpn-common/mask-assets/   # 11 профилей мимикрии трафика (JSON)
+├── aivpn-linux/           # Linux Iced GUI (AppImage + системный трей)
+├── aivpn-linux-kernel/    # Опциональный ядерный модуль (aivpn.ko) + XDP-фильтр
+├── aivpn-android/         # Android-клиент (Kotlin)
+├── aivpn-ios-core/        # iOS Rust staticlib (C FFI)
+├── aivpn-ios/             # iOS SwiftUI + NEPacketTunnelProvider
 ├── Dockerfile
 ├── docker-compose.yml
-└── build.sh
+└── THREAT_MODEL.md        # Модель угроз и безопасность протокола
 ```
 
 ## Разработка и контрибы

@@ -78,6 +78,272 @@ fn ipt_delete(table: &str, chain: &str, rule: &[&str]) {
     let _ = Command::new("iptables").args(&del).output();
 }
 
+// ── IPv6 NAT66 helpers ────────────────────────────────────────────────────
+
+/// Assign an IPv6 address to a TUN interface.
+///
+/// Equivalent to: `ip -6 addr add <addr>/<prefix_len> dev <tun_name>`
+#[cfg(target_os = "linux")]
+pub fn assign_ipv6_to_tun(
+    tun_name: &str,
+    addr: &str,
+    prefix_len: u8,
+) -> std::result::Result<(), String> {
+    use std::process::Command;
+    let cidr = format!("{}/{}", addr, prefix_len);
+    let out = Command::new("ip")
+        .args(["-6", "addr", "add", &cidr, "dev", tun_name])
+        .output()
+        .map_err(|e| format!("ip addr add ipv6 spawn: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // "RTNETLINK answers: File exists" means the address is already set — treat as OK.
+        if stderr.contains("File exists") {
+            return Ok(());
+        }
+        Err(format!("ip -6 addr add failed: {stderr}"))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn assign_ipv6_to_tun(_tun_name: &str, _addr: &str, _prefix_len: u8) -> Result<(), String> {
+    Err("assign_ipv6_to_tun is only supported on Linux".to_string())
+}
+
+/// Install NAT66 masquerading rules for the given ULA prefix.
+///
+/// Uses the same nftables/iptables auto-detection as the IPv4 path.
+/// The nftables table is named `aivpn6`; ip6tables rules carry the `aivpn`
+/// comment tag for easy identification/removal.
+#[cfg(target_os = "linux")]
+pub fn setup_nat66(tun_name: &str, prefix: &str) -> std::result::Result<(), String> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    // Enable IPv6 forwarding (idempotent).
+    let fwd = std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/forwarding").unwrap_or_default();
+    if fwd.trim() != "1" {
+        let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+    }
+
+    let use_nft = Command::new("nft")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if use_nft {
+        // Remove stale table from a previous run.
+        let _ = Command::new("nft")
+            .args(["delete", "table", "ip6", "aivpn6"])
+            .output();
+
+        let ruleset = format!(
+            "table ip6 aivpn6 {{\n\
+             \tchain nat_out {{\n\
+             \t\ttype nat hook postrouting priority srcnat;\n\
+             \t\tip6 saddr {prefix} masquerade\n\
+             \t}}\n\
+             \tchain forward {{\n\
+             \t\ttype filter hook forward priority filter;\n\
+             \t\tiifname \"{tun_name}\" accept\n\
+             \t\toifname \"{tun_name}\" ct state related,established accept\n\
+             \t}}\n\
+             }}\n"
+        );
+
+        let mut child = Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("nft spawn (nat66): {e}"))?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(ruleset.as_bytes());
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("nft wait (nat66): {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "nftables nat66 setup failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        info!("nftables: aivpn6 table installed (NAT66 + forward)");
+    } else {
+        // ip6tables fallback.
+        let c = "aivpn";
+        ip6t_ensure(
+            "nat",
+            "POSTROUTING",
+            &[
+                "-s",
+                prefix,
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "MASQUERADE",
+            ],
+        );
+        ip6t_ensure(
+            "filter",
+            "FORWARD",
+            &[
+                "-i",
+                tun_name,
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "ACCEPT",
+            ],
+        );
+        ip6t_ensure(
+            "filter",
+            "FORWARD",
+            &[
+                "-o",
+                tun_name,
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "ACCEPT",
+            ],
+        );
+        info!("ip6tables: aivpn NAT66 + forward rules installed");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn setup_nat66(_tun_name: &str, _prefix: &str) -> Result<(), String> {
+    Err("setup_nat66 is only supported on Linux".to_string())
+}
+
+/// Remove NAT66 masquerading rules installed by [`setup_nat66`].
+#[cfg(target_os = "linux")]
+pub fn teardown_nat66(tun_name: &str, prefix: &str) -> std::result::Result<(), String> {
+    use std::process::Command;
+
+    let use_nft = Command::new("nft")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if use_nft {
+        let _ = Command::new("nft")
+            .args(["delete", "table", "ip6", "aivpn6"])
+            .output();
+        info!("nftables: aivpn6 table removed");
+    } else {
+        let c = "aivpn";
+        ip6t_delete(
+            "nat",
+            "POSTROUTING",
+            &[
+                "-s",
+                prefix,
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "MASQUERADE",
+            ],
+        );
+        ip6t_delete(
+            "filter",
+            "FORWARD",
+            &[
+                "-i",
+                tun_name,
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "ACCEPT",
+            ],
+        );
+        ip6t_delete(
+            "filter",
+            "FORWARD",
+            &[
+                "-o",
+                tun_name,
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-m",
+                "comment",
+                "--comment",
+                c,
+                "-j",
+                "ACCEPT",
+            ],
+        );
+        info!("ip6tables: aivpn NAT66 rules removed");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn teardown_nat66(_tun_name: &str, _prefix: &str) -> Result<(), String> {
+    Err("teardown_nat66 is only supported on Linux".to_string())
+}
+
+/// Add an ip6tables rule only if an identical rule does not already exist.
+#[cfg(target_os = "linux")]
+fn ip6t_ensure(table: &str, chain: &str, rule: &[&str]) {
+    use std::process::Command;
+    let mut check: Vec<&str> = vec!["-t", table, "-C", chain];
+    check.extend_from_slice(rule);
+    let exists = Command::new("ip6tables")
+        .args(&check)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        let mut add: Vec<&str> = vec!["-t", table, "-A", chain];
+        add.extend_from_slice(rule);
+        if let Ok(out) = Command::new("ip6tables").args(&add).output() {
+            if !out.status.success() {
+                warn!(
+                    "ip6tables add failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
+}
+
+/// Delete an ip6tables rule (best-effort; silently ignores "not found").
+#[cfg(target_os = "linux")]
+fn ip6t_delete(table: &str, chain: &str, rule: &[&str]) {
+    use std::process::Command;
+    let mut del: Vec<&str> = vec!["-t", table, "-D", chain];
+    del.extend_from_slice(rule);
+    let _ = Command::new("ip6tables").args(&del).output();
+}
+
 // ── NatForwarder ───────────────────────────────────────────────────────────
 
 /// NAT Forwarder for routing VPN client traffic to the internet.

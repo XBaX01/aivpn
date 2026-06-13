@@ -15,7 +15,7 @@ To validate this in practice, I built my own DPI emulator, reproduced real filte
 
 | Platform | Server | Client | Full Tunnel | Notes |
 |----------|--------|--------|-------------|-------|
-| **Linux** | ✅ | ✅ | ✅ | Primary platform, TUN via `/dev/net/tun` |
+| **Linux** | ✅ | ✅ | ✅ | Primary platform, TUN via `/dev/net/tun`; GUI app (AppImage + tray) |
 | **macOS** | — | ✅ | ✅ | Via `utun` kernel interface, auto route config |
 | **Windows** | — | ✅ | ✅ | Via [Wintun](https://www.wintun.net/) driver |
 | **Android** | — | ✅ | ✅ | Native Kotlin app via `VpnService` API |
@@ -618,26 +618,31 @@ For Entware routers, the usual flow is: build or download the musl artifact, cop
 ```
 aivpn/
 ├── aivpn-common/src/
-│   ├── crypto.rs        # X25519, ChaCha20-Poly1305, BLAKE3
-│   ├── mask.rs          # Mimicry profiles (WebRTC, QUIC, DNS)
-│   └── protocol.rs      # Packet format, inner types
+│   ├── crypto.rs          # X25519, ChaCha20-Poly1305, BLAKE3
+│   ├── mask.rs            # Mimicry profiles (WebRTC, QUIC, DNS)
+│   ├── protocol.rs        # Packet format, inner types
+│   └── kernel_accel.rs    # /dev/aivpn ioctl API + XDP attach helpers
 ├── aivpn-client/src/
-│   ├── client.rs        # Core client logic
-│   ├── tunnel.rs        # TUN interface (Linux / macOS / Windows)
-│   └── mimicry.rs       # Traffic shaping engine
+│   ├── client.rs          # Core client logic (split-tunnel, kill-switch, XDP)
+│   ├── tunnel.rs          # TUN interface (Linux / macOS / Windows)
+│   ├── kill_switch.rs     # Kill-switch (nftables/pfctl/netsh)
+│   └── mimicry.rs         # Traffic shaping engine
 ├── aivpn-server/src/
-│   ├── gateway.rs       # UDP gateway, MaskCatalog, resonance loop
-│   ├── neural.rs        # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs           # NAT forwarder (nftables/iptables, auto-detected)
-│   ├── client_db.rs     # Client database (PSK, static IP, stats)
-│   ├── key_rotation.rs  # Session key rotation
-│   └── metrics.rs       # Prometheus monitoring
-├── aivpn-android/       # Android client (Kotlin)
-├── aivpn-ios-core/      # iOS Rust staticlib (C FFI, socketpair TUN bridge)
-├── aivpn-ios/           # iOS SwiftUI app + NEPacketTunnelProvider extension
+│   ├── gateway.rs         # UDP gateway, MaskCatalog, resonance loop
+│   ├── neural.rs          # Baked Mask Encoder, AnomalyDetector
+│   ├── nat.rs             # NAT forwarder (IPv4 + IPv6 NAT66)
+│   ├── client_db.rs       # Client database (PSK, static IP, stats)
+│   ├── key_rotation.rs    # Session key rotation
+│   └── metrics.rs         # Prometheus monitoring
+├── aivpn-common/mask-assets/   # 11 traffic mimicry profiles (JSON)
+├── aivpn-linux/           # Linux Iced GUI (AppImage + system tray)
+├── aivpn-linux-kernel/    # Optional kernel module (aivpn.ko) + XDP filter
+├── aivpn-android/         # Android client (Kotlin)
+├── aivpn-ios-core/        # iOS Rust staticlib (C FFI)
+├── aivpn-ios/             # iOS SwiftUI app + NEPacketTunnelProvider
 ├── Dockerfile
 ├── docker-compose.yml
-└── build.sh
+└── THREAT_MODEL.md        # Protocol security & adversary model
 ```
 
 ## Contributing

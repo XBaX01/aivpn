@@ -34,7 +34,7 @@ use crate::bootstrap_cache;
 use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
 #[cfg(target_os = "linux")]
-use aivpn_common::kernel_accel::KernelAccel;
+use aivpn_common::kernel_accel::{xdp_attach, xdp_default_iface, xdp_detach, KernelAccel};
 #[cfg(target_os = "linux")]
 use libc;
 
@@ -119,6 +119,9 @@ pub struct AivpnClient {
     /// Kernel-module accelerator (Linux only, auto-detected via /dev/aivpn).
     #[cfg(target_os = "linux")]
     kernel_accel: Option<Arc<KernelAccel>>,
+    /// Interface on which the XDP early-filter was attached (Linux only).
+    #[cfg(target_os = "linux")]
+    xdp_iface: Option<String>,
 }
 
 impl AivpnClient {
@@ -141,6 +144,8 @@ impl AivpnClient {
             session_keys: None,
             #[cfg(target_os = "linux")]
             kernel_accel: None,
+            #[cfg(target_os = "linux")]
+            xdp_iface: None,
             upload_state: None,
             transition_recv_keys: None,
             transition_recv_deadline: None,
@@ -253,6 +258,16 @@ impl AivpnClient {
                 }
             }
             self.kernel_accel = ka.map(Arc::new);
+
+            // Attach XDP early-filter to the physical NIC (best-effort).
+            // XDP drops malformed/expired packets at NIC level before socket buffer
+            // allocation, providing DDoS protection independent of aivpn.ko.
+            if let Some(iface) = xdp_default_iface() {
+                match xdp_attach(&iface, server_addr.port(), 10_000) {
+                    Ok(()) => self.xdp_iface = Some(iface),
+                    Err(e) => info!("XDP early-filter not available: {e}"),
+                }
+            }
         }
 
         if self.config.proxy_listen.is_none() {
@@ -260,6 +275,14 @@ impl AivpnClient {
             // Enable full tunnel only after the server UDP path is established.
             if self.config.tun_config.full_tunnel {
                 self.tunnel.enable_full_tunnel()?;
+            }
+            if !self.config.tun_config.include_routes.is_empty()
+                || !self.config.tun_config.exclude_routes.is_empty()
+            {
+                self.tunnel.apply_split_routes()?;
+            }
+            if self.config.tun_config.kill_switch {
+                self.tunnel.activate_kill_switch()?;
             }
         }
 
@@ -314,7 +337,7 @@ impl AivpnClient {
         let tun_name = self.config.tun_config.tun_name.clone();
         let full_tunnel = self.config.tun_config.full_tunnel;
         if self.config.proxy_listen.is_none() {
-            self.tunnel.apply_network_config(network_config)?;
+            self.tunnel.apply_network_config(network_config.clone())?;
         }
         self.config.tun_config =
             TunnelConfig::from_network_config(tun_name, network_config, full_tunnel);
@@ -335,6 +358,12 @@ impl AivpnClient {
 
         self.state = ClientState::Disconnected;
         self.udp_socket = None;
+
+        // Detach XDP filter (Linux only, best-effort)
+        #[cfg(target_os = "linux")]
+        if let Some(ref iface) = self.xdp_iface.take() {
+            xdp_detach(iface);
+        }
 
         // Zeroize keys
         self.session_keys = None;

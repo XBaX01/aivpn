@@ -84,6 +84,31 @@ pub struct ClientArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub proxy_listen: Option<String>,
 
+    /// Route only these CIDRs through the VPN (comma-separated, split-tunnel mode).
+    /// Example: --include-routes 10.0.0.0/8,192.168.1.0/24
+    #[arg(
+        long,
+        value_name = "CIDR,...",
+        use_value_delimiter = true,
+        value_delimiter = ','
+    )]
+    pub include_routes: Vec<String>,
+
+    /// Bypass the VPN for these CIDRs (comma-separated). Use with --full-tunnel to exclude subnets.
+    /// Example: --exclude-routes 192.168.0.0/16,172.16.0.0/12
+    #[arg(
+        long,
+        value_name = "CIDR,...",
+        use_value_delimiter = true,
+        value_delimiter = ','
+    )]
+    pub exclude_routes: Vec<String>,
+
+    /// Block all non-VPN traffic while connected (kill-switch / leak protection).
+    /// Rules persist after unexpected process death; run `kill-switch clear` to recover.
+    #[arg(long, default_value_t = false)]
+    pub kill_switch: bool,
+
     #[command(subcommand)]
     pub command: Option<ClientCommand>,
 }
@@ -95,6 +120,18 @@ pub enum ClientCommand {
         #[command(subcommand)]
         action: RecordAction,
     },
+    /// Kill-switch management
+    #[command(name = "kill-switch")]
+    KillSwitch {
+        #[command(subcommand)]
+        action: KillSwitchAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum KillSwitchAction {
+    /// Remove stale kill-switch firewall rules left by a previous session
+    Clear,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -126,6 +163,9 @@ struct ClientFileConfig {
     network_config: Option<ClientNetworkConfig>,
     bootstrap_descriptor_urls: Option<Vec<String>>,
     bootstrap_descriptors: Option<Vec<BootstrapDescriptor>>,
+    include_routes: Option<Vec<String>>,
+    exclude_routes: Option<Vec<String>>,
+    kill_switch: Option<bool>,
 }
 
 fn load_client_file_config(path: Option<&str>) -> Option<ClientFileConfig> {
@@ -188,6 +228,13 @@ async fn main() {
     // Handle subcommands
     if let Some(command) = args.command {
         match command {
+            ClientCommand::KillSwitch { action } => match action {
+                KillSwitchAction::Clear => {
+                    aivpn_client::kill_switch::KillSwitch::clear_stale();
+                    println!("Kill-switch stale rules cleared.");
+                    return;
+                }
+            },
             ClientCommand::Record { action } => {
                 match action {
                     RecordAction::Start { service } => {
@@ -303,6 +350,7 @@ async fn main() {
                             mtu: DEFAULT_VPN_MTU,
                             mdh_len: 20,
                             keepalive_secs: None,
+                            ipv6_address: None,
                         })
                 })
             })
@@ -358,7 +406,7 @@ async fn main() {
             .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok());
         let network_config = file_config
             .as_ref()
-            .and_then(|config| config.network_config)
+            .and_then(|config| config.network_config.clone())
             .unwrap_or_else(|| {
                 fallback_network_config(
                     file_config
@@ -527,16 +575,41 @@ async fn main() {
             }
         };
 
+        let include_routes: Vec<String> = if !args.include_routes.is_empty() {
+            args.include_routes.clone()
+        } else {
+            file_config
+                .as_ref()
+                .and_then(|c| c.include_routes.clone())
+                .unwrap_or_default()
+        };
+        let exclude_routes: Vec<String> = if !args.exclude_routes.is_empty() {
+            args.exclude_routes.clone()
+        } else {
+            file_config
+                .as_ref()
+                .and_then(|c| c.exclude_routes.clone())
+                .unwrap_or_default()
+        };
+        let mut tun_config = TunnelConfig::from_network_config(
+            tun_name.clone(),
+            network_config.clone(),
+            full_tunnel,
+        );
+        tun_config.include_routes = include_routes;
+        tun_config.exclude_routes = exclude_routes;
+        tun_config.kill_switch = args.kill_switch
+            || file_config
+                .as_ref()
+                .and_then(|c| c.kill_switch)
+                .unwrap_or(false);
+
         let config = ClientConfig {
             server_addr: server_addr.clone(),
             server_public_key,
             preshared_key,
             initial_mask,
-            tun_config: TunnelConfig::from_network_config(
-                tun_name.clone(),
-                network_config,
-                full_tunnel,
-            ),
+            tun_config,
             proxy_listen,
         };
 
@@ -607,5 +680,6 @@ fn fallback_network_config(tun_addr: &str) -> ClientNetworkConfig {
         mtu: DEFAULT_VPN_MTU,
         mdh_len: 20,
         keepalive_secs: None,
+        ipv6_address: None,
     }
 }

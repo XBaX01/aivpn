@@ -9,6 +9,8 @@ struct ContentView: View {
     @State private var showKeyInput: Bool = false
     @State private var showConnectionKey: Bool = false
     @AppStorage("fullTunnel") private var fullTunnel: Bool = false
+    @AppStorage("proxyMode") private var proxyMode: Bool = false
+    @AppStorage("proxyPort") private var proxyPort: String = "1080"
     @State private var editingKeyId: String?
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
@@ -210,7 +212,33 @@ struct ContentView: View {
                             .toggleStyle(.checkbox)
                             .font(.caption)
                             .help(loc.t("full_tunnel_help"))
+                            .disabled(proxyMode)
                         Spacer()
+                    }
+
+                    HStack {
+                        Toggle(loc.t("proxy_mode"), isOn: $proxyMode)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help(loc.t("proxy_mode_help"))
+                        Spacer()
+                    }
+
+                    if proxyMode {
+                        HStack(spacing: 4) {
+                            Text(loc.t("proxy_port"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("1080", text: $proxyPort)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11))
+                                .frame(width: 64)
+                                .onReceive(proxyPort.publisher.collect()) { _ in
+                                    let filtered = proxyPort.filter { $0.isNumber }
+                                    if filtered != proxyPort { proxyPort = filtered }
+                                }
+                            Spacer()
+                        }
                     }
                     
                     HStack(spacing: 8) {
@@ -354,7 +382,11 @@ struct ContentView: View {
                     if !vpn.helperAvailable {
                         vpn.checkHelperAvailable()
                     } else {
-                        vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel)
+                        if proxyMode, let port = Int(proxyPort), port > 1024 {
+                            vpn.connectProxy(key: selectedKey.keyValue, proxyPort: port)
+                        } else {
+                            vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel)
+                        }
                     }
                 }
             }) {
@@ -395,7 +427,7 @@ struct ContentView: View {
 
             // Footer
             HStack {
-                Text("AIVPN v0.6.0")
+                Text("AIVPN v0.7.0")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()

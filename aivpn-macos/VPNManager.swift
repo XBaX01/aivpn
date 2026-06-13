@@ -82,10 +82,16 @@ class VPNManager: ObservableObject {
         get { KeychainStorage.shared.keys }
     }
 
+    @Published var isProxyMode: Bool = false
+
     private var statusPollTimer: Timer?
     private var trafficTimer: Timer?
     private var minimumRecordingStatusTimestamp: UInt64 = 0
     private var lastRecordingNotificationTimestamp: UInt64 = 0
+
+    private var proxyProcess: Process?
+    private var proxyPollTimer: Timer?
+    private let proxyLogPath = "/tmp/aivpn-proxy.log"
 
     private let socketPath = "/var/run/aivpn/helper.sock"
 
@@ -406,7 +412,117 @@ class VPNManager: ObservableObject {
         }
     }
 
+    // MARK: - Proxy Mode (no root required for ports > 1024)
+
+    /// Launch aivpn-client directly as current user in SOCKS5 proxy mode.
+    /// Does NOT go through the privileged helper — root is not needed for high ports.
+    func connectProxy(key: String, proxyPort: Int) {
+        guard !isConnecting else { return }
+
+        let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            .replacingOccurrences(of: "aivpn://", with: "")
+
+        savedKey = normalizedKey
+        saveKey(normalizedKey)
+
+        isConnecting = true
+        isProxyMode = true
+        lastError = nil
+        bytesSent = 0
+        bytesReceived = 0
+
+        guard let binaryPath = helperClientBinaryPath(),
+              FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            isConnecting = false
+            isProxyMode = false
+            lastError = "aivpn-client binary not found"
+            return
+        }
+
+        // Clear log file
+        FileManager.default.createFile(atPath: proxyLogPath, contents: nil)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = ["-k", normalizedKey, "--proxy-listen", "127.0.0.1:\(proxyPort)"]
+        var env = ProcessInfo.processInfo.environment
+        env["RUST_LOG"] = "info"
+        process.environment = env
+
+        if let fh = FileHandle(forWritingAtPath: proxyLogPath) {
+            process.standardOutput = fh
+            process.standardError = fh
+        }
+
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, self.isProxyMode else { return }
+                self.stopProxyPoll()
+                self.proxyProcess = nil
+                self.isConnected = false
+                self.isConnecting = false
+                self.isProxyMode = false
+            }
+        }
+
+        do {
+            try process.run()
+            proxyProcess = process
+            startProxyPoll()
+        } catch {
+            isConnecting = false
+            isProxyMode = false
+            lastError = "Failed to start proxy: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopProxyMode() {
+        proxyProcess?.terminate()
+        proxyProcess = nil
+        stopProxyPoll()
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.isConnecting = false
+            self.isProxyMode = false
+        }
+    }
+
+    private func startProxyPoll() {
+        proxyPollTimer?.invalidate()
+        proxyPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollProxyLog()
+        }
+    }
+
+    private func stopProxyPoll() {
+        proxyPollTimer?.invalidate()
+        proxyPollTimer = nil
+    }
+
+    private func pollProxyLog() {
+        guard let log = try? String(contentsOfFile: proxyLogPath, encoding: .utf8) else { return }
+        if log.contains("SOCKS5 proxy listening") {
+            stopProxyPoll()
+            DispatchQueue.main.async {
+                self.isConnected = true
+                self.isConnecting = false
+            }
+        } else if log.contains("ERROR") || log.contains("error") {
+            let lines = log.components(separatedBy: "\n").filter { !$0.isEmpty }
+            if let last = lines.last {
+                DispatchQueue.main.async {
+                    self.lastError = String(last.prefix(200))
+                }
+            }
+        }
+    }
+
     func disconnect() {
+        if isProxyMode {
+            stopProxyMode()
+            return
+        }
+
         let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil)
 
         sendToHelper(request) { [weak self] _ in

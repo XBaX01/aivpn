@@ -1,7 +1,7 @@
 //! AIVPN Server Binary
 
 use aivpn_common::crypto;
-use aivpn_common::mask::MaskProfile;
+use aivpn_common::mask::{IATDistType, MaskProfile, SizeDistType};
 use aivpn_common::network_config::{
     netmask_to_prefix_len, ClientNetworkConfig, VpnNetworkConfig, DEFAULT_VPN_MTU,
 };
@@ -9,7 +9,7 @@ use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,79 @@ use tracing::{error, info};
 const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/aivpn/server.json";
 const LOCAL_SERVER_CONFIG_PATH: &str = "config/server.json";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:443";
+
+/// `"auto"` or a fixed number in `server.json` `tun_mtu` field.
+#[derive(Debug, Clone)]
+enum MtuSetting {
+    Auto,
+    Fixed(u16),
+}
+
+impl<'de> Deserialize<'de> for MtuSetting {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        match v {
+            serde_json::Value::String(s) if s == "auto" => Ok(MtuSetting::Auto),
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .and_then(|n| if n <= 65535 { Some(n as u16) } else { None })
+                .map(MtuSetting::Fixed)
+                .ok_or_else(|| D::Error::custom("tun_mtu must be 0–65535")),
+            _ => Err(D::Error::custom("tun_mtu must be a number or \"auto\"")),
+        }
+    }
+}
+
+/// Probe the outbound-interface MTU via `/sys/class/net` and subtract VPN overhead.
+/// Falls back to `DEFAULT_TUN_MTU` on any error.
+fn detect_mtu() -> u16 {
+    let iface = (|| -> Option<String> {
+        let out = std::process::Command::new("ip")
+            .args(["route", "get", "1.1.1.1"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // "1.1.1.1 via … dev eth0 …" — extract the token after "dev"
+        let mut it = text.split_whitespace();
+        while let Some(tok) = it.next() {
+            if tok == "dev" {
+                return it.next().map(|s| s.to_string());
+            }
+        }
+        None
+    })();
+
+    let physical_mtu: Option<u16> = iface.as_deref().and_then(|dev| {
+        let path = format!("/sys/class/net/{dev}/mtu");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+    });
+
+    match physical_mtu {
+        Some(mtu) => {
+            // 20 IP + 8 UDP + 8 tag + 1 pad_len + 2 inner_hdr + 16 poly1305 = 55; round to 64
+            let overhead: u16 = 64;
+            let effective = mtu.saturating_sub(overhead).clamp(1200, 1420);
+            info!(
+                "MTU auto-detected: physical={} (dev={}) → tun={}",
+                mtu,
+                iface.as_deref().unwrap_or("?"),
+                effective
+            );
+            effective
+        }
+        None => {
+            info!(
+                "MTU auto-detection failed (iface={:?}), using default {}",
+                iface,
+                aivpn_server::nat::DEFAULT_TUN_MTU
+            );
+            aivpn_server::nat::DEFAULT_TUN_MTU
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ServerFileConfig {
@@ -30,13 +103,19 @@ struct ServerFileConfig {
     bootstrap_mask_files: Option<Vec<String>>,
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
-    tun_mtu: Option<u16>,
+    tun_mtu: Option<MtuSetting>,
 }
 
 #[tokio::main]
 async fn main() {
     // Parse arguments first (before logging for CLI commands)
     let args = ServerArgs::parse_from(std::env::args());
+
+    // Mask validation doesn't need the server config or client DB.
+    if let Some(ref path) = args.validate_mask {
+        handle_validate_mask(path);
+        return;
+    }
 
     let config_path = resolve_config_path(&args);
     let file_config = load_server_file_config(config_path.as_deref());
@@ -51,7 +130,7 @@ async fn main() {
 
     // Load client database
     let clients_db_path = Path::new(&args.clients_db);
-    let client_db = match ClientDatabase::load(clients_db_path, network_config) {
+    let client_db = match ClientDatabase::load(clients_db_path, network_config.clone()) {
         Ok(db) => Arc::new(db),
         Err(e) => {
             eprintln!("Failed to load client database: {}", e);
@@ -183,10 +262,10 @@ async fn main() {
         session_timeout_secs: file_config.as_ref().and_then(|c| c.session_timeout_secs),
         idle_timeout_secs: file_config.as_ref().and_then(|c| c.idle_timeout_secs),
         bootstrap_masks,
-        tun_mtu: file_config
-            .as_ref()
-            .and_then(|c| c.tun_mtu)
-            .unwrap_or(aivpn_server::nat::DEFAULT_TUN_MTU),
+        tun_mtu: match file_config.as_ref().and_then(|c| c.tun_mtu.as_ref()) {
+            Some(MtuSetting::Fixed(v)) => *v,
+            Some(MtuSetting::Auto) | None => detect_mtu(),
+        },
     };
 
     // Spawn management API (Unix socket, optional)
@@ -506,18 +585,20 @@ fn resolve_config_path(args: &ServerArgs) -> Option<String> {
         return Some(path.clone());
     }
 
+    // Only auto-select a config file that can actually be opened; an existing
+    // but unreadable file (e.g. /etc/aivpn/server.json owned by root) must not
+    // trigger a hard exit — the server falls back to defaults instead.
     [DEFAULT_SERVER_CONFIG_PATH, LOCAL_SERVER_CONFIG_PATH]
         .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
-        .map(|path| path.to_string_lossy().into_owned())
+        .find(|path| std::fs::File::open(path).is_ok())
+        .map(|path| path.to_string())
 }
 
 fn resolve_network_config(
     file_config: Option<&ServerFileConfig>,
 ) -> aivpn_common::error::Result<VpnNetworkConfig> {
     let config = if let Some(file_config) = file_config {
-        if let Some(network_config) = file_config.network_config {
+        if let Some(network_config) = file_config.network_config.clone() {
             network_config
         } else {
             VpnNetworkConfig {
@@ -529,6 +610,8 @@ fn resolve_network_config(
                 )?,
                 mtu: DEFAULT_VPN_MTU,
                 keepalive_secs: None,
+                ipv6_enabled: false,
+                ipv6_prefix: "fd10:cafe::/48".to_string(),
             }
         }
     } else {
@@ -603,6 +686,191 @@ fn resolve_mask_dir(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -
     PathBuf::from(DEFAULT_MASK_DIR)
 }
 
+fn handle_validate_mask(path: &str) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let profile: MaskProfile = match serde_json::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: JSON parse failed in {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut issues: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // signature_vector
+    let sig_len = profile.signature_vector.len();
+    if sig_len != 64 {
+        issues.push(format!("signature_vector: {sig_len} floats (expected 64)"));
+    } else if !profile.signature_vector.iter().all(|v| v.is_finite()) {
+        issues.push("signature_vector: contains NaN or Inf".to_string());
+    } else {
+        let l2: f32 = profile
+            .signature_vector
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        if l2 == 0.0 {
+            warnings.push(
+                "signature_vector is all-zeros — neural resonance inactive for this mask"
+                    .to_string(),
+            );
+        }
+    }
+
+    // header_template vs eph_pub_offset
+    let hdr_len = profile.header_template.len();
+    if hdr_len != profile.eph_pub_offset as usize {
+        issues.push(format!(
+            "header_template length ({hdr_len}) != eph_pub_offset ({})",
+            profile.eph_pub_offset
+        ));
+    }
+    if profile.eph_pub_length != 32 {
+        warnings.push(format!(
+            "eph_pub_length = {} (expected 32 for X25519)",
+            profile.eph_pub_length
+        ));
+    }
+    let eph_end = profile.eph_pub_offset as u32 + profile.eph_pub_length as u32;
+    if eph_end > 1350 {
+        issues.push(format!(
+            "eph region ends at byte {eph_end}, which exceeds 1350"
+        ));
+    }
+
+    // size distribution bins sum
+    if matches!(profile.size_distribution.dist_type, SizeDistType::Histogram) {
+        let sum: f32 = profile.size_distribution.bins.iter().map(|b| b.2).sum();
+        if (sum - 1.0).abs() > 0.02 {
+            issues.push(format!(
+                "size_distribution bins sum = {sum:.4} (expected 1.0 ± 0.02)"
+            ));
+        }
+    }
+
+    // FSM integrity
+    let state_ids: std::collections::HashSet<u16> =
+        profile.fsm_states.iter().map(|s| s.state_id).collect();
+    if !state_ids.contains(&profile.fsm_initial_state) {
+        issues.push(format!(
+            "fsm_initial_state {} not found in fsm_states",
+            profile.fsm_initial_state
+        ));
+    }
+    for state in &profile.fsm_states {
+        for t in &state.transitions {
+            if !state_ids.contains(&t.next_state) {
+                issues.push(format!(
+                    "FSM state {}: transition to unknown state {}",
+                    state.state_id, t.next_state
+                ));
+            }
+        }
+    }
+
+    // expiry
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_str = if profile.expires_at == u64::MAX {
+        "never".to_string()
+    } else if profile.expires_at < now_secs {
+        let days = (now_secs - profile.expires_at) / 86400;
+        issues.push(format!("mask expired {days} day(s) ago"));
+        format!("EXPIRED ({days} days ago)")
+    } else {
+        let days = (profile.expires_at - now_secs) / 86400;
+        format!("{days} days remaining")
+    };
+
+    // ── Report ────────────────────────────────────────────────────────────
+    println!("═══════════════════════════════════════════════════════");
+    println!("Mask:     {} (v{})", profile.mask_id, profile.version);
+    println!("Protocol: {:?}", profile.spoof_protocol);
+    println!(
+        "Header:   {} bytes, eph_pub @ {}..{}",
+        hdr_len, profile.eph_pub_offset, eph_end
+    );
+    println!("Expires:  {expires_str}");
+
+    let l2: f32 = if sig_len == 64 {
+        profile
+            .signature_vector
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt()
+    } else {
+        0.0
+    };
+    println!("Sig vec:  {sig_len} floats, L2={l2:.3}");
+
+    println!("───────────────────────────────────────────────────────");
+
+    match profile.size_distribution.dist_type {
+        SizeDistType::Histogram => {
+            let bins = &profile.size_distribution.bins;
+            let sum: f32 = bins.iter().map(|b| b.2).sum();
+            println!("Size:     Histogram ({} bins), sum={sum:.3}", bins.len());
+            for (lo, hi, p) in bins {
+                println!("          [{lo}–{hi}]: {:.1}%", p * 100.0);
+            }
+        }
+        SizeDistType::Parametric => {
+            println!(
+                "Size:     Parametric ({:?})",
+                profile.size_distribution.parametric_type
+            );
+        }
+    }
+
+    let (jlo, jhi) = profile.iat_distribution.jitter_range_ms;
+    let iat_type = match profile.iat_distribution.dist_type {
+        IATDistType::Exponential => "Exponential",
+        IATDistType::LogNormal => "LogNormal",
+        IATDistType::Empirical => "Empirical",
+        IATDistType::Gamma => "Gamma",
+    };
+    println!(
+        "IAT:      {} params={:?} jitter=[{jlo:.1}, {jhi:.1}] ms",
+        iat_type, profile.iat_distribution.params
+    );
+
+    println!(
+        "FSM:      {} states, initial={}",
+        profile.fsm_states.len(),
+        profile.fsm_initial_state
+    );
+    println!("───────────────────────────────────────────────────────");
+
+    for w in &warnings {
+        println!("WARN:  {w}");
+    }
+    if issues.is_empty() {
+        if warnings.is_empty() {
+            println!("Result: PASS");
+        } else {
+            println!("Result: PASS (with warnings)");
+        }
+    } else {
+        for issue in &issues {
+            println!("FAIL:  {issue}");
+        }
+        println!("Result: FAIL ({} issue(s))", issues.len());
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +890,7 @@ mod tests {
             server_ip: None,
             per_ip_pps_limit: 1000,
             mask_dir: None,
+            validate_mask: None,
             #[cfg(all(feature = "management-api", unix))]
             management_socket: None,
         }
@@ -660,6 +929,7 @@ mod tests {
                 mtu: 1346,
                 mdh_len: 20,
                 keepalive_secs: None,
+                ipv6_address: None,
             },
         );
         let payload = key.strip_prefix("aivpn://").unwrap();
@@ -684,6 +954,7 @@ mod tests {
                 prefix_len: 24,
                 mtu: 1400,
                 keepalive_secs: None,
+                ..Default::default()
             }),
             mask_dir: None,
             bootstrap_mask_files: None,

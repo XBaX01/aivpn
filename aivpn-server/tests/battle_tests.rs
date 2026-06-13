@@ -1115,7 +1115,7 @@ fn test_neural_record_traffic() {
     let session_id = [0xABu8; 16];
     // Record several packets
     for i in 0..50 {
-        module.record_traffic(session_id, 128 + i, 12.5, 7.2);
+        module.record_traffic(session_id, 128 + i, 12.5, 7.2, true);
     }
     let stats = module.get_or_create_stats(session_id);
     assert_eq!(
@@ -1170,7 +1170,13 @@ fn test_neural_resonance_check_with_data() {
     let session_id = [0x11u8; 16];
     // Populate with traffic data
     for i in 0..100 {
-        module.record_traffic(session_id, 64 + (i % 200), 10.0 + (i as f64 * 0.1), 7.5);
+        module.record_traffic(
+            session_id,
+            64 + (i % 200),
+            10.0 + (i as f64 * 0.1),
+            7.5,
+            true,
+        );
     }
 
     let result = module
@@ -1231,7 +1237,7 @@ fn test_neural_cleanup_stats() {
     let config = NeuralConfig::default();
     let module = NeuralResonanceModule::new(config).unwrap();
     let session_id = [0x22u8; 16];
-    module.record_traffic(session_id, 100, 10.0, 7.0);
+    module.record_traffic(session_id, 100, 10.0, 7.0, true);
     module.cleanup_stats(session_id);
     // After cleanup, get_or_create_stats should return empty stats
     let stats = module.get_or_create_stats(session_id);

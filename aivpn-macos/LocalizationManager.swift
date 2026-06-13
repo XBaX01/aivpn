@@ -39,6 +39,18 @@ class LocalizationManager: ObservableObject {
             "en": "Route all system traffic through VPN",
             "ru": "Направить весь системный трафик через VPN"
         ],
+        "proxy_mode": [
+            "en": "Proxy mode (SOCKS5, no root required)",
+            "ru": "Режим прокси (SOCKS5, без прав root)"
+        ],
+        "proxy_mode_help": [
+            "en": "Run as local SOCKS5 proxy — no root required. Set your apps or system proxy to 127.0.0.1:<port>.",
+            "ru": "Запуск как локальный SOCKS5-прокси — без прав root. Укажите прокси 127.0.0.1:<порт> в настройках приложений."
+        ],
+        "proxy_port": [
+            "en": "Port:",
+            "ru": "Порт:"
+        ],
         "connect": [
             "en": "Connect",
             "ru": "Подключить"

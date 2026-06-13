@@ -599,9 +599,24 @@ impl Gateway {
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
                 self.config.tun_mtu,
-                self.config.network_config,
+                self.config.network_config.clone(),
             )?;
             nat.create()?;
+
+            // IPv6 dual-stack (NAT66) — optional, off by default.
+            if self.config.network_config.ipv6_enabled {
+                let tun = self.config.tun_name.as_str();
+                let prefix = self.config.network_config.ipv6_prefix.as_str();
+                match crate::nat::setup_nat66(tun, prefix) {
+                    Ok(()) => info!("NAT66 configured for prefix {}", prefix),
+                    Err(e) => warn!("NAT66 setup failed (non-fatal): {}", e),
+                }
+                match crate::nat::assign_ipv6_to_tun(tun, "fd10:cafe::1", 48) {
+                    Ok(()) => info!("Assigned fd10:cafe::1/48 to {}", tun),
+                    Err(e) => warn!("IPv6 TUN address assignment failed (non-fatal): {}", e),
+                }
+            }
+
             self.nat_forwarder = Some(Arc::new(nat));
             info!(
                 "TUN device: {} ({}/{})",
@@ -901,10 +916,19 @@ impl Gateway {
 
                             match result.status {
                                 ResonanceStatus::Compromised => {
+                                    if !neural_guard.can_rotate(mask_id) {
+                                        debug!(
+                                            "Mask '{}' compromised (MSE={:.4}) but rotation on cooldown — skipping",
+                                            mask_id, result.mse
+                                        );
+                                        continue;
+                                    }
                                     warn!(
                                         "Mask '{}' compromised (MSE={:.4}) — triggering rotation (Patent 3)",
                                         mask_id, result.mse
                                     );
+
+                                    neural_guard.record_rotation(mask_id);
 
                                     // Mark mask as compromised in catalog
                                     catalog.mark_compromised(mask_id);
@@ -1956,7 +1980,8 @@ impl Gateway {
             if counter & 0x0f == 0 {
                 self.neural_module
                     .lock()
-                    .record_traffic(session_id, packet_size, iat_ms, entropy);
+                    // is_rx=true: packet from client → server (uplink direction)
+                    .record_traffic(session_id, packet_size, iat_ms, entropy, true);
             }
             self.metrics.record_packet_received(packet_data.len());
         }
