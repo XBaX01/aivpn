@@ -428,10 +428,12 @@ struct ContentView: View {
                         }
 
                         Button(action: {
+                            guard let key = vpn.selectedKey?.keyValue ?? vpn.keys.first?.keyValue,
+                                  let addr = serverAddrFromConnectionKey(key) else { return }
                             benchRunning = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                benchResult = BenchDisplayResult(p50: 38, p95: 74, p99: 115,
-                                                                  lossPct: 0.2, qualityScore: 91)
+                            benchResult = nil
+                            vpn.runBench(serverAddr: addr) { result in
+                                benchResult = result
                                 benchRunning = false
                             }
                         }) {
@@ -665,6 +667,19 @@ struct ContentView: View {
 }
 
 // MARK: - Bench Display
+
+/// Extract server address from an `aivpn://` connection key (base64url JSON ["s"] field).
+func serverAddrFromConnectionKey(_ key: String) -> String? {
+    guard key.hasPrefix("aivpn://") else { return nil }
+    var b64 = String(key.dropFirst(8))
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    while b64.count % 4 != 0 { b64 += "=" }
+    guard let data = Data(base64Encoded: b64),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let s = json["s"] as? String else { return nil }
+    return s
+}
 
 struct BenchDisplayResult {
     let p50: Double
