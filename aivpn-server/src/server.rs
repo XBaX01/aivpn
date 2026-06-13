@@ -127,6 +127,26 @@ pub struct ServerArgs {
         default_value = "/var/log/aivpn/audit.log"
     )]
     pub audit_log: String,
+
+    // ── mTLS CA management ─────────────────────────────────────────────────────
+    /// Generate a new ed25519 CA key pair for mTLS client cert signing.
+    /// Prints ca_public_key_hex and ca_private_key_hex to stdout, then exits.
+    #[arg(long)]
+    pub gen_ca: bool,
+
+    /// Sign a client public key with the CA private key and print the cert hex.
+    /// Expects a 64-hex-char (32-byte) X25519 public key.
+    /// Requires --ca-key.
+    #[arg(long, value_name = "PUBKEY_HEX")]
+    pub issue_cert: Option<String>,
+
+    /// CA private key hex string (64 hex chars = 32 bytes) for --issue-cert.
+    #[arg(long, value_name = "HEX")]
+    pub ca_key: Option<String>,
+
+    /// Certificate validity in days (default: 365). Used with --issue-cert.
+    #[arg(long, default_value_t = 365)]
+    pub days: u64,
 }
 
 /// AIVPN Server instance

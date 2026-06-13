@@ -68,7 +68,8 @@ object SecureStorage {
     data class ConnectionProfile(
         val id: String,
         val name: String,
-        val key: String
+        val key: String,
+        val mtlsCertBase64: String? = null,
     )
 
     fun saveProfiles(context: Context, profiles: List<ConnectionProfile>) {
@@ -78,6 +79,7 @@ object SecureStorage {
                 put("id", p.id)
                 put("name", p.name)
                 put("key", p.key)
+                if (p.mtlsCertBase64 != null) put("mtlsCertBase64", p.mtlsCertBase64)
             })
         }
         saveString(context, "profiles", arr.toString())
@@ -94,7 +96,8 @@ object SecureStorage {
                 result.add(ConnectionProfile(
                     id = obj.getString("id"),
                     name = obj.getString("name"),
-                    key = obj.getString("key")
+                    key = obj.getString("key"),
+                    mtlsCertBase64 = obj.optString("mtlsCertBase64").ifEmpty { null },
                 ))
             }
             result
