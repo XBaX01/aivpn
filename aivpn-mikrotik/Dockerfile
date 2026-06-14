@@ -19,6 +19,7 @@ COPY aivpn-server aivpn-server/
 COPY aivpn-android-core aivpn-android-core/
 COPY aivpn-ios-core aivpn-ios-core/
 COPY aivpn-windows aivpn-windows/
+COPY aivpn-linux aivpn-linux/
 COPY aivpn-common/mask-assets mask-assets/
 
 RUN cargo build --release --target "${TARGET_TRIPLE}" -p aivpn-client --bin aivpn-client \

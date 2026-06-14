@@ -180,7 +180,7 @@ impl KillSwitch {
 
     #[cfg(target_os = "macos")]
     fn activate_impl(&self) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         use std::process::Command;
 
         let rules = format!(

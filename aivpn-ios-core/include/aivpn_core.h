@@ -27,6 +27,8 @@ int aivpn_run_tunnel(
     int server_port,
     const uint8_t *server_key,
     const uint8_t *psk,
+    const uint8_t *cert_bytes,
+    int cert_len,
     aivpn_ready_callback_t on_ready,
     void *ctx
 );

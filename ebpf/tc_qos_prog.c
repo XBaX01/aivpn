@@ -70,6 +70,10 @@ int tc_qos_egress(struct __sk_buff *skb) {
 
     __u64 burst     = rule->rate_bps / 10; // 100 ms burst
     __u64 elapsed   = now - rule->last_refill_ns;
+    // Cap elapsed time to 1 second to prevent overflow in rate_bps * elapsed
+    if (elapsed > NS_PER_SEC) {
+        elapsed = NS_PER_SEC;
+    }
     __u64 new_tokens = rule->tokens + (rule->rate_bps * elapsed / NS_PER_SEC);
     if (new_tokens > burst)
         new_tokens = burst;

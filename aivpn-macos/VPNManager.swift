@@ -340,7 +340,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
                      timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
@@ -546,7 +546,7 @@ class VPNManager: ObservableObject {
             return
         }
 
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil)
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil)
 
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
@@ -633,7 +633,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
                      timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
@@ -766,7 +766,7 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
                      timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,

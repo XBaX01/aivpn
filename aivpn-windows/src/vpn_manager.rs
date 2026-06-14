@@ -533,8 +533,12 @@ struct RecordingSnapshot {
 /// Connection key format: `aivpn://` + base64url(JSON) where JSON["s"] = "host:port".
 fn extract_server_addr(key: &str) -> Option<String> {
     let b64 = key.strip_prefix("aivpn://")?;
+    // Try multiple Base64 formats just in case padding or standard charset is used
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(b64))
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(b64))
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
         .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     json["s"].as_str().map(|s| s.to_string())

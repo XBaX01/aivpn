@@ -11,7 +11,8 @@
 //!   struct bpf_event { u32 type; u32 session_id; u64 count; u32 drop_reason; u32 pad; }
 //!   type: 1=xdp_drop  2=session_bytes  3=anomaly_hint
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
