@@ -74,17 +74,42 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let pskArr  = key.psk
             let rustFd  = self.sp[1]
 
+            // Decode optional base64-encoded mTLS cert (must be exactly 104 bytes)
+            let certBytes: [UInt8]? = (cfg["mtlsCert"] as? String).flatMap {
+                guard let data = Data(base64Encoded: $0), data.count == 104 else { return nil }
+                return Array(data)
+            }
+
             let thread = Thread {
                 sKeyArr.withUnsafeBufferPointer { sKeyPtr in
+                    let certCount = Int32(certBytes?.count ?? 0)
                     if let pskArr = pskArr {
                         pskArr.withUnsafeBufferPointer { pskPtr in
-                            _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                  sKeyPtr.baseAddress!, pskPtr.baseAddress!,
-                                                  nil, nil)
+                            if let certBytes = certBytes {
+                                certBytes.withUnsafeBufferPointer { certPtr in
+                                    _ = aivpn_run_tunnel(rustFd, host, Int32(port),
+                                                          sKeyPtr.baseAddress!, pskPtr.baseAddress!,
+                                                          certPtr.baseAddress!, certCount,
+                                                          nil, nil)
+                                }
+                            } else {
+                                _ = aivpn_run_tunnel(rustFd, host, Int32(port),
+                                                      sKeyPtr.baseAddress!, pskPtr.baseAddress!,
+                                                      nil, 0, nil, nil)
+                            }
                         }
                     } else {
-                        _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                              sKeyPtr.baseAddress!, nil, nil, nil)
+                        if let certBytes = certBytes {
+                            certBytes.withUnsafeBufferPointer { certPtr in
+                                _ = aivpn_run_tunnel(rustFd, host, Int32(port),
+                                                      sKeyPtr.baseAddress!, nil,
+                                                      certPtr.baseAddress!, certCount,
+                                                      nil, nil)
+                            }
+                        } else {
+                            _ = aivpn_run_tunnel(rustFd, host, Int32(port),
+                                                  sKeyPtr.baseAddress!, nil, nil, 0, nil, nil)
+                        }
                     }
                 }
             }

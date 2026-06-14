@@ -186,6 +186,7 @@ pub async fn run_tunnel_android(
     server_port: u16,
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
+    mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
@@ -306,6 +307,15 @@ pub async fn run_tunnel_android(
     ));
     let mut transition_recv_deadline = Some(Instant::now() + Duration::from_secs(2));
     let mut transition_recv_win = std::mem::take(&mut recv_win);
+    if let Some(cert) = mtls_cert {
+        let cert_len_debug = cert.len();
+        let cert_payload = ControlPayload::ClientCert { cert_bytes: cert }.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &cert_payload);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+        log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
+    }
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
 

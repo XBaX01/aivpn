@@ -42,6 +42,12 @@
 /* Minimum AIVPN UDP payload: tag + pad_len + inner_type + Poly1305 auth tag */
 #define AIVPN_MIN_PAYLOAD 26
 
+/* Drop reason codes (index into drop_stats map) */
+#define DROP_TOO_SHORT   0
+#define DROP_TAG_EXPIRED 1
+#define DROP_RESERVED    2
+#define DROP_TOTAL       3
+
 /* BPF ARRAY map: 2 slots (index 0 = port, index 1 = window_ms) */
 struct {
 	__uint(type,        BPF_MAP_TYPE_ARRAY);
@@ -49,6 +55,58 @@ struct {
 	__type(key,         __u32);
 	__type(value,       __u64);
 } xdp_config SEC(".maps");
+
+/* Per-reason + total drop counters.
+ * Pinned at /sys/fs/bpf/aivpn/drop_stats by the loader.
+ * userspace reads key DROP_TOTAL (3) for aggregate drop monitoring. */
+struct {
+	__uint(type,        BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 4);
+	__type(key,         __u32);
+	__type(value,       __u64);
+} drop_stats SEC(".maps");
+
+/* Real-time event ring buffer (256 KB).
+ * Pinned at /sys/fs/bpf/aivpn/events by the loader. */
+struct bpf_event {
+	__u32 type;        /* 1 = xdp_drop */
+	__u32 session_id;  /* 0 for non-session drops */
+	__u64 count;
+	__u32 drop_reason;
+	__u32 pad;
+};
+
+struct {
+	__uint(type,        BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 256 * 1024);
+} events SEC(".maps");
+
+/* Increment a drop_stats counter and emit a ring-buffer event.
+ * Both operations are best-effort (failure is silent — XDP must not stall). */
+static __always_inline void
+record_drop(__u32 reason)
+{
+	__u32 k_reason = reason, k_total = DROP_TOTAL;
+	__u64 *c;
+
+	c = bpf_map_lookup_elem(&drop_stats, &k_reason);
+	if (c)
+		__sync_fetch_and_add(c, 1);
+
+	c = bpf_map_lookup_elem(&drop_stats, &k_total);
+	if (c)
+		__sync_fetch_and_add(c, 1);
+
+	struct bpf_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
+	if (ev) {
+		ev->type        = 1;
+		ev->session_id  = 0;
+		ev->count       = 1;
+		ev->drop_reason = reason;
+		ev->pad         = 0;
+		bpf_ringbuf_submit(ev, 0);
+	}
+}
 
 SEC("xdp")
 int aivpn_xdp_filter(struct xdp_md *ctx)
@@ -88,8 +146,10 @@ int aivpn_xdp_filter(struct xdp_md *ctx)
 
 	/* ── Minimum size check ───────────────────────────────────────── */
 	__u16 udp_total = bpf_ntohs(udp->len); /* includes UDP header */
-	if (udp_total < sizeof(*udp) + AIVPN_MIN_PAYLOAD)
-		return XDP_DROP; /* too short to be a valid AIVPN packet */
+	if (udp_total < sizeof(*udp) + AIVPN_MIN_PAYLOAD) {
+		record_drop(DROP_TOO_SHORT);
+		return XDP_DROP;
+	}
 
 	/* ── Resonance-tag timestamp check ───────────────────────────── */
 	__u8 *payload = (void *)(udp + 1);
@@ -106,8 +166,10 @@ int aivpn_xdp_filter(struct xdp_md *ctx)
 	__u64  win_ms = (wcfg && *wcfg) ? *wcfg : 10000ULL;
 
 	__u64 delta = now_ms > tag_ts ? now_ms - tag_ts : tag_ts - now_ms;
-	if (delta > win_ms)
-		return XDP_DROP; /* expired or future-dated tag: drop */
+	if (delta > win_ms) {
+		record_drop(DROP_TAG_EXPIRED);
+		return XDP_DROP;
+	}
 
 	return XDP_PASS;
 }

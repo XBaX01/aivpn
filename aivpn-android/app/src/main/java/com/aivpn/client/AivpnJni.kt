@@ -33,6 +33,7 @@ object AivpnJni {
         serverPort: Int,
         serverKey: ByteArray,
         psk: ByteArray?,
+        mtlsCert: ByteArray?,
     ): String
 
     /**

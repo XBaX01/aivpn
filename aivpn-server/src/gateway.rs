@@ -32,14 +32,17 @@ use aivpn_common::protocol::{
 use libc;
 
 use crate::client_db::ClientDatabase;
+use crate::ebpf_observer::EbpfObserver;
 use crate::mask_gen::generate_and_store_mask;
 use crate::mask_store::MaskStore;
 use crate::metrics::MetricsCollector;
 use crate::nat::NatForwarder;
 use crate::neural::{NeuralConfig, NeuralResonanceModule, ResonanceStatus};
+use crate::qos::QosEnforcer;
 use crate::recording::RecordingManager;
 use crate::recording::{RecordingStopOutcome, RecordingStopReason};
 use crate::session::{Session, SessionManager, MAX_SESSIONS};
+use aivpn_common::event_log::EventBus;
 
 struct QueuedPacket {
     packet_data: Vec<u8>,
@@ -74,6 +77,19 @@ pub struct GatewayConfig {
     pub bootstrap_masks: Vec<MaskProfile>,
     /// Server-side NAT TUN MTU. Does not affect client VPN MTU (carried in ServerHello).
     pub tun_mtu: u16,
+    /// Structured event bus — emits JSON-lines events to stdout (and optional webhook).
+    pub event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP).
+    pub qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder.  When `Some`, client Data packets are
+    /// relayed to the exit node instead of being NAT-forwarded locally.
+    pub chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
+    /// Optional mTLS certificate policy.  `None` = no cert verification.
+    pub mtls: Option<crate::mtls::MtlsConfig>,
+    /// When `true`, this node accepts `ChainForward` control messages and
+    /// injects them directly into the TUN device (exit-node role).
+    /// Must be set explicitly — defaults to `false` to prevent open relay.
+    pub exit_node_enabled: bool,
 }
 
 impl Default for GatewayConfig {
@@ -96,6 +112,14 @@ impl Default for GatewayConfig {
             idle_timeout_secs: None,
             bootstrap_masks: Vec::new(),
             tun_mtu: crate::nat::DEFAULT_TUN_MTU,
+            event_bus: EventBus::new(aivpn_common::event_log::EventSinkConfig {
+                stdout: false,
+                webhook_url: None,
+            }),
+            qos_enforcer: Arc::new(QosEnforcer::new()),
+            chain_forwarder: None,
+            mtls: None,
+            exit_node_enabled: false,
         }
     }
 }
@@ -253,6 +277,12 @@ pub struct Gateway {
     bootstrap_descriptors: Vec<BootstrapDescriptor>,
     /// Optional kernel-module accelerator (auto-detected via /dev/aivpn).
     kernel_accel: Option<Arc<KernelAccel>>,
+    /// Structured event bus for JSON-lines output.
+    event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP marking).
+    qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder (None = local NAT).
+    chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -549,6 +579,9 @@ impl Gateway {
             info!("Kernel acceleration: not available — using built-in user-space data path");
         }
 
+        let event_bus = config.event_bus.clone();
+        let qos_enforcer = config.qos_enforcer.clone();
+
         Ok(Self {
             config: config.clone(),
             session_manager,
@@ -566,7 +599,15 @@ impl Gateway {
             mask_store: Some(mask_store),
             bootstrap_descriptors,
             kernel_accel,
+            event_bus,
+            qos_enforcer,
+            chain_forwarder: config.chain_forwarder.clone(),
         })
+    }
+
+    /// Set (or replace) the multi-hop chain forwarder after server construction.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.chain_forwarder = Some(cf);
     }
 
     async fn send_bootstrap_descriptors(
@@ -584,6 +625,19 @@ impl Gateway {
         Ok(())
     }
 
+    /// Return a shared reference to the session manager.
+    /// Used by pool sync to register the synthetic cluster session before `run()` is called.
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.session_manager.clone()
+    }
+
+    /// Return the default mask-dependent header bytes from the mask catalog.
+    /// Pool sync packets use this MDH so the receiver can locate the ciphertext
+    /// boundary using the same session-mask heuristic as regular client packets.
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.mask_catalog.packet_mdh_bytes()
+    }
+
     /// Start the gateway
     pub async fn run(mut self) -> Result<()> {
         info!("Starting AIVPN Gateway on {}", self.config.listen_addr);
@@ -591,6 +645,9 @@ impl Gateway {
             "Per-IP UDP rate limit: {} pps",
             self.config.per_ip_pps_limit
         );
+
+        // Start eBPF observer (no-op when xdp_prog.o is absent)
+        Arc::new(EbpfObserver::new(self.event_bus.clone())).start();
 
         // Create NAT forwarder (requires root — deferred from constructor for testability)
         if self.config.enable_nat {
@@ -744,6 +801,7 @@ impl Gateway {
                 }
 
                 let client_db = self.client_db.clone();
+                let qos_enforcer = self.qos_enforcer.clone();
                 tokio::spawn(async move {
                     Self::tun_read_loop(
                         tun_reader,
@@ -754,6 +812,7 @@ impl Gateway {
                         server_vpn_ip,
                         recorder,
                         client_db,
+                        qos_enforcer,
                     )
                     .await;
                 });
@@ -1041,6 +1100,7 @@ impl Gateway {
         server_vpn_ip: Ipv4Addr,
         recorder: Option<Arc<RecordingManager>>,
         client_db: Option<Arc<ClientDatabase>>,
+        qos_enforcer: Arc<crate::qos::QosEnforcer>,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -1074,6 +1134,15 @@ impl Gateway {
                             continue;
                         }
                     };
+
+                    // QoS: enforce downstream rate limit before expensive encryption
+                    let qos_cid = { session.lock().client_id.clone() };
+                    if let Some(ref cid) = qos_cid {
+                        if !qos_enforcer.check_downstream(cid, n as u64) {
+                            debug!("QoS: downstream rate limited, dropping packet for {}", cid);
+                            continue;
+                        }
+                    }
 
                     // Build encrypted response packet
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
@@ -1778,6 +1847,12 @@ impl Gateway {
             // which was encrypted with pre-ratchet keys.
 
             is_new_session = true;
+            // When mTLS is required, block Data until the client sends a valid ClientCert.
+            // SAFETY: process_inner_payload is skipped for is_new_session packets (see below),
+            // so mtls_ok=false is guaranteed to be visible before any Data is processed.
+            if self.config.mtls.as_ref().map_or(false, |c| c.required) {
+                session.lock().mtls_ok = false;
+            }
             debug!(
                 "New session from {} (ServerHello sent)",
                 hash_addr(&client_addr)
@@ -2050,6 +2125,15 @@ impl Gateway {
 
         match inner_header.inner_type {
             InnerType::Data => {
+                // mTLS gate: drop Data packets until cert is verified (when required).
+                if !session.lock().mtls_ok {
+                    warn!(
+                        "mtls: Data from {} rejected — certificate not yet verified",
+                        hash_addr(&client_addr)
+                    );
+                    return Ok(());
+                }
+
                 // Forward to NAT/internet via TUN write channel (lock-free)
                 debug!(
                     "DATA packet from {} ({} bytes)",
@@ -2057,7 +2141,24 @@ impl Gateway {
                     payload.len()
                 );
 
-                if let Some(ref tx) = self.tun_write_tx {
+                // QoS: enforce upstream rate limit before forwarding to TUN
+                let upstream_cid = session.lock().client_id.clone();
+                if let Some(ref c) = upstream_cid {
+                    if !self.qos_enforcer.check_upstream(c, payload.len() as u64) {
+                        debug!("QoS: upstream rate limited, dropping packet for {}", c);
+                        return Ok(());
+                    }
+                }
+
+                // Site peers send subnet traffic — never relay to the exit node.
+                let use_chain_forward =
+                    self.chain_forwarder.is_some() && !session.lock().is_site_peer;
+                if use_chain_forward {
+                    if let Some(ref cf) = self.chain_forwarder {
+                        // Multi-hop: relay to exit node instead of local NAT
+                        cf.forward(payload.to_vec()).await;
+                    }
+                } else if let Some(ref tx) = self.tun_write_tx {
                     if tx.send(payload.to_vec()).await.is_err() {
                         debug!("TUN write channel closed, dropping packet");
                     }
@@ -2267,6 +2368,92 @@ impl Gateway {
             }
             ControlPayload::BootstrapDescriptorUpdate { .. } => {
                 // Client-side only, ignore on server
+            }
+            ControlPayload::PoolSync { clients_json } => {
+                if let Some(ref db) = self.client_db {
+                    let json_str = String::from_utf8_lossy(&clients_json);
+                    match db.merge_from_json(&json_str) {
+                        Ok(n) => info!(
+                            "pool_sync: merged {} clients from peer {}",
+                            n,
+                            hash_addr(&client_addr)
+                        ),
+                        Err(e) => warn!(
+                            "pool_sync: merge failed from {}: {}",
+                            hash_addr(&client_addr),
+                            e
+                        ),
+                    }
+                }
+            }
+            ControlPayload::RouteSync { subnets_json } => {
+                if session.lock().is_site_peer {
+                    crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
+                } else {
+                    warn!(
+                        "site_sync: RouteSync from non-peer session {} — dropping",
+                        hash_addr(&client_addr)
+                    );
+                }
+            }
+            ControlPayload::ChainForward { payload } => {
+                if self.config.exit_node_enabled {
+                    let ip_version = payload.first().map(|b| b >> 4);
+                    let min_len = match ip_version {
+                        Some(4) => 20,
+                        Some(6) => 40,
+                        _ => usize::MAX,
+                    };
+                    if payload.len() < min_len {
+                        warn!(
+                            "chain_forward: invalid IP payload from {} (version={:?} len={}) — dropping",
+                            hash_addr(&client_addr),
+                            ip_version,
+                            payload.len()
+                        );
+                    } else if let Some(ref tx) = self.tun_write_tx {
+                        let _ = tx.send(payload).await;
+                    }
+                } else {
+                    warn!(
+                        "chain_forward: ChainForward from {} rejected — exit_node_enabled is false",
+                        hash_addr(&client_addr)
+                    );
+                }
+            }
+            ControlPayload::ClientCert { cert_bytes } => {
+                if let Some(ref mtls_cfg) = self.config.mtls {
+                    let session_eph_pub = session.lock().eph_pub;
+                    let ok = crate::mtls::SimpleCert::from_bytes(&cert_bytes)
+                        .map(|c| {
+                            c.client_pub_key == session_eph_pub
+                                && crate::mtls::verify_cert(&c, mtls_cfg)
+                        })
+                        .unwrap_or(false);
+                    session.lock().mtls_ok = ok;
+                    if ok {
+                        debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
+                    } else {
+                        warn!(
+                            "mtls: client {} cert rejected — Data will be dropped",
+                            hash_addr(&client_addr)
+                        );
+                        // Notify client so it can re-provision rather than inferring failure from Data drops.
+                        let _ = self
+                            .send_control_message(
+                                &aivpn_common::protocol::ControlPayload::CertRejected {},
+                                session,
+                            )
+                            .await;
+                    }
+                }
+            }
+            ControlPayload::CertRejected {} => {
+                // Server-to-client only; the server never receives this from clients.
+                debug!(
+                    "Unexpected CertRejected from client {}",
+                    hash_addr(&client_addr)
+                );
             }
         }
 

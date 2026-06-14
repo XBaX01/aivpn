@@ -66,6 +66,9 @@ pub struct ClientConfig {
     pub tun_config: TunnelConfig,
     /// When set, run as SOCKS5 proxy on this address instead of a TUN device.
     pub proxy_listen: Option<std::net::SocketAddr>,
+    /// Optional 104-byte mTLS certificate sent to the server after session setup.
+    /// Required when the server is configured with `mtls.required = true`.
+    pub mtls_cert: Option<Vec<u8>>,
 }
 
 /// Client state
@@ -316,6 +319,18 @@ impl AivpnClient {
         self.state = ClientState::Connected;
         info!("Connected to server at {}", self.config.server_addr);
         info!("TUN device: {}", self.tunnel.name());
+
+        if let Some(cert) = self.config.mtls_cert.clone() {
+            match self
+                .send_control(&ControlPayload::ClientCert {
+                    cert_bytes: cert.clone(),
+                })
+                .await
+            {
+                Ok(()) => debug!("mTLS: ClientCert sent ({} bytes)", cert.len()),
+                Err(e) => warn!("mTLS: failed to send ClientCert: {}", e),
+            }
+        }
 
         Ok(())
     }
@@ -988,6 +1003,9 @@ impl AivpnClient {
                 active_service,
             } => {
                 crate::record_cmd::handle_recording_status(can_record, active_service.as_deref());
+            }
+            ControlPayload::CertRejected {} => {
+                warn!("mTLS: server rejected the certificate — re-provision your mTLS cert");
             }
             _ => {}
         }

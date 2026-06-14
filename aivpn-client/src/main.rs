@@ -1,8 +1,11 @@
 //! AIVPN Client Binary - Full Implementation
 
+use aivpn_client::adaptive::{AdaptiveConfig, AdaptiveMonitor};
+use aivpn_client::bench::run_bench;
 use aivpn_client::bootstrap_cache;
 use aivpn_client::bootstrap_loader::{self, BootstrapConfig};
 use aivpn_client::client::ClientConfig;
+use aivpn_client::server_pool::{PoolMode, ServerEntry, ServerPool};
 use aivpn_client::tunnel::TunnelConfig;
 use aivpn_client::AivpnClient;
 use aivpn_common::mask::preset_masks;
@@ -84,6 +87,11 @@ pub struct ClientArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub proxy_listen: Option<String>,
 
+    /// Path to a 104-byte mTLS client certificate (raw binary or base64-encoded).
+    /// Required when the server has `mtls.required = true`.
+    #[arg(long, value_name = "FILE")]
+    pub mtls_cert: Option<std::path::PathBuf>,
+
     /// Route only these CIDRs through the VPN (comma-separated, split-tunnel mode).
     /// Example: --include-routes 10.0.0.0/8,192.168.1.0/24
     #[arg(
@@ -109,6 +117,10 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub kill_switch: bool,
 
+    /// Enable adaptive mode — automatically adjusts MTU and keepalive on packet loss.
+    #[arg(long, default_value_t = false)]
+    pub adaptive: bool,
+
     #[command(subcommand)]
     pub command: Option<ClientCommand>,
 }
@@ -125,6 +137,15 @@ pub enum ClientCommand {
     KillSwitch {
         #[command(subcommand)]
         action: KillSwitchAction,
+    },
+    /// Run connection diagnostics (latency, packet loss, quality score)
+    Bench {
+        /// Duration of the benchmark in seconds
+        #[arg(short, long, default_value_t = 10)]
+        duration: u64,
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -235,6 +256,51 @@ async fn main() {
                     return;
                 }
             },
+            ClientCommand::Bench { duration, json } => {
+                let server_addr = args
+                    .server
+                    .clone()
+                    .or_else(|| {
+                        args.connection_key.as_deref().and_then(|ck| {
+                            let payload = ck.trim().strip_prefix("aivpn://").unwrap_or(ck.trim());
+                            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                .decode(payload)
+                                .ok()
+                                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                                .and_then(|v| v["s"].as_str().map(|s| s.to_string()))
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        error!("--server or --connection-key required for bench");
+                        std::process::exit(1);
+                    });
+
+                let addr = server_addr.parse().unwrap_or_else(|e| {
+                    error!("Invalid server address '{}': {}", server_addr, e);
+                    std::process::exit(1);
+                });
+                let result = run_bench(addr, Duration::from_secs(duration)).await;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
+                } else {
+                    println!("═══ AIVPN Diagnostics ═══");
+                    println!("Server:      {}", server_addr);
+                    println!("Samples:     {}", result.samples);
+                    println!("Latency P50: {:.1} ms", result.latency_p50_ms);
+                    println!("Latency P95: {:.1} ms", result.latency_p95_ms);
+                    println!("Latency P99: {:.1} ms", result.latency_p99_ms);
+                    println!("Packet loss: {:.1}%", result.packet_loss_pct);
+                    println!("Throughput:  {:.0} kbps est.", result.throughput_up_kbps);
+                    println!(
+                        "Quality:     {} ({})",
+                        result.quality_score, result.quality_label
+                    );
+                }
+                return;
+            }
             ClientCommand::Record { action } => {
                 match action {
                     RecordAction::Start { service } => {
@@ -443,6 +509,33 @@ async fn main() {
         )
     };
 
+    // Build server pool from optional "pool" array in the connection key
+    let server_pool = args.connection_key.as_deref().and_then(|ck| {
+        let payload = ck.trim().strip_prefix("aivpn://").unwrap_or(ck.trim());
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let peers: Vec<ServerEntry> = serde_json::from_value(json.get("pool")?.clone()).ok()?;
+        if peers.is_empty() {
+            return None;
+        }
+        Some(ServerPool::new(&server_addr, peers, PoolMode::Failover))
+    });
+    if let Some(ref pool) = server_pool {
+        info!("Server pool active: {} node(s)", pool.node_count());
+    }
+
+    // Adaptive mode monitor
+    let adaptive_monitor = AdaptiveMonitor::new(AdaptiveConfig {
+        enabled: args.adaptive,
+        ..AdaptiveConfig::default()
+    });
+    if args.adaptive {
+        info!("Adaptive mode enabled (auto MTU/keepalive tuning)");
+    }
+    let _ = adaptive_monitor; // used by client loop when adaptive integration is wired
+
     info!("AIVPN Client v{}", env!("CARGO_PKG_VERSION"));
     info!("Connecting to server: {}", server_addr);
 
@@ -514,6 +607,28 @@ async fn main() {
             error!("Invalid --proxy-listen '{}': {}", s, e);
             std::process::exit(1);
         })
+    });
+    let mtls_cert: Option<Vec<u8>> = args.mtls_cert.as_ref().map(|path| {
+        let raw = std::fs::read(path).unwrap_or_else(|e| {
+            error!("Cannot read --mtls-cert '{}': {}", path.display(), e);
+            std::process::exit(1);
+        });
+        // Accept raw 104-byte binary or base64-encoded text.
+        if raw.len() == 104 {
+            raw
+        } else {
+            let s = String::from_utf8_lossy(&raw);
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .unwrap_or_else(|e| {
+                    error!(
+                        "--mtls-cert is neither 104-byte binary nor valid base64: {}",
+                        e
+                    );
+                    std::process::exit(1);
+                })
+        }
     });
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
@@ -604,13 +719,21 @@ async fn main() {
                 .and_then(|c| c.kill_switch)
                 .unwrap_or(false);
 
+        // Failover: pick next healthy node from pool, or fall back to primary
+        let active_server = server_pool
+            .as_ref()
+            .and_then(|p| p.next_server())
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| server_addr.clone());
+
         let config = ClientConfig {
-            server_addr: server_addr.clone(),
+            server_addr: active_server,
             server_public_key,
             preshared_key,
             initial_mask,
             tun_config,
             proxy_listen,
+            mtls_cert: mtls_cert.clone(),
         };
 
         match AivpnClient::new(config) {

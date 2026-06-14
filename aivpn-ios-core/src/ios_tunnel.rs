@@ -161,6 +161,7 @@ pub async fn run_tunnel_ios(
     server_port: u16,
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
+    mtls_cert: Option<Vec<u8>>,
     on_ready: Option<OnReadyFn>,
     ctx: SendCtx,
 ) -> Result<()> {
@@ -168,8 +169,8 @@ pub async fn run_tunnel_ios(
     let _guard = activate_session(session.clone())?;
 
     // 1. Ephemeral keypair + Zero-RTT session keys
-    let keypair = KeyPair::generate();
-    let dh = keypair.compute_shared(&server_key)?;
+    let mut keypair = KeyPair::generate();
+    let mut dh = keypair.compute_shared(&server_key)?;
     let mut keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
 
     // 2. UDP socket — no protect() needed: extension runs outside VPN routing
@@ -201,17 +202,14 @@ pub async fn run_tunnel_ios(
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
     let keepalive = ControlPayload::Keepalive.encode()?;
-    let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
-
-    let send_hs = |keys: &SessionKeys, sc: &mut u64, ss: &mut u16| -> Result<Vec<u8>> {
-        let inner = build_inner_packet(InnerType::Control, *ss, &keepalive);
-        let pkt = build_random_mdh_packet(keys, sc, &inner, Some(&obf_pub), mdh_len)?;
-        *ss = ss.wrapping_add(1);
-        Ok(pkt)
-    };
-
-    udp.send(&send_hs(&keys, &mut send_counter, &mut send_seq)?)
-        .await?;
+    {
+        let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+        let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+        let pkt =
+            build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+    }
 
     // 5. Wait for ServerHello
     let mut recv_buf = vec![0u8; BUF_SIZE];
@@ -233,7 +231,19 @@ pub async fn run_tunnel_ios(
             }
             r = udp.recv(&mut recv_buf) => { break r?; }
             _ = &mut retry => {
-                udp.send(&send_hs(&keys, &mut send_counter, &mut send_seq)?).await?;
+                // Fresh keypair on retry: reusing the same keypair causes retry
+                // packets to match an existing server session and be treated as
+                // keepalives — the server never sends a new ServerHello.
+                keypair = KeyPair::generate();
+                dh = keypair.compute_shared(&server_key)?;
+                keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                send_counter = 0;
+                send_seq = 0;
+                let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+                let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+                let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+                send_seq = send_seq.wrapping_add(1);
+                udp.send(&pkt).await?;
             }
         }
     };
@@ -255,7 +265,17 @@ pub async fn run_tunnel_ios(
     let mut tr_deadline = Some(Instant::now() + Duration::from_secs(2));
     let mut tr_win = std::mem::take(&mut recv_win);
 
-    // Notify tunnel ready via C callback
+    if let Some(cert) = mtls_cert {
+        let cert_len_debug = cert.len();
+        let cert_payload = ControlPayload::ClientCert { cert_bytes: cert }.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &cert_payload);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+        log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
+    }
+
+    // Notify tunnel ready via C callback (after ClientCert so app UI opens after auth)
     if let Some(cb) = on_ready {
         if let Ok(c_host) = CString::new(server_host.as_str()) {
             unsafe { cb(c_host.as_ptr(), ctx.0) };

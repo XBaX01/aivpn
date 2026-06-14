@@ -24,7 +24,7 @@
     <string name="label_upload">Отправлено</string>
     <string name="label_download">Получено</string>
     <string name="label_duration">Время</string>
-    <string name="version_footer">v0.6.0 · ИИ-обход DPI</string>
+    <string name="version_footer">v0.8.0 · ИИ-обход DPI</string>
     <string name="notification_channel">Туннель AIVPN</string>
     <string name="notification_channel_desc">Статус активного VPN-туннеля</string>
     <string name="notification_connecting">Подключение…</string>
@@ -46,7 +46,17 @@
     <string name="confirm_delete_profile">Удалить "%s"?</string>
     <string name="no_profiles">Нет сохранённых ключей. Нажмите + Добавить.</string>
 
-    <!-- Split tunneling -->
+    <!-- Адаптивный режим / диагностика -->
+    <string name="adaptive_mode">Адаптивный режим</string>
+    <string name="adaptive_mode_desc">Автоматически адаптирует MTU и keepalive при нестабильном соединении</string>
+    <string name="adaptive_enabled">Адаптивный: ВКЛ</string>
+    <string name="adaptive_disabled">Адаптивный: ВЫКЛ</string>
+    <string name="diagnostics">Диагностика</string>
+    <string name="run_benchmark">Запустить тест</string>
+    <string name="bench_running">Тест запущен…</string>
+    <string name="bench_result">P50: %1$dмс  P95: %2$dмс  Потери: %3$.1f%%  Качество: %4$d/100</string>
+
+    <!-- Раздельный туннель -->
     <string name="btn_split_tunnel">Раздельный туннель</string>
     <string name="split_tunnel_title">Раздельный туннель</string>
     <string name="split_tunnel_search">Поиск…</string>

@@ -119,6 +119,17 @@ pub struct Session {
     pub pre_ratchet_tags: HashMap<u64, [u8; TAG_SIZE]>,
     /// Deadline until which pre_ratchet_tags are still accepted.
     pub pre_ratchet_expire: Option<Instant>,
+
+    /// mTLS certificate gate — true means the client is cleared to send Data.
+    /// Defaults to true (non-mTLS deployments are unaffected). When the
+    /// gateway has `mtls.required = true` it resets this to false at session
+    /// creation; a valid `ClientCert` message flips it back to true.
+    pub mtls_ok: bool,
+
+    /// True when this session was established via a site-to-site peer sync_key
+    /// (registered by `site_sync::start()`).  Only sessions with this flag set
+    /// are allowed to carry `ControlPayload::RouteSync` messages.
+    pub is_site_peer: bool,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -210,6 +221,8 @@ impl Session {
             client_id: None,
             pre_ratchet_tags: HashMap::new(),
             pre_ratchet_expire: None,
+            mtls_ok: true,
+            is_site_peer: false,
         }
     }
 
@@ -739,6 +752,132 @@ impl SessionManager {
                     self.ip_pool.lock().remove(&vpn_ip.octets()[3]);
                     break;
                 }
+            }
+        }
+    }
+
+    /// Register a synthetic "cluster session" used for pool-node synchronisation.
+    ///
+    /// All pool nodes derive identical `SessionKeys` from the shared `sync_key`
+    /// (same blake3 KDF domain strings) and the resonance counter is pinned to
+    /// a 5-second wall-clock bucket, so every node independently computes the
+    /// same expected tag for the same 5-second window — no handshake required.
+    pub fn create_pool_peer_session(
+        &self,
+        sync_key: &[u8; 32],
+        peer_addr: std::net::SocketAddr,
+    ) -> [u8; 16] {
+        let keys = aivpn_common::crypto::SessionKeys {
+            session_key: blake3::derive_key("aivpn-pool-enc-v1", sync_key),
+            tag_secret: blake3::derive_key("aivpn-pool-tag-v1", sync_key),
+            prng_seed: blake3::derive_key("aivpn-pool-prng-v1", sync_key),
+        };
+
+        // Deterministic session_id — all pool nodes agree on the same value.
+        let id_hash = blake3::hash(sync_key);
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&id_hash.as_bytes()[..16]);
+
+        let counter = crypto::current_timestamp_ms() / 5_000;
+
+        let session_arc = {
+            let mut s = Session::new(session_id, peer_addr, keys, [0u8; X25519_PUBLIC_KEY_SIZE]);
+            s.state = SessionState::Active;
+            s.counter = counter;
+            s.update_tag_window();
+            Arc::new(Mutex::new(s))
+        };
+
+        {
+            let sess = session_arc.lock();
+            for tag in sess.expected_tags.values() {
+                self.tag_map.insert(*tag, session_id);
+            }
+        }
+
+        // Bypass MAX_SESSIONS cap — synthetic sessions don't count against client quota.
+        self.sessions.insert(session_id, session_arc);
+        info!(
+            "pool_sync: cluster session registered ({} tag slots)",
+            TAG_WINDOW_SIZE * 2 - 1
+        );
+        session_id
+    }
+
+    /// Register a synthetic session for an authenticated site-to-site peer.
+    /// Identical to `create_pool_peer_session` but marks `is_site_peer = true`
+    /// so the gateway will accept `RouteSync` messages from this session.
+    /// Like pool peers, site peers bypass the `MAX_SESSIONS` cap — synthetic sessions
+    /// must not consume the client quota.
+    pub fn create_site_peer_session(
+        &self,
+        sync_key: &[u8; 32],
+        peer_addr: std::net::SocketAddr,
+        peer_name: &str,
+    ) -> [u8; 16] {
+        let keys = aivpn_common::crypto::SessionKeys {
+            session_key: blake3::derive_key("aivpn-pool-enc-v1", sync_key),
+            tag_secret: blake3::derive_key("aivpn-pool-tag-v1", sync_key),
+            prng_seed: blake3::derive_key("aivpn-pool-prng-v1", sync_key),
+        };
+
+        // Deterministic session_id per (sync_key, peer_name) pair.
+        let mut id_input = sync_key.to_vec();
+        id_input.extend_from_slice(peer_name.as_bytes());
+        let id_hash = blake3::hash(&id_input);
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&id_hash.as_bytes()[..16]);
+
+        let counter = crypto::current_timestamp_ms() / 5_000;
+
+        let session_arc = {
+            let mut s = Session::new(session_id, peer_addr, keys, [0u8; X25519_PUBLIC_KEY_SIZE]);
+            s.state = SessionState::Active;
+            s.counter = counter;
+            s.is_site_peer = true;
+            s.update_tag_window();
+            Arc::new(Mutex::new(s))
+        };
+
+        {
+            let sess = session_arc.lock();
+            for tag in sess.expected_tags.values() {
+                self.tag_map.insert(*tag, session_id);
+            }
+        }
+
+        self.sessions.insert(session_id, session_arc);
+        info!(
+            "site_sync: peer session registered for '{}' ({} tag slots)",
+            peer_name,
+            TAG_WINDOW_SIZE * 2 - 1
+        );
+        session_id
+    }
+
+    /// Advance the synthetic cluster session's tag window to the current 5-second
+    /// time bucket.  Call every ≤60 s to keep expected-tag map aligned with wall
+    /// time and to refresh `last_seen` so the session is not idle-evicted.
+    pub fn refresh_pool_peer_tags(&self, session_id: &[u8; 16]) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            let old_tags: Vec<[u8; TAG_SIZE]> = {
+                entry
+                    .value()
+                    .lock()
+                    .expected_tags
+                    .values()
+                    .cloned()
+                    .collect()
+            };
+            for t in &old_tags {
+                self.tag_map.remove(t);
+            }
+            let mut sess = entry.value().lock();
+            sess.counter = crypto::current_timestamp_ms() / 5_000;
+            sess.last_seen = std::time::Instant::now();
+            sess.update_tag_window();
+            for t in sess.expected_tags.values() {
+                self.tag_map.insert(*t, *session_id);
             }
         }
     }

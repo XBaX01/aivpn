@@ -2,6 +2,8 @@
 //!
 //! Main server entry point
 
+use std::sync::Arc;
+
 use tracing_subscriber::{self, EnvFilter};
 
 use clap::Parser;
@@ -74,6 +76,77 @@ pub struct ServerArgs {
     /// Exits 0 on pass, 1 on structural errors.
     #[arg(long, value_name = "PATH")]
     pub validate_mask: Option<String>,
+
+    // ── Pool / Enroll ──────────────────────────────────────────────────────────
+    /// Enroll a peer server into the pool.
+    /// Verifies that the peer shares the same server.key fingerprint, then
+    /// pushes the full clients.json and adds the peer to the local pool config.
+    #[arg(long, value_name = "PEER_ADDR")]
+    pub enroll: Option<String>,
+
+    /// Pool configuration JSON file path.
+    /// Contains: {"peers": ["host:port", ...], "sync_port": 444, "sync_key": "hex"}
+    #[arg(long, env = "AIVPN_POOL_CONFIG")]
+    pub pool_config: Option<String>,
+
+    // ── Backup / Restore ───────────────────────────────────────────────────────
+    /// Export server state (clients DB, masks, config) to a tar.gz archive.
+    #[arg(long, value_name = "OUTPUT_PATH")]
+    pub export: Option<String>,
+
+    /// Import server state from a tar.gz archive created by --export.
+    #[arg(long, value_name = "ARCHIVE_PATH")]
+    pub import: Option<String>,
+
+    /// Dry-run mode for --import: print what would change without writing files.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    // ── Per-client QoS ─────────────────────────────────────────────────────────
+    /// Set QoS for a client (by name or ID). Use with --bw-up, --bw-down, --dscp.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub set_client_qos: Option<String>,
+
+    /// Upstream (client→server) bandwidth limit. Example: 10M, 512K, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_up: Option<String>,
+
+    /// Downstream (server→client) bandwidth limit. Example: 50M, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_down: Option<String>,
+
+    /// DSCP traffic class name. Examples: EF, AF41, CS1, BE.
+    #[arg(long, value_name = "CLASS")]
+    pub dscp: Option<String>,
+
+    // ── Audit Log ──────────────────────────────────────────────────────────────
+    /// Path to the append-only admin audit log (JSONL format).
+    #[arg(
+        long,
+        env = "AIVPN_AUDIT_LOG",
+        default_value = "/var/log/aivpn/audit.log"
+    )]
+    pub audit_log: String,
+
+    // ── mTLS CA management ─────────────────────────────────────────────────────
+    /// Generate a new ed25519 CA key pair for mTLS client cert signing.
+    /// Prints ca_public_key_hex and ca_private_key_hex to stdout, then exits.
+    #[arg(long)]
+    pub gen_ca: bool,
+
+    /// Sign a client public key with the CA private key and print the cert hex.
+    /// Expects a 64-hex-char (32-byte) X25519 public key.
+    /// Requires --ca-key.
+    #[arg(long, value_name = "PUBKEY_HEX")]
+    pub issue_cert: Option<String>,
+
+    /// CA private key hex string (64 hex chars = 32 bytes) for --issue-cert.
+    #[arg(long, value_name = "HEX")]
+    pub ca_key: Option<String>,
+
+    /// Certificate validity in days (default: 365). Used with --issue-cert.
+    #[arg(long, default_value_t = 365)]
+    pub days: u64,
 }
 
 /// AIVPN Server instance
@@ -86,6 +159,21 @@ impl AivpnServer {
     pub fn new(config: GatewayConfig) -> Result<Self> {
         let gateway = Gateway::new(config)?;
         Ok(Self { gateway })
+    }
+
+    /// Return a shared reference to the session manager (for pool sync setup).
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.gateway.session_manager()
+    }
+
+    /// Return the default MDH bytes from the mask catalog (for pool sync packets).
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.gateway.catalog_mdh()
+    }
+
+    /// Set multi-hop chain forwarder.  Must be called before `run()`.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.gateway.set_chain_forwarder(cf);
     }
 
     /// Run the server

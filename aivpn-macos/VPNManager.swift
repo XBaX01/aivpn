@@ -10,6 +10,7 @@ struct HelperRequest: Codable {
     let fullTunnel: Bool?
     let binaryPath: String?
     let service: String?
+    let mtlsCertPath: String?
 }
 
 struct HelperResponse: Codable {
@@ -363,7 +364,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -390,7 +391,8 @@ class VPNManager: ObservableObject {
             key: normalizedKey,
             fullTunnel: fullTunnel,
             binaryPath: binaryPath,
-            service: nil
+            service: nil,
+            mtlsCertPath: mtlsCertPath
         )
 
         sendToHelper(request) { [weak self] response in
@@ -514,6 +516,27 @@ class VPNManager: ObservableObject {
                     self.lastError = String(last.prefix(200))
                 }
             }
+        }
+    }
+
+    /// Run `aivpn-client bench --server <addr> --json` and return parsed result.
+    /// Calls completion on the main thread; passes nil on failure.
+    func runBench(serverAddr: String, completion: @escaping (BenchDisplayResult?) -> Void) {
+        runBundledClientCommand(["bench", "--server", serverAddr, "--json"]) { success, output in
+            guard success,
+                  let data = output.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(nil)
+                return
+            }
+            let result = BenchDisplayResult(
+                p50: json["latency_p50_ms"] as? Double ?? 0,
+                p95: json["latency_p95_ms"] as? Double ?? 0,
+                p99: json["latency_p99_ms"] as? Double ?? 0,
+                lossPct: json["packet_loss_pct"] as? Double ?? 0,
+                qualityScore: json["quality_score"] as? Int ?? 0
+            )
+            completion(result)
         }
     }
 

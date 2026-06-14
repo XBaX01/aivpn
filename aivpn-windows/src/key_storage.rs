@@ -121,6 +121,9 @@ pub struct ConnectionKey {
     pub full_tunnel: bool,
     #[serde(default)]
     pub proxy_listen: Option<String>,
+    /// Path to client mTLS cert file. Stored plaintext — only `key` is DPAPI-encrypted.
+    #[serde(default)]
+    pub mtls_cert_path: Option<String>,
 }
 
 impl ConnectionKey {
@@ -140,6 +143,7 @@ impl ConnectionKey {
             vpn_ip,
             full_tunnel: false,
             proxy_listen: None,
+            mtls_cert_path: None,
         })
     }
 }
@@ -206,12 +210,14 @@ impl KeyStorage {
         key: &str,
         full_tunnel: bool,
         proxy_listen: Option<String>,
+        mtls_cert_path: Option<String>,
     ) -> Result<(), String> {
         // Validate key format
         let mut ck = ConnectionKey::from_key_string(name, key)
             .ok_or_else(|| "Invalid connection key format".to_string())?;
         ck.full_tunnel = full_tunnel;
         ck.proxy_listen = proxy_listen;
+        ck.mtls_cert_path = mtls_cert_path;
 
         // Check for duplicates
         if self.keys.iter().any(|k| k.key == ck.key) {
@@ -233,6 +239,7 @@ impl KeyStorage {
         key: &str,
         full_tunnel: bool,
         proxy_listen: Option<String>,
+        mtls_cert_path: Option<String>,
     ) -> Result<(), String> {
         if idx >= self.keys.len() {
             return Err("Invalid key index".to_string());
@@ -241,6 +248,7 @@ impl KeyStorage {
             .ok_or_else(|| "Invalid connection key format".to_string())?;
         ck.full_tunnel = full_tunnel;
         ck.proxy_listen = proxy_listen;
+        ck.mtls_cert_path = mtls_cert_path;
         self.keys[idx] = ck;
         self.save();
         Ok(())

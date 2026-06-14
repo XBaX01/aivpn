@@ -613,6 +613,154 @@ These artifacts are intended for ARM Linux servers/SBCs and Entware-capable MIPS
 
 For Entware routers, the usual flow is: build or download the musl artifact, copy it into `/opt/bin`, `chmod +x`, and run it directly from the router shell.
 
+## Advanced Server Configuration
+
+### Multi-server Pool Sync (in-protocol)
+
+Run AIVPN as a pool of nodes that automatically share their client databases. Sync is carried **inside the existing VPN protocol** as a `PoolSync` control message — indistinguishable from regular client traffic. No extra TCP port, no extra firewall rule.
+
+`server.json`:
+```json
+{
+  "pool": {
+    "peers": ["node2.example.com:443", "node3.example.com:443"],
+    "sync_key": "<base64-encoded 32-byte key>"
+  }
+}
+```
+Generate a key: `openssl rand -base64 32`
+
+### Backup / Migration
+
+```bash
+# Export (clients DB, masks, server config)
+aivpn-server --export /tmp/aivpn-backup.tar.gz
+
+# Dry-run preview, then restore
+aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
+aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+```
+
+### Per-client QoS
+
+```bash
+aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+```
+
+Enforced via eBPF TC when available, automatic userspace token-bucket fallback otherwise.
+
+### Benchmarking & Diagnostics
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+```
+
+Available from CLI and from the diagnostics panel in all GUI clients (Windows, macOS, iOS, Android).
+
+### Adaptive Mode
+
+Automatic MTU and keepalive tuning based on live per-connection packet-loss measurement:
+
+```bash
+aivpn-client -k "aivpn://..." --adaptive
+```
+
+### OpenWRT / LuCI
+
+Native OpenWRT package with procd init script, UCI config, and a LuCI web UI. See `aivpn-openwrt/docs/openwrt-setup.md`.
+
+### Admin Audit Log
+
+Every management operation logged to `/var/log/aivpn/audit.log` (JSONL, configurable via `--audit-log`) with actor, action, target, result, and ISO-8601 timestamp.
+
+### Multi-hop Chain Forwarding
+
+Route client traffic through two AIVPN server nodes. The entry node relays encrypted IP payloads to the exit node, which routes to the internet. The client only speaks to the entry node; the internet sees the exit node's IP.
+
+**Topology:**
+```
+[Client] ──(encrypted)──► [Entry Node] ──(ChainForward)──► [Exit Node] ──► Internet
+                           port 443                          port 443
+```
+
+**Entry node** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<shared-base64-32-byte-key>",
+    "exit_node": "exit.example.com:443"
+  }
+}
+```
+
+**Exit node** (`server.json`):
+```json
+{
+  "pool": {
+    "sync_key": "<same-shared-key>",
+    "exit_node_enabled": true
+  }
+}
+```
+
+Both nodes must share the same `sync_key`. Generate one: `openssl rand -base64 32`
+
+### DNS-over-HTTPS Proxy
+
+Force all client DNS traffic through an encrypted DoH resolver served from the VPN interface. Requires `--features "dns"` at build time.
+
+```json
+{
+  "dns": {
+    "upstream_doh": "https://cloudflare-dns.com/dns-query",
+    "fallback_doh": "https://dns.google/dns-query",
+    "block_plain_dns": true
+  }
+}
+```
+
+`block_plain_dns: true` adds an nftables rule blocking UDP/53 to non-VPN interfaces.
+
+### Site-to-site VPN
+
+Connect two or more AIVPN server nodes so end-hosts on each site reach each other without VPN client software.
+
+```json
+{
+  "site_to_site": {
+    "local_subnets": ["192.168.1.0/24"],
+    "peers": [
+      {
+        "name": "office-b",
+        "endpoint": "office-b.example.com:443",
+        "sync_key": "<base64-32-byte-key>",
+        "remote_subnets": ["192.168.2.0/24"]
+      }
+    ]
+  }
+}
+```
+
+### mTLS Client Certificates
+
+Optional ed25519-signed client certificates (104 bytes) layered over the existing X25519 + PSK handshake. Backward-compatible: existing clients work unchanged when `required: false` (default).
+
+```json
+{
+  "mtls": {
+    "ca_public_key_hex": "aabbccdd...",
+    "required": false
+  }
+}
+```
+
+### eBPF XDP Drop Telemetry
+
+Per-drop-reason counters (`TOO_SHORT`, `TAG_EXPIRED`, `TOTAL`) are tracked in a BPF ring buffer and emitted as `XdpDrop` events on the event bus. Activates automatically when `/sys/fs/bpf/aivpn/drop_stats` is present.
+
+---
+
 ## Project Structure
 
 ```

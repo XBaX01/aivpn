@@ -644,6 +644,89 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 对于Entware路由器，通常的流程是：构建或下载musl工件，将其复制到`/opt/bin`，`chmod +x`，然后直接从路由器shell运行。
 
+## 高级服务器配置
+
+### 多服务器池同步（内置于协议）
+
+服务器节点自动共享客户端数据库。同步作为 `PoolSync` 控制消息内置于 VPN 协议中，与客户端流量无法区分。无需额外 TCP 端口或防火墙规则。
+
+`server.json`:
+```json
+{
+  "pool": {
+    "peers": ["node2.example.com:443", "node3.example.com:443"],
+    "sync_key": "<base64编码的32字节密钥>"
+  }
+}
+```
+生成密钥：`openssl rand -base64 32`
+
+### 备份 / 迁移
+
+```bash
+# 导出（客户端数据库、掩码配置、服务器配置）
+aivpn-server --export /tmp/aivpn-backup.tar.gz
+
+# 预览并恢复
+aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
+aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+```
+
+### 客户端级 QoS
+
+```bash
+aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+```
+
+有 eBPF TC 内核支持时优先使用，否则自动回退到用户态令牌桶。
+
+### 基准测试与诊断
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+```
+
+可从命令行及所有 GUI 客户端（Windows、macOS、iOS、Android）的诊断面板使用。
+
+### 自适应模式
+
+基于实时丢包测量自动调整 MTU 和 keepalive：
+
+```bash
+aivpn-client -k "aivpn://..." --adaptive
+```
+
+### OpenWRT / LuCI
+
+原生 OpenWRT 软件包，含 procd init 脚本、UCI 配置及 LuCI Web 界面。参见 `aivpn-openwrt/docs/openwrt-setup.md`。
+
+### 管理员审计日志
+
+所有管理操作记录至 `/var/log/aivpn/audit.log`（JSONL，可通过 `--audit-log` 配置路径），包含操作者、动作、目标、结果及 ISO-8601 时间戳。
+
+### 多跳链式转发
+
+无需修改客户端，通过两台节点路由流量。入口节点：`pool.exit_node`。出口节点：`pool.exit_node_enabled: true`。两节点共享同一 `pool.sync_key`。
+
+### DNS-over-HTTPS 代理
+
+将客户端 DNS 查询通过 VPN 接口上的加密 DoH 解析器转发。编译时添加 `--features "dns"`，配置 `dns.upstream_doh` 字段。
+
+### 站点间 VPN
+
+无需客户端软件连通多个站点子网。配置 `site_to_site.peers`，含 `endpoint`、`sync_key`、`remote_subnets` 白名单。
+
+### mTLS 客户端证书
+
+可选 ed25519 签名证书（104 字节）叠加于 X25519+PSK 之上。`required: false`（默认）向后兼容；`required: true` 强制验证。
+
+### eBPF XDP 丢包遥测
+
+按原因统计丢包（`TOO_SHORT`、`TAG_EXPIRED`、`TOTAL`），通过 BPF 环形缓冲区发布至 `EventBus`。检测到 `/sys/fs/bpf/aivpn/drop_stats` 时自动激活。
+
+---
+
 ## 项目结构
 
 ```

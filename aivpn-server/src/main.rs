@@ -1,12 +1,21 @@
 //! AIVPN Server Binary
 
 use aivpn_common::crypto;
+use aivpn_common::event_log::{EventBus, EventSinkConfig};
 use aivpn_common::mask::{IATDistType, MaskProfile, SizeDistType};
 use aivpn_common::network_config::{
     netmask_to_prefix_len, ClientNetworkConfig, VpnNetworkConfig, DEFAULT_VPN_MTU,
 };
+use aivpn_server::audit_log::AuditLogger;
+use aivpn_server::backup::{export_server, import_server, ExportOptions};
+#[cfg(feature = "dns")]
+use aivpn_server::dns_proxy::DnsProxyConfig;
 use aivpn_server::gateway::GatewayConfig;
+use aivpn_server::mtls::MtlsConfig;
 use aivpn_server::neural::NeuralConfig;
+use aivpn_server::pool_sync::{PeerSyncer, PoolSyncConfig};
+use aivpn_server::qos::{dscp_by_name, parse_bandwidth, ClientQos, QosEnforcer};
+use aivpn_server::site_sync::SiteToSiteConfig;
 use aivpn_server::{AivpnServer, ClientDatabase, ServerArgs};
 use clap::Parser;
 use serde::{Deserialize, Deserializer};
@@ -104,6 +113,15 @@ struct ServerFileConfig {
     session_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
     tun_mtu: Option<MtuSetting>,
+    #[serde(default)]
+    pool: Option<PoolSyncConfig>,
+    #[serde(default)]
+    site_to_site: Option<SiteToSiteConfig>,
+    #[serde(default)]
+    mtls: Option<MtlsConfig>,
+    #[cfg(feature = "dns")]
+    #[serde(default)]
+    dns: Option<DnsProxyConfig>,
 }
 
 #[tokio::main]
@@ -114,6 +132,16 @@ async fn main() {
     // Mask validation doesn't need the server config or client DB.
     if let Some(ref path) = args.validate_mask {
         handle_validate_mask(path);
+        return;
+    }
+
+    // mTLS CA management — no config or client DB needed.
+    if args.gen_ca {
+        handle_gen_ca();
+        return;
+    }
+    if let Some(ref pubkey_hex) = args.issue_cert {
+        handle_issue_cert(pubkey_hex, &args);
         return;
     }
 
@@ -153,6 +181,22 @@ async fn main() {
     }
     if let Some(ref id) = args.show_client {
         handle_show_client(&client_db, id, &args);
+        return;
+    }
+    if let Some(ref peer_addr) = args.enroll.clone() {
+        handle_enroll(&client_db, peer_addr, &args);
+        return;
+    }
+    if let Some(ref output_path) = args.export.clone() {
+        handle_export(&args, output_path);
+        return;
+    }
+    if let Some(ref archive_path) = args.import.clone() {
+        handle_import(archive_path, args.dry_run, &args);
+        return;
+    }
+    if let Some(ref name_or_id) = args.set_client_qos.clone() {
+        handle_set_client_qos(&client_db, name_or_id, &args);
         return;
     }
 
@@ -244,6 +288,48 @@ async fn main() {
         }
     });
 
+    // Build structured event bus (stdout JSONL sink)
+    let event_bus = EventBus::new(EventSinkConfig {
+        stdout: true,
+        webhook_url: None,
+    });
+
+    // Audit logger
+    let audit_logger = AuditLogger::new(std::path::Path::new(&args.audit_log));
+
+    // Pool sync — start listener + outbound tasks if pool is configured
+    let pool_sync_config: Option<PoolSyncConfig> = args
+        .pool_config
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .or_else(|| file_config.as_ref().and_then(|c| c.pool.clone()));
+
+    // Clone client_db for pool sync before it is consumed by GatewayConfig.
+    let client_db_for_sync: Option<Arc<ClientDatabase>> =
+        pool_sync_config.as_ref().map(|_| client_db.clone());
+
+    // Build per-client QoS enforcer, pre-loaded from the client DB
+    let qos_enforcer = {
+        let enforcer = Arc::new(QosEnforcer::new());
+        for client in client_db.list_clients() {
+            if let Some(qos) = client.qos {
+                enforcer.set_client(&client.id, &qos);
+            }
+        }
+        enforcer
+    };
+
+    // Extract values needed after GatewayConfig consumes its inputs
+    #[cfg(feature = "dns")]
+    let vpn_gateway_ip = std::net::IpAddr::V4(network_config.server_vpn_ip);
+    #[cfg(feature = "dns")]
+    let tun_iface_for_dns = tun_name.clone();
+    let s2s_config: Option<SiteToSiteConfig> =
+        file_config.as_ref().and_then(|c| c.site_to_site.clone());
+    #[cfg(feature = "dns")]
+    let dns_config: Option<DnsProxyConfig> = file_config.as_ref().and_then(|c| c.dns.clone());
+
     // Create config
     let config = GatewayConfig {
         listen_addr,
@@ -266,7 +352,16 @@ async fn main() {
             Some(MtuSetting::Fixed(v)) => *v,
             Some(MtuSetting::Auto) | None => detect_mtu(),
         },
+        event_bus: event_bus.clone(),
+        qos_enforcer,
+        chain_forwarder: None,
+        mtls: file_config.as_ref().and_then(|c| c.mtls.clone()),
+        exit_node_enabled: file_config
+            .as_ref()
+            .and_then(|c| c.pool.as_ref())
+            .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
     };
+    let _ = audit_logger; // used by management subcommands; suppress unused warning
 
     // Spawn management API (Unix socket, optional)
     #[cfg(all(feature = "management-api", unix))]
@@ -315,7 +410,74 @@ async fn main() {
 
     // Create and run server
     match AivpnServer::new(config) {
-        Ok(server) => {
+        Ok(mut server) => {
+            // Start pool sync after session_manager and mask catalog are initialised.
+            // Sync packets ride the existing VPN UDP port — no extra TCP port needed.
+            if let (Some(ref pool_cfg), Some(db)) = (&pool_sync_config, client_db_for_sync) {
+                if let Some(syncer) =
+                    PeerSyncer::new(db, pool_cfg, server.catalog_mdh(), event_bus.clone())
+                {
+                    syncer.start(server.session_manager());
+                    info!(
+                        "Pool sync active ({} peers, in-protocol UDP)",
+                        pool_cfg.peers.len()
+                    );
+                }
+            }
+            // Multi-hop: create chain forwarder if exit_node is configured
+            if let Some(ref pool_cfg) = pool_sync_config {
+                if let Some(ref exit_node) = pool_cfg.exit_node {
+                    use base64::Engine as _;
+                    let sync_key_opt: Option<[u8; 32]> = pool_cfg
+                        .sync_key
+                        .as_deref()
+                        .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok())
+                        .and_then(|b| b.try_into().ok())
+                        .filter(|k: &[u8; 32]| k != &[0u8; 32]);
+                    match sync_key_opt {
+                        None => {
+                            tracing::error!(
+                                "Multi-hop: pool.sync_key is missing, invalid, or all-zero \
+                                 — chain forwarder NOT started (exit_node={})",
+                                exit_node
+                            );
+                        }
+                        Some(sync_key) => {
+                            if let Some(cf) = aivpn_server::chain_forwarder::ChainForwarder::new(
+                                exit_node,
+                                sync_key,
+                                server.catalog_mdh(),
+                            )
+                            .await
+                            {
+                                server.set_chain_forwarder(cf);
+                                info!("Multi-hop: chain forwarding to exit node {}", exit_node);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Start site-to-site route sync — pass session_manager so peer sessions are registered.
+            if let Some(ref s2s_cfg) = s2s_config {
+                aivpn_server::site_sync::start(
+                    s2s_cfg,
+                    server.catalog_mdh(),
+                    server.session_manager(),
+                );
+                info!("Site-to-site active ({} peers)", s2s_cfg.peers.len());
+            }
+
+            // Start DNS-over-HTTPS proxy
+            #[cfg(feature = "dns")]
+            if let Some(dns_cfg) = dns_config {
+                let gw_ip = vpn_gateway_ip;
+                let iface = tun_iface_for_dns;
+                tokio::spawn(async move {
+                    aivpn_server::dns_proxy::run(dns_cfg, gw_ip, iface).await;
+                });
+            }
+
             info!("Server initialized successfully");
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);
@@ -686,6 +848,247 @@ fn resolve_mask_dir(args: &ServerArgs, file_config: Option<&ServerFileConfig>) -
     PathBuf::from(DEFAULT_MASK_DIR)
 }
 
+fn handle_enroll(db: &ClientDatabase, peer_addr: &str, args: &ServerArgs) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let stream = TcpStream::connect_timeout(
+        &peer_addr.parse().unwrap_or_else(|_| {
+            eprintln!("❌ Invalid peer address: {}", peer_addr);
+            std::process::exit(1);
+        }),
+        Duration::from_secs(10),
+    );
+    let mut stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("❌ Cannot connect to peer {}: {}", peer_addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Send enroll probe: our server public key fingerprint
+    let pub_key = load_server_public_key(args);
+    let probe = serde_json::json!({
+        "action": "enroll",
+        "pub_key": pub_key.map(|k| hex::encode(k)).unwrap_or_default(),
+    })
+    .to_string();
+    let len = (probe.len() as u32).to_le_bytes();
+    let _ = stream.write_all(&len);
+    let _ = stream.write_all(probe.as_bytes());
+
+    // Read peer response
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        eprintln!("❌ Peer did not respond to enroll probe");
+        std::process::exit(1);
+    }
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    let mut msg_buf = vec![0u8; msg_len.min(1 << 20)];
+    if stream.read_exact(&mut msg_buf).is_err() {
+        eprintln!("❌ Failed to read peer response");
+        std::process::exit(1);
+    }
+    let resp: serde_json::Value = serde_json::from_slice(&msg_buf).unwrap_or_default();
+
+    if resp.get("status").and_then(|v| v.as_str()) != Some("ok") {
+        eprintln!(
+            "❌ Peer rejected enroll: {}",
+            resp.get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+        );
+        std::process::exit(1);
+    }
+
+    // Push our client database to the peer
+    let clients_json = match db.export_json() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("❌ Failed to export client DB: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let push = serde_json::json!({
+        "action": "push_clients",
+        "clients": serde_json::from_str::<serde_json::Value>(&clients_json).unwrap_or_default(),
+    })
+    .to_string();
+    let len = (push.len() as u32).to_le_bytes();
+    let _ = stream.write_all(&len);
+    let _ = stream.write_all(push.as_bytes());
+
+    println!(
+        "✅ Peer {} enrolled. Clients pushed: {}",
+        peer_addr,
+        db.list_clients().len()
+    );
+    println!("   Add '{}' to your pool config to enable sync.", peer_addr);
+}
+
+fn handle_export(args: &ServerArgs, output_path: &str) {
+    let opts = ExportOptions {
+        include_clients: true,
+        include_masks: true,
+        include_config: true,
+        config_path: Some(PathBuf::from(
+            args.config.as_deref().unwrap_or("/etc/aivpn/server.json"),
+        )),
+        mask_dir: Some(PathBuf::from(
+            args.mask_dir.as_deref().unwrap_or("/var/lib/aivpn/masks"),
+        )),
+        clients_db: Some(PathBuf::from(&args.clients_db)),
+    };
+    match export_server(&opts, std::path::Path::new(output_path)) {
+        Ok(()) => println!("✅ Export complete: {}", output_path),
+        Err(e) => {
+            eprintln!("❌ Export failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_import(archive_path: &str, dry_run: bool, args: &ServerArgs) {
+    let target_dir = args
+        .config
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).parent())
+        .unwrap_or(std::path::Path::new("/etc/aivpn"));
+    match import_server(std::path::Path::new(archive_path), target_dir, dry_run) {
+        Ok(()) => {
+            if dry_run {
+                println!("✅ Dry-run complete. No files written.");
+            } else {
+                println!("✅ Import complete.");
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Import failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_set_client_qos(db: &ClientDatabase, name_or_id: &str, args: &ServerArgs) {
+    let client = db
+        .list_clients()
+        .into_iter()
+        .find(|c| c.id == name_or_id || c.name == name_or_id);
+    let client = match client {
+        Some(c) => c,
+        None => {
+            eprintln!("❌ Client '{}' not found", name_or_id);
+            std::process::exit(1);
+        }
+    };
+
+    let bw_up = args.bw_up.as_deref().and_then(parse_bandwidth);
+    let bw_down = args.bw_down.as_deref().and_then(parse_bandwidth);
+    let dscp = args.dscp.as_deref().and_then(dscp_by_name);
+
+    if bw_up.is_none() && bw_down.is_none() && dscp.is_none() && args.dscp.is_none() {
+        eprintln!("⚠  No QoS parameters specified. Use --bw-up, --bw-down, and/or --dscp.");
+        std::process::exit(1);
+    }
+
+    let qos = ClientQos {
+        bandwidth_limit_up: bw_up,
+        bandwidth_limit_down: bw_down,
+        dscp_class: dscp,
+        priority: None,
+    };
+
+    match db.set_client_qos(&client.id, qos) {
+        Ok(()) => {
+            println!("✅ QoS updated for '{}' ({})", client.name, client.id);
+            if let Some(bw) = args.bw_up.as_deref() {
+                println!("   Upload limit:   {}", bw);
+            }
+            if let Some(bw) = args.bw_down.as_deref() {
+                println!("   Download limit: {}", bw);
+            }
+            if let Some(d) = args.dscp.as_deref() {
+                println!("   DSCP class:     {}", d);
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to set QoS: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_gen_ca() {
+    use ed25519_dalek::SigningKey;
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    let sk = SigningKey::from_bytes(&seed);
+    let pk = sk.verifying_key();
+    let priv_hex = hex::encode(sk.to_bytes());
+    let pub_hex = hex::encode(pk.to_bytes());
+    println!("ca_private_key_hex: {priv_hex}");
+    println!("ca_public_key_hex:  {pub_hex}");
+    println!();
+    println!("Add to server.json:");
+    println!("  \"mtls\": {{");
+    println!("    \"ca_public_key_hex\": \"{pub_hex}\",");
+    println!("    \"required\": false");
+    println!("  }}");
+    println!();
+    println!("Keep ca_private_key_hex offline — it is only needed to run --issue-cert.");
+}
+
+fn handle_issue_cert(pubkey_hex: &str, args: &ServerArgs) {
+    let pk_bytes: [u8; 32] = match hex::decode(pubkey_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            eprintln!(
+                "error: --issue-cert expects a 64-char hex string (32 bytes), got {pubkey_hex:?}"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let ca_key_hex = match args.ca_key.as_deref() {
+        Some(h) => h,
+        None => {
+            eprintln!("error: --ca-key <HEX> is required with --issue-cert");
+            std::process::exit(1);
+        }
+    };
+
+    let ca_bytes: [u8; 32] = match hex::decode(ca_key_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            eprintln!("error: --ca-key must be a 64-char hex string (32 bytes)");
+            std::process::exit(1);
+        }
+    };
+
+    let expiry_ts = aivpn_common::crypto::current_timestamp_ms() / 1000 + args.days * 86_400;
+    let cert = aivpn_server::mtls::issue_cert(pk_bytes, expiry_ts, &ca_bytes);
+    let cert_hex = hex::encode(cert.to_bytes());
+    println!("{cert_hex}");
+    println!();
+    println!(
+        "cert_hex ({} chars) — pass to aivpn-client via --mtls-cert",
+        cert_hex.len()
+    );
+    println!("or base64-encode for mobile platforms.");
+    println!("Expires: {expiry_ts} unix ({} days)", args.days);
+}
+
 fn handle_validate_mask(path: &str) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -893,6 +1296,20 @@ mod tests {
             validate_mask: None,
             #[cfg(all(feature = "management-api", unix))]
             management_socket: None,
+            enroll: None,
+            pool_config: None,
+            export: None,
+            import: None,
+            dry_run: false,
+            set_client_qos: None,
+            bw_up: None,
+            bw_down: None,
+            dscp: None,
+            audit_log: "/dev/null".to_string(),
+            gen_ca: false,
+            issue_cert: None,
+            ca_key: None,
+            days: 365,
         }
     }
 
@@ -961,6 +1378,8 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
+            ..Default::default()
         };
 
         let resolved = resolve_network_config(Some(&file_config)).unwrap();
@@ -991,6 +1410,8 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1023,6 +1444,8 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1092,6 +1515,8 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));
@@ -1191,6 +1616,8 @@ mod tests {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             tun_mtu: None,
+            pool: None,
+            ..Default::default()
         };
 
         let result = load_bootstrap_masks(Some(&file_config));

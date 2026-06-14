@@ -7,7 +7,10 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
@@ -17,10 +20,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
+import androidx.lifecycle.lifecycleScope
 import com.aivpn.client.databinding.ActivityMainBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.util.UUID
 
 /**
@@ -555,8 +565,137 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        val adaptiveOn = isAdaptiveEnabled()
+        menu.add(0, MENU_ADAPTIVE, 0,
+            if (adaptiveOn) getString(R.string.adaptive_enabled)
+            else getString(R.string.adaptive_disabled))
+            .setCheckable(true)
+            .setChecked(adaptiveOn)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            MENU_ADAPTIVE -> {
+                val newVal = !isAdaptiveEnabled()
+                getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                    .edit().putBoolean("adaptive_enabled", newVal).apply()
+                item.isChecked = newVal
+                item.title = if (newVal) getString(R.string.adaptive_enabled)
+                             else getString(R.string.adaptive_disabled)
+                val msg = if (newVal) getString(R.string.adaptive_enabled)
+                          else getString(R.string.adaptive_disabled)
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                true
+            }
+            MENU_DIAGNOSTICS -> {
+                showDiagnosticsDialog()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun isAdaptiveEnabled(): Boolean =
+        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+            .getBoolean("adaptive_enabled", false)
+
+    private fun showDiagnosticsDialog() {
+        if (!isConnected) {
+            Toast.makeText(this, getString(R.string.status_disconnected), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val serverAddr = profiles.find { it.id == activeProfileId }
+            ?.key?.let { parseConnectionKey(it)?.server } ?: ""
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.diagnostics))
+            .setMessage(getString(R.string.run_benchmark))
+            .setPositiveButton(getString(R.string.run_benchmark)) { _, _ ->
+                val runningToast = Toast.makeText(this, getString(R.string.bench_running), Toast.LENGTH_LONG)
+                runningToast.show()
+                lifecycleScope.launch {
+                    val stats = withContext(Dispatchers.IO) { runUDPBench(serverAddr) }
+                    runningToast.cancel()
+                    val msg = getString(R.string.bench_result, stats.p50, stats.p95, stats.lossPct.toFloat(), stats.quality)
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle(getString(R.string.diagnostics))
+                        .setMessage(msg)
+                        .setPositiveButton(getString(R.string.btn_cancel), null)
+                        .show()
+                }
+            }
+            .setNegativeButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
+    private data class BenchStats(val p50: Int, val p95: Int, val lossPct: Double, val quality: Int)
+
+    private fun runUDPBench(serverAddr: String): BenchStats {
+        if (serverAddr.isEmpty()) return BenchStats(0, 0, 100.0, 0)
+        val colonIdx = serverAddr.lastIndexOf(':')
+        if (colonIdx < 0) return BenchStats(0, 0, 100.0, 0)
+        val host = serverAddr.substring(0, colonIdx)
+        val port = serverAddr.substring(colonIdx + 1).toIntOrNull() ?: return BenchStats(0, 0, 100.0, 0)
+
+        return try {
+            val socket = DatagramSocket()
+            socket.soTimeout = 500
+            val probe = "aivpn-bench-probe-v1".toByteArray()
+            val addr = InetAddress.getByName(host)
+            val deadline = System.currentTimeMillis() + 5_000L
+            val rtts = mutableListOf<Double>()
+            var sent = 0
+            try {
+                while (System.currentTimeMillis() < deadline) {
+                    val t0 = System.currentTimeMillis()
+                    sent++
+                    socket.send(DatagramPacket(probe, probe.size, addr, port))
+                    try {
+                        val buf = ByteArray(256)
+                        socket.receive(DatagramPacket(buf, buf.size))
+                        rtts.add((System.currentTimeMillis() - t0).toDouble())
+                    } catch (_: SocketTimeoutException) {
+                        val elapsed = (System.currentTimeMillis() - t0).toDouble()
+                        if (elapsed < 490) rtts.add(elapsed * 2)
+                    }
+                    Thread.sleep(100)
+                }
+            } finally {
+                socket.close()
+            }
+            computeBenchStats(rtts, sent)
+        } catch (_: Exception) {
+            BenchStats(0, 0, 100.0, 0)
+        }
+    }
+
+    private fun computeBenchStats(rtts: List<Double>, sent: Int): BenchStats {
+        if (rtts.isEmpty()) return BenchStats(0, 0, 100.0, 0)
+        val sorted = rtts.sorted()
+        val p50 = sorted[(sorted.size * 0.50).toInt().coerceAtMost(sorted.size - 1)].toInt()
+        val p95 = sorted[(sorted.size * 0.95).toInt().coerceAtMost(sorted.size - 1)].toInt()
+        val lossPct = (maxOf(0, sent - rtts.size).toDouble() / sent * 100).coerceIn(0.0, 100.0)
+        val quality = when {
+            p50 < 50 && lossPct < 1.0  -> 95
+            p50 < 100 && lossPct < 3.0 -> 80
+            p50 < 200 && lossPct < 10.0 -> 60
+            else -> 30
+        }
+        return BenchStats(p50, p95, lossPct, quality)
+    }
+
     override fun onDestroy() {
         timerHandler.removeCallbacks(timerRunnable)
         super.onDestroy()
+    }
+
+    companion object {
+        private const val MENU_ADAPTIVE = 1001
+        private const val MENU_DIAGNOSTICS = 1002
     }
 }

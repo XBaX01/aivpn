@@ -715,12 +715,15 @@ fn battle_stress_100_sessions() {
     let mask = webrtc_zoom_v3();
     let mgr = SessionManager::new(server_kp.clone(), signing_key, mask);
 
-    let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
     let mut all_tags = HashSet::new();
 
     for i in 0..100 {
         let client_kp = KeyPair::generate();
-        let session = mgr
+        // Capture tw immediately before create_session so the registered tag
+        // and our lookup tag use the same (or adjacent) time window.
+        // We also fall back to tw+1 in case the boundary is crossed during the call.
+        let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
+        let _session = mgr
             .create_session(
                 make_unique_addr(i),
                 client_kp.public_key_bytes(),
@@ -734,10 +737,13 @@ fn battle_stress_100_sessions() {
             .unwrap();
         let keys = derive_session_keys(&shared, None, &client_kp.public_key_bytes());
 
-        // Recompute time window (test may take >5s with 100 DH computations)
-        let tw = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
         let tag = generate_resonance_tag(&keys.tag_secret, 0, tw);
-        let found = mgr.get_session_by_tag(&tag);
+        let found = mgr.get_session_by_tag(&tag).or_else(|| {
+            // Fallback: window may have advanced one step during create_session
+            let tw_next = compute_time_window(current_timestamp_ms(), DEFAULT_WINDOW_MS);
+            let tag_next = generate_resonance_tag(&keys.tag_secret, 0, tw_next);
+            mgr.get_session_by_tag(&tag_next)
+        });
         assert!(found.is_some(), "Session {i} tag lookup failed");
 
         // Tags should be unique across sessions

@@ -69,6 +69,7 @@ class AivpnService : VpnService() {
     @Volatile private var savedServerAddr: String? = null
     @Volatile private var savedServerKey: String?  = null
     @Volatile private var savedPsk: String?        = null
+    @Volatile private var savedMtlsCert: ByteArray? = null
     @Volatile private var savedVpnIp: String?      = null
     @Volatile private var savedServerVpnIp: String? = null
     @Volatile private var savedVpnPrefixLen: Int = LEGACY_PREFIX_LEN
@@ -115,6 +116,7 @@ class AivpnService : VpnService() {
         serverVpnIp: String? = null,
         vpnPrefixLen: Int = LEGACY_PREFIX_LEN,
         vpnMtu: Int = DEFAULT_TUN_MTU,
+        mtlsCert: ByteArray? = null,
     ) {
         Log.d(TAG, "startVpn: server=$serverAddr")
 
@@ -128,7 +130,9 @@ class AivpnService : VpnService() {
             savedVpnIp == vpnIp &&
             savedServerVpnIp == serverVpnIp &&
             savedVpnPrefixLen == normalizedPrefixLen &&
-            savedVpnMtu == normalizedMtu
+            savedVpnMtu == normalizedMtu &&
+            (savedMtlsCert == null && mtlsCert == null ||
+             savedMtlsCert != null && mtlsCert != null && savedMtlsCert.contentEquals(mtlsCert))
         val startupInFlight = restartJob?.isActive == true
         val tunnelLoopActive = serviceJob?.isActive == true
         if (sameTarget && (startupInFlight || tunnelLoopActive)) {
@@ -139,6 +143,7 @@ class AivpnService : VpnService() {
         savedServerAddr  = serverAddr
         savedServerKey   = serverKeyBase64
         savedPsk         = pskBase64
+        savedMtlsCert    = mtlsCert
         savedVpnIp       = vpnIp
         savedServerVpnIp = serverVpnIp
         savedVpnPrefixLen = normalizedPrefixLen
@@ -273,7 +278,7 @@ class AivpnService : VpnService() {
 
         try {
             val error = withContext(Dispatchers.IO) {
-                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk)
+                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert)
             }
             if (error.isNotEmpty()) throw RuntimeException(error)
         } finally {
@@ -584,6 +589,10 @@ class AivpnService : VpnService() {
             return
         }
         val parsed = parseConnectionKeyInService(profile.key) ?: return
+        val mtlsCert: ByteArray? = profile.mtlsCertBase64?.let { b64 ->
+            try { Base64.decode(b64, Base64.DEFAULT).takeIf { it.size == 104 } }
+            catch (_: Exception) { null }
+        }
         startVpn(
             serverAddr      = parsed.server,
             serverKeyBase64 = parsed.serverKey,
@@ -592,6 +601,7 @@ class AivpnService : VpnService() {
             serverVpnIp     = parsed.serverVpnIp,
             vpnPrefixLen    = parsed.prefixLen,
             vpnMtu          = parsed.mtu,
+            mtlsCert        = mtlsCert,
         )
     }
 
