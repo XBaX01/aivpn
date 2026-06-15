@@ -665,6 +665,11 @@ class MainActivity : AppCompatActivity() {
 
         return try {
             val socket = DatagramSocket()
+            // Protect the socket so bench probes bypass the VPN tunnel and reach the
+            // server directly, avoiding a routing loop when the VPN is active.
+            AivpnService.instance?.protect(socket) ?: run {
+                android.util.Log.w("MainActivity", "bench: VPN service not running, socket not protected")
+            }
             socket.soTimeout = 500
             val probe = "aivpn-bench-probe-v1".toByteArray()
             val addr = InetAddress.getByName(host)

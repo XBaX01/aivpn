@@ -175,7 +175,6 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 struct ClientFileConfig {
     server_addr: Option<String>,
     server_public_key: Option<String>,
-    #[allow(dead_code)]
     server_signing_public_key: Option<String>,
     preshared_key: Option<String>,
     tun_name: Option<String>,
@@ -541,6 +540,17 @@ async fn main() {
 
     let server_public_key = decode_base64_key("server key", &server_key_b64);
 
+    // Optional ed25519 signing key for ServerHello/MaskUpdate/BootstrapDescriptor verification.
+    let server_signing_key: Option<[u8; 32]> = args
+        .server_signing_key
+        .as_deref()
+        .or_else(|| {
+            file_config
+                .as_ref()
+                .and_then(|c| c.server_signing_public_key.as_deref())
+        })
+        .map(|b64| decode_base64_key("server signing key", b64));
+
     // Parse PSK
     let preshared_key: Option<[u8; 32]> = psk_bytes.and_then(|v| {
         if v.len() == 32 {
@@ -729,6 +739,7 @@ async fn main() {
         let config = ClientConfig {
             server_addr: active_server,
             server_public_key,
+            server_signing_key,
             preshared_key,
             initial_mask,
             tun_config,

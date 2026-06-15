@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var showKeyInput: Bool = false
     @State private var showConnectionKey: Bool = false
     @AppStorage("fullTunnel") private var fullTunnel: Bool = false
+    @AppStorage("excludeRoutes") private var excludeRoutes: String = ""
     @AppStorage("proxyMode") private var proxyMode: Bool = false
     @AppStorage("proxyPort") private var proxyPort: String = "1080"
     @AppStorage("adaptiveMode") private var adaptiveMode: Bool = false
@@ -222,6 +223,17 @@ struct ContentView: View {
                         Spacer()
                     }
 
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(loc.t("exclude_routes_label"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField(loc.t("exclude_routes_placeholder"), text: $excludeRoutes)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                            .help(loc.t("exclude_routes_help"))
+                            .disabled(proxyMode)
+                    }
+
                     HStack {
                         Toggle(loc.t("proxy_mode"), isOn: $proxyMode)
                             .toggleStyle(.checkbox)
@@ -244,6 +256,16 @@ struct ContentView: View {
                                     if filtered != proxyPort { proxyPort = filtered }
                                 }
                             Spacer()
+                        }
+                        if let cert = vpn.selectedKey?.mtlsCertPath, !cert.isEmpty {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.orange)
+                                Text(loc.t("mtls_ignored_in_proxy_mode"))
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
                         }
                     }
                     
@@ -485,7 +507,8 @@ struct ContentView: View {
                             vpn.connectProxy(key: selectedKey.keyValue, proxyPort: port)
                         } else {
                             vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel,
-                                        mtlsCertPath: selectedKey.mtlsCertPath)
+                                        mtlsCertPath: selectedKey.mtlsCertPath,
+                                        excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes)
                         }
                     }
                 }

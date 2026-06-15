@@ -235,6 +235,22 @@ class LocalizationManager: ObservableObject {
             "en": "Path to client certificate file for mutual TLS authentication. Leave empty to disable.",
             "ru": "Путь к файлу клиентского сертификата для взаимной TLS-аутентификации. Оставьте пустым для отключения."
         ],
+        "exclude_routes_label": [
+            "en": "Exclude routes (split tunnel)",
+            "ru": "Исключить маршруты (split tunnel)"
+        ],
+        "exclude_routes_placeholder": [
+            "en": "192.168.1.0/24, 10.0.0.0/8",
+            "ru": "192.168.1.0/24, 10.0.0.0/8"
+        ],
+        "exclude_routes_help": [
+            "en": "Comma-separated CIDRs to bypass the VPN. Use with Full Tunnel to carve out local subnets.",
+            "ru": "CIDRы через запятую, которые не будут направлены через VPN. Используйте вместе с полным туннелем для исключения локальных подсетей."
+        ],
+        "mtls_ignored_in_proxy_mode": [
+            "en": "mTLS certificate is not used in SOCKS5 proxy mode",
+            "ru": "mTLS-сертификат не применяется в режиме SOCKS5-прокси"
+        ],
     ]
 
     init() {

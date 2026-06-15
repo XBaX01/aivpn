@@ -520,7 +520,7 @@ struct ContentView: View {
                         vpn.disconnect()
                     } else {
                         guard let key = vpn.selectedKey else { return }
-                        vpn.connect(key: key, fullTunnel: fullTunnel)
+                        vpn.connect(key: key, fullTunnel: fullTunnel, adaptiveMode: adaptiveMode)
                     }
                 } label: {
                     Label(

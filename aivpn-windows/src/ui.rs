@@ -56,6 +56,12 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
 
     ui.add_space(4.0);
 
+    // Kill-switch toggle (only when disconnected)
+    if !app.vpn.is_connected() {
+        draw_kill_switch(ui, app);
+        ui.add_space(4.0);
+    }
+
     // Connect/Disconnect button
     draw_connect_button(ui, app);
 
@@ -445,6 +451,20 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         .color(Color32::from_rgb(0x90, 0xEE, 0x90)),
                 );
             });
+            if app.new_key_full_tunnel {
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(t(app.lang, "exclude_routes"))
+                        .size(11.0)
+                        .color(DIM),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(&mut app.new_key_exclude_routes)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(2)
+                        .hint_text(t(app.lang, "exclude_routes_hint")),
+                );
+            }
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -494,6 +514,12 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     let name = app.new_key_name.clone();
                     let value = app.new_key_value.clone();
                     let full_tunnel = app.new_key_full_tunnel;
+                    let exclude_routes: Vec<String> = app
+                        .new_key_exclude_routes
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
                     let proxy_listen =
                         if app.new_key_use_proxy && !app.new_key_proxy_listen.is_empty() {
                             Some(app.new_key_proxy_listen.clone())
@@ -513,10 +539,17 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             full_tunnel,
                             proxy_listen,
                             mtls_cert_path,
+                            exclude_routes,
                         )
                     } else {
-                        app.keys
-                            .add_key(&name, &value, full_tunnel, proxy_listen, mtls_cert_path)
+                        app.keys.add_key(
+                            &name,
+                            &value,
+                            full_tunnel,
+                            proxy_listen,
+                            mtls_cert_path,
+                            exclude_routes,
+                        )
                     };
                     match result {
                         Ok(()) => {
@@ -525,6 +558,7 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             app.new_key_name.clear();
                             app.new_key_value.clear();
                             app.new_key_full_tunnel = false;
+                            app.new_key_exclude_routes.clear();
                             app.new_key_use_proxy = false;
                             app.new_key_proxy_listen.clear();
                             app.new_key_mtls_cert.clear();
@@ -538,10 +572,28 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     app.new_key_name.clear();
                     app.new_key_value.clear();
                     app.new_key_full_tunnel = false;
+                    app.new_key_exclude_routes.clear();
                     app.new_key_use_proxy = false;
                     app.new_key_proxy_listen.clear();
                     app.new_key_mtls_cert.clear();
                 }
+            });
+        });
+}
+
+fn draw_kill_switch(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut app.kill_switch, "");
+                ui.label(
+                    RichText::new(t(app.lang, "kill_switch"))
+                        .size(12.0)
+                        .color(if app.kill_switch { RED } else { DIM }),
+                );
             });
         });
 }
@@ -577,11 +629,15 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         let full_tunnel = key.full_tunnel;
                         let proxy_listen = key.proxy_listen.clone();
                         let mtls_cert_path = key.mtls_cert_path.clone();
+                        let exclude_routes = key.exclude_routes.clone();
+                        let kill_switch = app.kill_switch;
                         if let Err(e) = app.vpn.connect(
                             &key_str,
                             full_tunnel,
                             proxy_listen.as_deref(),
                             mtls_cert_path.as_deref(),
+                            &exclude_routes,
+                            kill_switch,
                         ) {
                             app.set_error(e);
                         }
