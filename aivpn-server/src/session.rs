@@ -119,6 +119,9 @@ pub struct Session {
     pub pre_ratchet_tags: HashMap<u64, [u8; TAG_SIZE]>,
     /// Deadline until which pre_ratchet_tags are still accepted.
     pub pre_ratchet_expire: Option<Instant>,
+    /// Anti-replay bitmap for pre_ratchet_tags — prevents replaying old-key
+    /// packets during the grace window (C-S-2).
+    pub pre_ratchet_bitmap: u256,
 
     /// mTLS certificate gate — true means the client is cleared to send Data.
     /// Defaults to true (non-mTLS deployments are unaffected). When the
@@ -227,6 +230,7 @@ impl Session {
             client_id: None,
             pre_ratchet_tags: HashMap::new(),
             pre_ratchet_expire: None,
+            pre_ratchet_bitmap: u256::default(),
             mtls_ok: true,
             is_site_peer: false,
             is_pool_peer: false,
@@ -312,8 +316,11 @@ impl Session {
             if Instant::now() < expire {
                 for (counter, expected) in &self.pre_ratchet_tags {
                     if bool::from(expected.ct_eq(tag)) {
-                        if is_replay(*counter) {
-                            return None;
+                        // C-S-2: use the dedicated pre-ratchet bitmap to detect
+                        // replay of old-key packets during the grace window.
+                        let bit = (*counter).min(255) as usize;
+                        if self.pre_ratchet_bitmap.get_bit(bit) {
+                            return None; // Already received — replay
                         }
                         return Some((*counter, false));
                     }
@@ -361,6 +368,18 @@ impl Session {
         if bit_index < 256 {
             self.received_bitmap.set_bit(bit_index);
         }
+    }
+
+    /// Returns true if the given counter belongs to the pre-ratchet tag set
+    /// (i.e. the tag matched old keys during the grace window).
+    pub fn is_pre_ratchet_counter(&self, counter: u64) -> bool {
+        self.pre_ratchet_tags.contains_key(&counter)
+    }
+
+    /// Mark a pre-ratchet counter as received so it cannot be replayed (C-S-2).
+    pub fn mark_pre_ratchet_received(&mut self, counter: u64) {
+        let bit = counter.min(255) as usize;
+        self.pre_ratchet_bitmap.set_bit(bit);
     }
 
     /// Get next sequence number for inner header
@@ -416,6 +435,7 @@ impl Session {
             // already in-flight with the pre-ratchet keys are not dropped.
             self.pre_ratchet_tags = std::mem::take(&mut self.expected_tags);
             self.pre_ratchet_expire = Some(Instant::now() + Duration::from_secs(2));
+            self.pre_ratchet_bitmap.clear();
 
             self.keys = ratcheted_keys;
             self.counter = 0;

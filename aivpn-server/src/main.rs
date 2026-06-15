@@ -360,8 +360,8 @@ async fn main() {
             .as_ref()
             .and_then(|c| c.pool.as_ref())
             .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
+        audit_log: audit_logger, // H-S-8: wire audit logger into gateway
     };
-    let _ = audit_logger; // used by management subcommands; suppress unused warning
 
     // Spawn management API (Unix socket, optional)
     #[cfg(all(feature = "management-api", unix))]

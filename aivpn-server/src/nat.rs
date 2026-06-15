@@ -382,6 +382,9 @@ impl NatForwarder {
 
     /// Create TUN device and install firewall rules.
     pub fn create(&mut self) -> Result<()> {
+        // H-S-3: reject tun_name that could inject into nftables/iptables format strings.
+        Self::validate_tun_name(&self.tun_name)?;
+
         let mut config = tun::Configuration::default();
 
         config
@@ -448,6 +451,28 @@ impl NatForwarder {
         })?;
         info!("Enabled IPv4 forwarding");
         Ok(())
+    }
+
+    /// Validate that tun_name is safe to interpolate into nftables/iptables
+    /// format strings (H-S-3). Accepts names matching ^[a-z][a-z0-9_-]{0,14}$.
+    fn validate_tun_name(name: &str) -> Result<()> {
+        let ok = !name.is_empty()
+            && name.len() <= 15
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "tun_name '{}' is invalid: must match ^[a-z][a-z0-9_-]{{0,14}}$",
+                    name
+                ),
+            )))
+        }
     }
 
     /// Install nftables rules inside a dedicated `aivpn` table.
