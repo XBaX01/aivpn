@@ -7,12 +7,14 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
     let serverAddress: String?
     let vpnIP: String?
     let canRecord: Bool?
+    var mtlsCert: String?
 
-    init(id: String = UUID().uuidString, name: String, keyValue: String) {
+    init(id: String = UUID().uuidString, name: String, keyValue: String, mtlsCert: String? = nil) {
         self.id = id
         self.name = name
         self.keyValue = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
+        self.mtlsCert = mtlsCert
 
         var server: String? = nil
         var ip: String? = nil
@@ -85,24 +87,24 @@ class KeychainStorage: ObservableObject {
         }
     }
 
-    func addKey(name: String, keyValue: String) -> ConnectionKey? {
+    func addKey(name: String, keyValue: String, mtlsCert: String? = nil) -> ConnectionKey? {
         let norm = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
         if keys.contains(where: { $0.keyValue == norm }) { return nil }
-        let k = ConnectionKey(name: name, keyValue: keyValue)
+        let k = ConnectionKey(name: name, keyValue: keyValue, mtlsCert: mtlsCert)
         keys.append(k)
         saveKeys()
         if keys.count == 1 { selectKey(id: k.id) }
         return k
     }
 
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
+    func updateKey(id: String, name: String, keyValue: String, mtlsCert: String? = nil) -> Bool {
         guard let idx = keys.firstIndex(where: { $0.id == id }) else { return false }
         let norm = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
         if norm != keys[idx].keyValue,
            keys.contains(where: { $0.id != id && $0.keyValue == norm }) { return false }
-        keys[idx] = ConnectionKey(id: id, name: name, keyValue: keyValue)
+        keys[idx] = ConnectionKey(id: id, name: name, keyValue: keyValue, mtlsCert: mtlsCert)
         saveKeys()
         return true
     }

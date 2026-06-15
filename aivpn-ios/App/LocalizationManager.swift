@@ -69,6 +69,8 @@ class LocalizationManager: ObservableObject {
         "bench_running":       ["en": "Running benchmark…",     "ru": "Тест запущен…"],
         "bench_idle":          ["en": "Tap to measure latency and connection quality.",
                                 "ru": "Нажмите для измерения задержки и качества соединения."],
+        "mtls_cert_hint":      ["en": "mTLS cert (base64, leave empty to disable)",
+                                "ru": "mTLS сертификат (base64, оставьте пустым для отключения)"],
     ]
 
     init() {

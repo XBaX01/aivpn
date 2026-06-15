@@ -72,20 +72,22 @@ private struct KeyRowView: View {
 
 private struct KeyEditSheet: View {
     let existingKey: ConnectionKey?
-    let onSave: (String, String) -> Bool
+    let onSave: (String, String, String?) -> Bool
     let onCancel: () -> Void
 
     @State private var name: String
     @State private var value: String
+    @State private var mtlsCert: String
     @State private var error: String?
     @EnvironmentObject private var loc: LocalizationManager
 
-    init(existingKey: ConnectionKey?, onSave: @escaping (String, String) -> Bool, onCancel: @escaping () -> Void) {
+    init(existingKey: ConnectionKey?, onSave: @escaping (String, String, String?) -> Bool, onCancel: @escaping () -> Void) {
         self.existingKey = existingKey
         self.onSave = onSave
         self.onCancel = onCancel
-        _name  = State(initialValue: existingKey?.name ?? "")
-        _value = State(initialValue: existingKey.map { "aivpn://\($0.keyValue)" } ?? "")
+        _name     = State(initialValue: existingKey?.name ?? "")
+        _value    = State(initialValue: existingKey.map { "aivpn://\($0.keyValue)" } ?? "")
+        _mtlsCert = State(initialValue: existingKey?.mtlsCert ?? "")
     }
 
     var body: some View {
@@ -99,6 +101,13 @@ private struct KeyEditSheet: View {
                         .autocapitalization(.none)
                         .lineLimit(3...6)
                 }
+                Section(header: Text("mTLS")) {
+                    TextField(loc.t("mtls_cert_hint"), text: $mtlsCert, axis: .vertical)
+                        .autocorrectionDisabled()
+                        .autocapitalization(.none)
+                        .lineLimit(1...4)
+                        .font(.system(size: 12, design: .monospaced))
+                }
                 if let e = error {
                     Section { Text(e).foregroundColor(.red).font(.caption) }
                 }
@@ -111,8 +120,10 @@ private struct KeyEditSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(loc.t("save_key")) {
+                        let cert = mtlsCert.trimmingCharacters(in: .whitespacesAndNewlines)
                         let ok = onSave(name.trimmingCharacters(in: .whitespaces),
-                                        value.trimmingCharacters(in: .whitespaces))
+                                        value.trimmingCharacters(in: .whitespaces),
+                                        cert.isEmpty ? nil : cert)
                         if !ok { error = loc.t("duplicate_key") }
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty ||
@@ -291,8 +302,8 @@ struct ContentView: View {
         .navigationViewStyle(.stack)
         .sheet(isPresented: $showAddKey) {
             KeyEditSheet(existingKey: nil,
-                onSave: { name, val in
-                    let ok = vpn.addKey(name: name, keyValue: val)
+                onSave: { name, val, cert in
+                    let ok = vpn.addKey(name: name, keyValue: val, mtlsCert: cert)
                     if ok { showAddKey = false }
                     return ok
                 },
@@ -302,8 +313,8 @@ struct ContentView: View {
         }
         .sheet(item: $editingKey) { key in
             KeyEditSheet(existingKey: key,
-                onSave: { name, val in
-                    let ok = vpn.updateKey(id: key.id, name: name, keyValue: val)
+                onSave: { name, val, cert in
+                    let ok = vpn.updateKey(id: key.id, name: name, keyValue: val, mtlsCert: cert)
                     if ok { editingKey = nil }
                     return ok
                 },

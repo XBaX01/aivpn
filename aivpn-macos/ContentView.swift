@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
     @State private var keyToDelete: ConnectionKey?
+    @State private var mtlsCertPath: String = ""
     @State private var recordingServiceName: String = ""
     private let recordingDarkGreen = Color(red: 0.0, green: 0.35, blue: 0.16)
 
@@ -158,8 +159,9 @@ struct ContentView: View {
                                     onEdit: {
                                         editingKeyId = key.id
                                         editingKeyName = key.name
-                                        keyName = key.name  // Заполнить поле имени текущим именем
-                                        connectionKey = key.keyValue  // Показать текущий ключ
+                                        keyName = key.name
+                                        connectionKey = key.keyValue
+                                        mtlsCertPath = key.mtlsCertPath ?? ""
                                         withAnimation {
                                             showKeyInput = true
                                         }
@@ -253,12 +255,18 @@ struct ContentView: View {
                         Spacer()
                     }
 
+                    TextField(loc.t("mtls_cert_path"), text: $mtlsCertPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .help(loc.t("mtls_cert_path_help"))
+
                     HStack(spacing: 8) {
                         Button(loc.t("cancel")) {
                             withAnimation {
                                 showKeyInput = false
                                 keyName = ""
                                 connectionKey = ""
+                                mtlsCertPath = ""
                                 editingKeyId = nil
                             }
                         }
@@ -267,25 +275,28 @@ struct ContentView: View {
                         Button(loc.t("save_key")) {
                             let name = keyName.isEmpty ? "Key \(vpn.keys.count + 1)" : keyName
                             
+                            let cert = mtlsCertPath.trimmingCharacters(in: .whitespaces)
                             if let editId = editingKeyId {
-                                // Editing existing key - update both name and key value
-                                if vpn.updateKey(id: editId, name: name, keyValue: connectionKey) {
+                                if vpn.updateKey(id: editId, name: name, keyValue: connectionKey,
+                                                 mtlsCertPath: cert.isEmpty ? nil : cert) {
                                     withAnimation {
                                         showKeyInput = false
                                         keyName = ""
                                         connectionKey = ""
+                                        mtlsCertPath = ""
                                         editingKeyId = nil
                                     }
                                 } else {
                                     vpn.lastError = loc.t("duplicate_key")
                                 }
                             } else {
-                                // Adding new key
-                                if vpn.addKey(name: name, keyValue: connectionKey) {
+                                if vpn.addKey(name: name, keyValue: connectionKey,
+                                              mtlsCertPath: cert.isEmpty ? nil : cert) {
                                     withAnimation {
                                         showKeyInput = false
                                         keyName = ""
                                         connectionKey = ""
+                                        mtlsCertPath = ""
                                     }
                                 } else {
                                     vpn.lastError = loc.t("duplicate_key")
@@ -473,7 +484,8 @@ struct ContentView: View {
                         if proxyMode, let port = Int(proxyPort), port > 1024 {
                             vpn.connectProxy(key: selectedKey.keyValue, proxyPort: port)
                         } else {
-                            vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel)
+                            vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel,
+                                        mtlsCertPath: selectedKey.mtlsCertPath)
                         }
                     }
                 }

@@ -227,6 +227,14 @@ class LocalizationManager: ObservableObject {
             "en": "Run a benchmark to check connection quality.",
             "ru": "Запустите тест для оценки качества соединения."
         ],
+        "mtls_cert_path": [
+            "en": "mTLS cert path (optional)",
+            "ru": "Путь к mTLS-сертификату (необязательно)"
+        ],
+        "mtls_cert_path_help": [
+            "en": "Path to client certificate file for mutual TLS authentication. Leave empty to disable.",
+            "ru": "Путь к файлу клиентского сертификата для взаимной TLS-аутентификации. Оставьте пустым для отключения."
+        ],
     ]
 
     init() {

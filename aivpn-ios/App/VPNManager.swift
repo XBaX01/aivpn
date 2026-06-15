@@ -153,10 +153,14 @@ class VPNManager: ObservableObject {
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = bundleId
         proto.serverAddress = key.serverAddress ?? "aivpn"
-        proto.providerConfiguration = [
+        var providerConfig: [String: Any] = [
             "key": key.fullKey,
             "fullTunnel": fullTunnel,
         ]
+        if let cert = key.mtlsCert, !cert.isEmpty {
+            providerConfig["mtlsCert"] = cert
+        }
+        proto.providerConfiguration = providerConfig
         manager.protocolConfiguration = proto
         manager.localizedDescription = "AIVPN"
         manager.isEnabled = true
@@ -188,8 +192,8 @@ class VPNManager: ObservableObject {
 
     // MARK: - Key management (delegates to KeychainStorage)
 
-    func addKey(name: String, keyValue: String) -> Bool {
-        guard let k = KeychainStorage.shared.addKey(name: name, keyValue: keyValue) else { return false }
+    func addKey(name: String, keyValue: String, mtlsCert: String? = nil) -> Bool {
+        guard let k = KeychainStorage.shared.addKey(name: name, keyValue: keyValue, mtlsCert: mtlsCert) else { return false }
         KeychainStorage.shared.selectKey(id: k.id)
         objectWillChange.send()
         return true
@@ -200,8 +204,8 @@ class VPNManager: ObservableObject {
         objectWillChange.send()
     }
 
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
-        let ok = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+    func updateKey(id: String, name: String, keyValue: String, mtlsCert: String? = nil) -> Bool {
+        let ok = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue, mtlsCert: mtlsCert)
         if ok { objectWillChange.send() }
         return ok
     }
