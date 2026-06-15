@@ -830,6 +830,7 @@ impl Gateway {
             let ka_cleanup = self.kernel_accel.clone();
             let rate_limits_cleanup = self.rate_limits.clone();
             let handshake_cooldowns_cleanup = self.handshake_cooldowns.clone();
+            let handshake_locks_cleanup = self.handshake_locks.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -859,10 +860,15 @@ impl Gateway {
                         }
                     }
 
-                    // Prune stale per-IP rate-limit and handshake-cooldown entries.
+                    // Prune stale per-IP rate-limit, handshake-cooldown, and
+                    // handshake-lock entries.  handshake_locks is never pruned
+                    // elsewhere so it grows without bound under sustained churn.
+                    // Entries whose Arc strong_count == 1 have no active waiters
+                    // and are safe to remove.
                     rate_limits_cleanup.retain(|_, v| v.1.elapsed() < Duration::from_secs(30));
                     handshake_cooldowns_cleanup
                         .retain(|_, v| v.1.elapsed() < Duration::from_secs(60));
+                    handshake_locks_cleanup.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
 
                     let removed = sessions.cleanup_expired();
                     for session_id in &removed {
@@ -2370,7 +2376,16 @@ impl Gateway {
                 // Client-side only, ignore on server
             }
             ControlPayload::PoolSync { clients_json } => {
-                if let Some(ref db) = self.client_db {
+                // Only accept PoolSync from sessions registered as pool peers.
+                // A regular VPN client sending PoolSync would be able to inject
+                // or overwrite arbitrary client records in the database.
+                let is_pool = session.lock().is_pool_peer;
+                if !is_pool {
+                    warn!(
+                        "pool_sync: rejected from non-pool session {}",
+                        hash_addr(&client_addr)
+                    );
+                } else if let Some(ref db) = self.client_db {
                     let json_str = String::from_utf8_lossy(&clients_json);
                     match db.merge_from_json(&json_str) {
                         Ok(n) => info!(

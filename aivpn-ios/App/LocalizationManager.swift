@@ -53,8 +53,8 @@ class LocalizationManager: ObservableObject {
         "upload":              ["en": "Upload",   "ru": "Исходящий"],
         "download":            ["en": "Download", "ru": "Входящий"],
         "duration":            ["en": "Duration", "ru": "Длительность"],
-        "version_footer":      ["en": "v0.8.0 · Neural Resonance VPN",
-                                "ru": "v0.8.0 · Neural Resonance VPN"],
+        "version_footer":      ["en": "v0.8.1 · Neural Resonance VPN",
+                                "ru": "v0.8.1 · Neural Resonance VPN"],
         "error_invalid_key":   ["en": "Invalid connection key format",
                                 "ru": "Неверный формат ключа подключения"],
         "no_profiles":         ["en": "No saved keys. Tap + to add one.",
@@ -74,9 +74,13 @@ class LocalizationManager: ObservableObject {
     ]
 
     init() {
-        language = UserDefaults.standard.string(forKey: "app_language")
-            ?? Locale.current.language.languageCode?.identifier
-            ?? "en"
+        let systemLang: String?
+        if #available(iOS 16, *) {
+            systemLang = Locale.current.language.languageCode?.identifier
+        } else {
+            systemLang = Locale.current.languageCode
+        }
+        language = UserDefaults.standard.string(forKey: "app_language") ?? systemLang ?? "en"
         if language != "en" && language != "ru" { language = "en" }
     }
 

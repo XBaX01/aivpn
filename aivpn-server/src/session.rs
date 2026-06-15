@@ -130,6 +130,12 @@ pub struct Session {
     /// (registered by `site_sync::start()`).  Only sessions with this flag set
     /// are allowed to carry `ControlPayload::RouteSync` messages.
     pub is_site_peer: bool,
+
+    /// True when this session was registered as a pool-sync peer via
+    /// `create_pool_peer_session()`.  Only pool peer sessions are allowed to
+    /// carry `ControlPayload::PoolSync` messages — any other session sending
+    /// PoolSync is an attempt to inject or overwrite client records.
+    pub is_pool_peer: bool,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -223,6 +229,7 @@ impl Session {
             pre_ratchet_expire: None,
             mtls_ok: true,
             is_site_peer: false,
+            is_pool_peer: false,
         }
     }
 
@@ -784,6 +791,7 @@ impl SessionManager {
             let mut s = Session::new(session_id, peer_addr, keys, [0u8; X25519_PUBLIC_KEY_SIZE]);
             s.state = SessionState::Active;
             s.counter = counter;
+            s.is_pool_peer = true;
             s.update_tag_window();
             Arc::new(Mutex::new(s))
         };

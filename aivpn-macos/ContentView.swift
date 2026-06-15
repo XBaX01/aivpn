@@ -527,7 +527,7 @@ struct ContentView: View {
 
             // Footer
             HStack {
-                Text("AIVPN v0.8.0")
+                Text("AIVPN v0.8.1")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
