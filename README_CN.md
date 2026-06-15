@@ -341,6 +341,44 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
 
 端口会自动嵌入连接密钥中——客户端无需手动配置。环境变量 `AIVPN_LISTEN` 或 `--listen` 命令行参数可覆盖 `server.json` 中的设置。
 
+#### server.json 完整参数参考
+
+```json
+{
+  "listen_addr": "0.0.0.0:443",
+  "tun_name": "aivpn0",
+  "tun_mtu": "auto",
+  "mask_dir": "/var/lib/aivpn/masks",
+  "bootstrap_mask_files": ["/etc/aivpn/masks/custom.json"],
+  "session_timeout_secs": 0,
+  "idle_timeout_secs": 300,
+  "network_config": {
+    "server_vpn_ip": "10.0.0.1",
+    "prefix_len": 24,
+    "mtu": 1346,
+    "keepalive_secs": 8,
+    "ipv6_enabled": false,
+    "ipv6_prefix": "fd10:cafe::/48"
+  }
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `listen_addr` | `0.0.0.0:443` | UDP 监听地址和端口 |
+| `tun_name` | 随机 | TUN 设备名称（`aivpn0`、`tun0` 等） |
+| `tun_mtu` | _(未设置)_ | `"auto"` 自动检测物理接口 MTU（减去 64 字节协议开销，失败时回退到 1346）；或固定整数，如 `1400` |
+| `mask_dir` | `/var/lib/aivpn/masks` | 扫描 `.json` 掩码配置文件的目录 |
+| `bootstrap_mask_files` | `[]` | 启动时预加载的额外掩码文件（降低首次连接延迟） |
+| `session_timeout_secs` | `0` | 会话硬性时间上限（秒）；`0` 表示无限制 |
+| `idle_timeout_secs` | `300` | 客户端静默超过 N 秒后断开连接 |
+| `network_config.server_vpn_ip` | `10.0.0.1` | 服务器 TUN 接口 IP |
+| `network_config.prefix_len` | `24` | VPN 子网前缀长度 |
+| `network_config.mtu` | `1346` | 通过 `ServerHello` 发送给客户端的内层隧道 MTU |
+| `network_config.keepalive_secs` | `8` | 与客户端协商的 keepalive 间隔（秒） |
+| `network_config.ipv6_enabled` | `false` | 启用 IPv6 NAT66——为每个客户端分配来自 `ipv6_prefix` 的 IPv6 地址 |
+| `network_config.ipv6_prefix` | `fd10:cafe::/48` | NAT66 客户端地址的 ULA /48 前缀 |
+
 ### 3.1 客户端管理
 
 AIVPN使用类似于WireGuard/XRay的客户端注册模型：每个客户端获得唯一的PSK、静态VPN IP和流量统计。
@@ -683,11 +721,30 @@ aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
 ### 基准测试与诊断
 
 ```bash
+# 默认：10 秒测试
 aivpn-client bench -k "aivpn://..."
 # P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+
+# 自定义测试时长
+aivpn-client bench -k "aivpn://..." --duration 30
+
+# 输出 JSON 格式
+aivpn-client bench -k "aivpn://..." --json
 ```
 
 可从命令行及所有 GUI 客户端（Windows、macOS、iOS、Android）的诊断面板使用。
+
+查看掩码录制进度：
+
+```bash
+aivpn-client record status -k "aivpn://..."
+```
+
+清除异常退出后残留的 kill-switch 防火墙规则：
+
+```bash
+aivpn-client kill-switch clear
+```
 
 ### 自适应模式
 
@@ -720,6 +777,42 @@ aivpn-client -k "aivpn://..." --adaptive
 ### mTLS 客户端证书
 
 可选 ed25519 签名证书（104 字节）叠加于 X25519+PSK 之上。`required: false`（默认）向后兼容；`required: true` 强制验证。
+
+**1. 在服务器上生成 CA 密钥对：**
+
+```bash
+aivpn-server --gen-ca --key-file /etc/aivpn/server.key
+# 输出：CA 公钥和私钥（十六进制）
+```
+
+**2. 签发客户端证书：**
+
+```bash
+aivpn-server --issue-cert "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --ca-key <CA_PRIVATE_KEY_HEX> \
+    --days 365
+# 输出 104 字节证书（base64），发给客户端
+```
+
+**3. 配置服务器**（`server.json`）：
+
+```json
+{
+  "mtls": {
+    "ca_public_key_hex": "<CA_PUBLIC_KEY_HEX>",
+    "required": false
+  }
+}
+```
+
+**4. 携带证书连接（CLI 客户端）：**
+
+```bash
+aivpn-client -k "aivpn://..." --mtls-cert /path/to/client.cert
+```
+
+GUI 客户端（Windows、macOS、iOS、Android）在连接配置中均提供专用 mTLS 证书输入字段。
 
 ### eBPF XDP 丢包遥测
 
