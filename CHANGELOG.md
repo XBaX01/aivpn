@@ -1,5 +1,113 @@
 # Changelog
 
+## [0.8.1] - 2026-06-16
+
+### Added
+
+- **Subnet split-tunnel on all GUI clients** — users can now specify per-CIDR route exclusions that bypass the VPN tunnel; exclusions are persisted and forwarded to the underlying `aivpn-client` subprocess as `--exclude-route` args (iOS: `SplitTunnelView` + `NEIPv4Settings.excludedRoutes`; macOS: `ContentView` CIDR field + `VPNManager` subprocess passthrough; Windows: egui multiline input + `vpn_manager.rs` subprocess passthrough; Android: DNS-resolved per-domain exclusions via `Builder.excludeRoute(IpPrefix)` on API 33+, graceful skip + warning on older devices)
+- **Domain-based split-tunnel on Android** — `AivpnService.applyDomainExclusions()` resolves saved excluded domains at connect time via `InetAddress.getAllByName()` and adds per-IP exclusion routes; includes API level check with user-visible warning on API < 33
+- **`--exclude-route` flag in `aivpn-client`** — new `Append` CLI argument for repeatable CIDR subnet exclusions passed through from all GUI clients
+- **Kill-switch toggle in Windows GUI** — checkbox wired to `--kill-switch` subprocess argument in `vpn_manager.rs`
+- **UAC elevation manifest** — Windows build now embeds `requireAdministrator` execution level in the application manifest via `build.rs`, eliminating silent access-denied failures on first run
+- **Adaptive mode forwarded to iOS tunnel extension** — `adaptiveMode` flag is now included in `providerConfiguration` by `VPNManager.connect()` and read inside `PacketTunnelProvider`
+- **Recording IPC response in iOS tunnel extension** — `handleAppMessage` now returns `{"canRecord": false}` for `record_start` / `record_stop` / `record_status` requests, preventing the UI from stalling in `.starting` state
+- **Audit log wired into gateway** — `AuditLogger` is now passed into `GatewayServer` and records events for: ClientCert accepted/rejected, RecordingStart, RecordingStop, PoolSync rejected
+
+### Security
+
+- **ServerHello signature verification** (`C-CL-1`, CRITICAL) — `aivpn-client` now verifies the ed25519 signature in `ServerHello` against `server_signing_key` before completing the PFS ratchet; a bad signature disconnects immediately, preventing MitM key substitution
+- **MaskUpdate signature verification** (`C-CL-2`, CRITICAL) — mask profiles received via `ControlPayload::MaskUpdate` are now verified against the server's signing key before being applied; unsigned or tampered masks are silently ignored
+- **BootstrapDescriptorUpdate signature enforcement** (`C-CL-3`, CRITICAL) — `store_verified_descriptor()` is now called with the server's static key as `trusted_key` instead of `None`; descriptors without a valid signature are rejected
+- **Bootstrap SSRF guard** (`C-CL-4`) — `bootstrap_loader.rs` validates all URLs fetched from the `bu` field before making HTTP requests; non-HTTPS schemes and private/loopback hosts (127.x, 10.x, 192.168.x, 172.16–31.x, 169.254.x, ::1) are rejected with an error log
+- **iOS connection keys moved to Keychain** (`C-I-1`, CRITICAL) — `KeychainStorage` now uses `Security.framework` (`SecItemAdd` / `SecItemCopyMatching` / `SecItemUpdate` / `SecItemDelete`) with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; no connection keys or mTLS certs are written to `UserDefaults`
+- **macOS helper `binaryPath` restricted to allowlist** (`C-M-1`, CRITICAL) — `aivpn-helper` now rejects any `binaryPath` not in a hardcoded set of canonical paths before calling `posix_spawn`; eliminates local privilege escalation via socket message injection
+- **macOS PSK plaintext write removed** (`C-M-2`, CRITICAL) — `VPNManager.saveKey()` no longer writes the connection key to `UserDefaults`; key storage is Keychain-only
+- **ChainForward source IP validated** (`C-S-4`) — `gateway.rs` now parses the IPv4 source address from the inner payload and confirms it matches the forwarding session's assigned VPN IP before writing to the TUN channel; IPv6 inner payloads are blocked unconditionally; mismatches are logged and dropped
+- **Pre-ratchet anti-replay bitmap** (`C-S-2`) — `Session` gains a `pre_ratchet_bitmap` field that marks consumed pre-ratchet tag counters, preventing replay of packets captured before a key rotation; bitmap is cleared on `complete_ratchet()`
+- **PoolSync guard against non-pool sessions** (`C-S-1`) — `is_pool_peer` flag validated before accepting any `PoolSync` message, preventing arbitrary clients from injecting client-DB records
+
+### Fixed
+
+- **`tun_name` shell injection** (`H-S-3`) — `nat.rs` validates the TUN interface name against `^[a-z][a-z0-9_-]{0,14}$` before it is used in any nftables / iptables command; invalid names are rejected with an error before any firewall rule is applied
+- **PoolSync VPN IP collision** (`H-S-2`) — `client_db.merge_from_json()` now checks for duplicate VPN IPs before inserting a synced client record; conflicts are logged and the incoming record is skipped
+- **`passive_distribution` panics removed** (`H-S-6`) — `encode_for_image()` and `encode_for_blockchain()` no longer call `unimplemented!()`; they emit a `warn!` and return `Err`, allowing the server to continue running
+- **ClientCert sent after PFS ratchet** (`H-CL-1`) — `aivpn-client` now queues `ClientCert` inside the `ServerHello` handler after `complete_ratchet()`, ensuring the cert is encrypted with ratcheted session keys
+- **MessagePack size limit for bootstrap descriptors** (`H-CL-6`) — `BootstrapDescriptorUpdate` handler rejects payloads larger than 512 KiB before `rmp_serde::from_slice`, preventing OOM from oversized control messages
+- **iOS 104-byte mTLS cert check removed** — `PacketTunnelProvider` no longer rejects certs that are not exactly 104 bytes; any non-empty base64-decoded value is accepted
+- **iOS `LocalizationManager` crash on iOS 15** — `Locale.current.language.languageCode` gated behind `#available(iOS 16, *)`; falls back to `Locale.current.languageCode`
+- **Android `onRevoke()` infinite reconnect** — `AivpnService.onRevoke()` now sets `manualDisconnect = true` before `super.onRevoke()`, preventing the reconnect loop triggered by OS-initiated VPN revocation
+- **Android `@Volatile` callback race** — `statusCallback`, `trafficCallback`, and `tileCallback` invocations now capture the reference in a local `val` before the null-check and invoke
+- **Android callbacks leaked in `onDestroy`** — `AivpnService.onDestroy()` now nullifies all three callbacks before `super.onDestroy()`
+- **Android bench `DatagramSocket` not protected** — the UDP RTT probe socket in `MainActivity` now calls `VpnService.protect()` before sending, preventing a routing loop when VPN is active
+- **iOS `syncStatus()` called off main thread** — `VPNManager` wraps `syncStatus()` in `DispatchQueue.main.async` inside the `loadAllFromPreferences` completion handler
+- **`current_timestamp_ms()` panic** — `.unwrap()` replaced with `.unwrap_or_default()` in `aivpn-common/src/crypto.rs`
+- **`handshake_locks` unbounded growth** — periodic gateway cleanup now prunes entries with `Arc::strong_count == 1`
+- **MikroTik container non-functional as gateway** — `entrypoint.sh` rewritten: enables `net.ipv4.ip_forward`, installs idempotent MASQUERADE + FORWARD rules, quotes `AIVPN_KEY`, defaults `AIVPN_FULL_TUNNEL=false`, adds 5-second restart loop; `README.md` / `README_RU.md` / `README_CN.md` updated with `cap=net-admin` in all `/container/add` examples
+- **Windows GUI abrupt exit** — `main.rs` no longer calls `std::process::exit(0)`; the tray thread is signalled and joined before the process exits naturally
+- **macOS helper `mtlsCertPath` path traversal** — helper now applies an allowlist prefix and extension check before accepting a cert path argument
+
+### Changed
+
+- Version bumped 0.8.0 → 0.8.1 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist` (CFBundleVersion 5 → 6), iOS `App/Info.plist` and `Tunnel/Info.plist` (CFBundleVersion 3 → 4), macOS/iOS version strings, Android `version_footer`
+- macOS helper now warns when mTLS cert path is configured but proxy mode is active
+- Android `SplitTunnelActivity` shows API-level note explaining domain exclusions require Android 10+
+
+---
+
+## [0.8.1] — 2026-06-16
+
+### Добавлено
+
+- **Раздельное туннелирование по подсетям во всех GUI-клиентах** — пользователи могут указывать исключения маршрутов по CIDR, которые обходят VPN-туннель; исключения сохраняются и передаются в subprocess `aivpn-client` через аргументы `--exclude-route` (iOS: `SplitTunnelView` + `NEIPv4Settings.excludedRoutes`; macOS: поле CIDR в `ContentView` + передача через `VPNManager`; Windows: multiline-ввод в egui + `vpn_manager.rs`; Android: DNS-разрешённые исключения через `Builder.excludeRoute(IpPrefix)` на API 33+, graceful fallback с предупреждением на старых версиях)
+- **Доменное split-tunnel на Android** — `AivpnService.applyDomainExclusions()` разрешает сохранённые исключённые домены через `InetAddress.getAllByName()` при подключении и добавляет маршруты-исключения для каждого IP; включает проверку версии API с видимым предупреждением при API < 33
+- **Флаг `--exclude-route` в `aivpn-client`** — новый аргумент типа `Append` для многократного указания CIDR-подсетей, передаваемых из GUI-клиентов
+- **Kill-switch в Windows GUI** — чекбокс подключён к аргументу `--kill-switch` в `vpn_manager.rs`
+- **Манифест UAC-повышения привилегий** — сборка Windows теперь встраивает уровень выполнения `requireAdministrator` в манифест приложения через `build.rs`
+- **Адаптивный режим передаётся в iOS tunnel extension** — флаг `adaptiveMode` теперь включается в `providerConfiguration` в `VPNManager.connect()` и читается в `PacketTunnelProvider`
+- **Recording IPC ответ в iOS tunnel extension** — `handleAppMessage` возвращает `{"canRecord": false}` на запросы `record_start` / `record_stop` / `record_status`, предотвращая зависание UI
+- **Аудит-лог подключён к шлюзу** — `AuditLogger` передаётся в `GatewayServer` и фиксирует события: принятие/отклонение ClientCert, RecordingStart, RecordingStop, отклонённый PoolSync
+
+### Безопасность
+
+- **Верификация подписи ServerHello** (`C-CL-1`, КРИТИЧНО) — `aivpn-client` проверяет ed25519-подпись в `ServerHello` по `server_signing_key` перед завершением PFS-рэтчета; неверная подпись разрывает соединение
+- **Верификация подписи MaskUpdate** (`C-CL-2`, КРИТИЧНО) — профили масок из `ControlPayload::MaskUpdate` проверяются по ключу подписи сервера; неподписанные маски игнорируются
+- **Верификация подписи BootstrapDescriptorUpdate** (`C-CL-3`, КРИТИЧНО) — `store_verified_descriptor()` вызывается со статическим ключом сервера как `trusted_key`; дескрипторы без корректной подписи отклоняются
+- **SSRF-защита в bootstrap_loader** (`C-CL-4`) — проверка всех URL из поля `bu`: только HTTPS, блокировка приватных и loopback-адресов
+- **Ключи подключения iOS перемещены в Keychain** (`C-I-1`, КРИТИЧНО) — `KeychainStorage` использует `Security.framework` с `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; ничего не пишется в `UserDefaults`
+- **Ограничение `binaryPath` в macOS helper** (`C-M-1`, КРИТИЧНО) — `aivpn-helper` принимает только пути из жёстко заданного allowlist перед `posix_spawn`; устраняет локальное повышение привилегий
+- **Удалена запись PSK в открытом виде в macOS** (`C-M-2`, КРИТИЧНО) — `VPNManager.saveKey()` больше не пишет ключ в `UserDefaults`
+- **Валидация src IP в ChainForward** (`C-S-4`) — `gateway.rs` проверяет IPv4-адрес источника внутренней нагрузки против VPN IP сессии; несоответствия и IPv6 отбрасываются
+- **Bitmap анти-replay для pre-ratchet тегов** (`C-S-2`) — поле `pre_ratchet_bitmap` в `Session` отмечает использованные счётчики тегов; сбрасывается при `complete_ratchet()`
+- **Защита PoolSync от не-pool сессий** (`C-S-1`) — флаг `is_pool_peer` проверяется перед принятием любого `PoolSync`
+
+### Исправлено
+
+- **Инъекция через `tun_name`** (`H-S-3`) — валидация по шаблону `^[a-z][a-z0-9_-]{0,14}$` в `nat.rs`
+- **Коллизия VPN IP при PoolSync** (`H-S-2`) — `merge_from_json()` проверяет дублирование IP; конфликты пропускаются с предупреждением
+- **Паники в `passive_distribution`** (`H-S-6`) — `unimplemented!()` заменены на `Err` + `warn!`
+- **ClientCert отправляется после PFS рэтчета** (`H-CL-1`) — сертификат ставится в очередь внутри обработчика `ServerHello` после `complete_ratchet()`
+- **Лимит размера MessagePack** (`H-CL-6`) — `BootstrapDescriptorUpdate` отклоняет нагрузки > 512 КиБ
+- **Проверка 104 байт mTLS в iOS убрана** — принимается любое непустое base64-значение
+- **Краш `LocalizationManager` на iOS 15** — `#available(iOS 16, *)` guard для `Locale.current.language.languageCode`
+- **Бесконечный reconnect при `onRevoke()` на Android** — `manualDisconnect = true` + `super.onRevoke()`
+- **Гонка `@Volatile` callback на Android** — захват ссылки в локальный `val` перед null-проверкой
+- **Утечка callbacks в `onDestroy` на Android** — обнуление всех callback перед `super.onDestroy()`
+- **Незащищённый `DatagramSocket` бенчмарка на Android** — вызов `VpnService.protect()` перед отправкой
+- **`syncStatus()` вне главного потока на iOS** — оборачивается в `DispatchQueue.main.async`
+- **Паника `current_timestamp_ms()`** — `.unwrap()` → `.unwrap_or_default()` в `crypto.rs`
+- **Неограниченный рост `handshake_locks`** — периодическая очистка по `Arc::strong_count == 1`
+- **Нефункциональный контейнер MikroTik** — `entrypoint.sh` переписан; `cap=net-admin` добавлен в README (EN/RU/CN)
+- **Резкое завершение Windows GUI** — graceful shutdown с join tray thread вместо `process::exit(0)`
+- **Path traversal `mtlsCertPath` в macOS helper** — allowlist-проверка префикса и расширения
+
+### Изменено
+
+- Версия поднята с 0.8.0 до 0.8.1 во всём workspace: `Cargo.toml`, crate-файлы, macOS `Info.plist` (CFBundleVersion 5 → 6), iOS `Info.plist` (CFBundleVersion 3 → 4), строки версий, Android `version_footer`
+- macOS helper предупреждает при активном proxy-режиме и настроенном mTLS-сертификате
+- `SplitTunnelActivity` на Android отображает примечание об уровне API для доменных исключений
+
+---
+
 ## [0.8.0] - 2026-06-13
 
 ### Added
