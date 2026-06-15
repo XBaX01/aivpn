@@ -320,18 +320,6 @@ impl AivpnClient {
         info!("Connected to server at {}", self.config.server_addr);
         info!("TUN device: {}", self.tunnel.name());
 
-        if let Some(cert) = self.config.mtls_cert.clone() {
-            match self
-                .send_control(&ControlPayload::ClientCert {
-                    cert_bytes: cert.clone(),
-                })
-                .await
-            {
-                Ok(()) => debug!("mTLS: ClientCert sent ({} bytes)", cert.len()),
-                Err(e) => warn!("mTLS: failed to send ClientCert: {}", e),
-            }
-        }
-
         Ok(())
     }
 
@@ -403,6 +391,21 @@ impl AivpnClient {
         let (admin_tx, mut admin_rx) = mpsc::channel::<String>(16);
         let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
         self.control_tx = Some(control_tx.clone());
+
+        // Send mTLS client cert now that control_tx is ready (sending during
+        // connect() always failed silently because control_tx was None then).
+        if let Some(cert) = self.config.mtls_cert.clone() {
+            if let Err(e) = control_tx
+                .send(ControlPayload::ClientCert {
+                    cert_bytes: cert.clone(),
+                })
+                .await
+            {
+                warn!("mTLS: failed to queue ClientCert: {}", e);
+            } else {
+                debug!("mTLS: ClientCert queued for sending ({} bytes)", cert.len());
+            }
+        }
 
         // Spawn local IPC listener for CLI commands. Stored in AbortOnDrop so the task
         // (and its bound UDP socket) is cancelled when run() returns. Without this,

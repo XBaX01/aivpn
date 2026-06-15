@@ -44,6 +44,8 @@ class AivpnService : VpnService() {
         private const val LEGACY_PREFIX_LEN = 24
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
+        // Android reshuffles underlying network IDs for 5-10s after VPN comes up.
+        // 15s covers even slow devices without delaying genuine network-switch detection.
         private const val TAG = "AivpnService"
 
         @Volatile var statusCallback:  ((Boolean, String) -> Unit)? = null
@@ -90,7 +92,7 @@ class AivpnService : VpnService() {
     private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
     // Android reshuffles underlying network IDs when VPN comes up; ignore churn for this window.
     @Volatile private var postConnectUntilMs: Long = 0L
-    private val POST_CONNECT_COOLDOWN_MS = 5_000L
+    private val POST_CONNECT_COOLDOWN_MS = 15_000L
 
     // ──────────── Service lifecycle ────────────
 

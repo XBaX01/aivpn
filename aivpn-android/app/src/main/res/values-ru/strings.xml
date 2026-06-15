@@ -75,4 +75,8 @@
     <string name="split_tunnel_apps_unavailable">Список приложений недоступен — запрещено разрешение QUERY_ALL_PACKAGES</string>
     <string name="split_tunnel_domain_invalid">Неверный формат домена</string>
     <string name="split_tunnel_domain_exists">Домен уже добавлен</string>
+    <string name="options">Настройки</string>
+    <string name="mtls_cert">mTLS-сертификат</string>
+    <string name="mtls_cert_hint">Вставьте base64 сертификат (пусто — отключить)</string>
+    <string name="mtls_cert_invalid">Неверный mTLS-сертификат (декодированный размер должен быть 104 байта)</string>
 </resources>

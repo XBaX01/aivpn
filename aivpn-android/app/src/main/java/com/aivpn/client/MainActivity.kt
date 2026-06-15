@@ -7,13 +7,12 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -129,6 +128,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnSplitTunnel.setOnClickListener {
             startActivity(Intent(this, SplitTunnelActivity::class.java))
         }
+
+        binding.btnOptions.setOnClickListener { showOptionsMenu(it) }
 
         updateSplitTunnelHint()
 
@@ -264,9 +265,23 @@ class MainActivity : AppCompatActivity() {
             setSingleLine(true)
             textSize = 13f
         }
+        val certInput = EditText(dialogCtx).apply {
+            hint = getString(R.string.mtls_cert_hint)
+            setText(existing?.mtlsCertBase64 ?: "")
+            setSingleLine(true)
+            textSize = 12f
+        }
+        val certLabel = TextView(dialogCtx).apply {
+            text = getString(R.string.mtls_cert)
+            textSize = 12f
+            setTextColor(getColor(R.color.text_secondary))
+            setPadding(0, 8.dp, 0, 2.dp)
+        }
 
         layout.addView(nameInput)
         layout.addView(keyInput)
+        layout.addView(certLabel)
+        layout.addView(certInput)
 
         val title = if (existing != null)
             getString(R.string.dialog_edit_profile)
@@ -293,16 +308,29 @@ class MainActivity : AppCompatActivity() {
                     return@setPositiveButton
                 }
 
+                val certRaw = certInput.text.toString().trim()
+                val mtlsCert: String? = if (certRaw.isEmpty()) null else {
+                    val decoded = try {
+                        android.util.Base64.decode(certRaw, android.util.Base64.DEFAULT)
+                    } catch (_: Exception) { null }
+                    if (decoded == null || decoded.size != 104) {
+                        Toast.makeText(this, getString(R.string.mtls_cert_invalid), Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    certRaw
+                }
+
                 if (existing != null) {
                     val idx = profiles.indexOfFirst { it.id == existing.id }
                     if (idx >= 0) {
-                        profiles[idx] = existing.copy(name = name, key = key)
+                        profiles[idx] = existing.copy(name = name, key = key, mtlsCertBase64 = mtlsCert)
                     }
                 } else {
                     val newProfile = SecureStorage.ConnectionProfile(
                         id = UUID.randomUUID().toString(),
                         name = name,
-                        key = key
+                        key = key,
+                        mtlsCertBase64 = mtlsCert
                     )
                     profiles.add(newProfile)
                     activeProfileId = newProfile.id
@@ -565,39 +593,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+    private fun showOptionsMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
         val adaptiveOn = isAdaptiveEnabled()
-        menu.add(0, MENU_ADAPTIVE, 0,
+        popup.menu.add(0, MENU_ADAPTIVE, 0,
             if (adaptiveOn) getString(R.string.adaptive_enabled)
             else getString(R.string.adaptive_disabled))
-            .setCheckable(true)
-            .setChecked(adaptiveOn)
-            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
-            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            MENU_ADAPTIVE -> {
-                val newVal = !isAdaptiveEnabled()
-                getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
-                    .edit().putBoolean("adaptive_enabled", newVal).apply()
-                item.isChecked = newVal
-                item.title = if (newVal) getString(R.string.adaptive_enabled)
-                             else getString(R.string.adaptive_disabled)
-                val msg = if (newVal) getString(R.string.adaptive_enabled)
-                          else getString(R.string.adaptive_disabled)
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-                true
+        popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_ADAPTIVE -> {
+                    val newVal = !isAdaptiveEnabled()
+                    getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                        .edit().putBoolean("adaptive_enabled", newVal).apply()
+                    item.title = if (newVal) getString(R.string.adaptive_enabled)
+                                 else getString(R.string.adaptive_disabled)
+                    Toast.makeText(this,
+                        if (newVal) getString(R.string.adaptive_enabled)
+                        else getString(R.string.adaptive_disabled),
+                        Toast.LENGTH_SHORT).show()
+                    true
+                }
+                MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
+                else -> false
             }
-            MENU_DIAGNOSTICS -> {
-                showDiagnosticsDialog()
-                true
-            }
-            else -> super.onOptionsItemSelected(item)
         }
+        popup.show()
     }
 
     private fun isAdaptiveEnabled(): Boolean =

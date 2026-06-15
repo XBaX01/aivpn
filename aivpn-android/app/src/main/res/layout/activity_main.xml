@@ -56,6 +56,16 @@
                 android:textColor="@color/text_secondary"
                 app:cornerRadius="20dp"
                 app:strokeColor="@color/grey" />
+
+            <ImageButton
+                android:id="@+id/btnOptions"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="4dp"
+                android:src="@android:drawable/ic_menu_more"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/options"
+                android:tint="@color/text_secondary" />
         </LinearLayout>
 
         <!-- Status card -->
