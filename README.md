@@ -314,6 +314,44 @@ The server reads `network_config` from `server.json` and automatically installs 
 
 The port is automatically embedded in connection keys — clients don't need manual configuration. The `AIVPN_LISTEN` environment variable or `--listen` CLI flag override `server.json`.
 
+#### Full server.json reference
+
+```json
+{
+  "listen_addr": "0.0.0.0:443",
+  "tun_name": "aivpn0",
+  "tun_mtu": "auto",
+  "mask_dir": "/var/lib/aivpn/masks",
+  "bootstrap_mask_files": ["/etc/aivpn/masks/custom.json"],
+  "session_timeout_secs": 0,
+  "idle_timeout_secs": 300,
+  "network_config": {
+    "server_vpn_ip": "10.0.0.1",
+    "prefix_len": 24,
+    "mtu": 1346,
+    "keepalive_secs": 8,
+    "ipv6_enabled": false,
+    "ipv6_prefix": "fd10:cafe::/48"
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `listen_addr` | `0.0.0.0:443` | UDP listen address and port |
+| `tun_name` | random | TUN device name (`aivpn0`, `tun0`, …) |
+| `tun_mtu` | _(unset)_ | `"auto"` detects MTU from the physical interface (subtracts 64-byte VPN overhead, falls back to 1346 on error); or a fixed integer e.g. `1400` |
+| `mask_dir` | `/var/lib/aivpn/masks` | Directory scanned for `.json` mask profile files |
+| `bootstrap_mask_files` | `[]` | Additional mask JSON files pre-loaded at startup to avoid first-connection latency |
+| `session_timeout_secs` | `0` | Hard session cap in seconds; `0` = no limit |
+| `idle_timeout_secs` | `300` | Disconnect clients silent for this many seconds |
+| `network_config.server_vpn_ip` | `10.0.0.1` | Server-side TUN IP |
+| `network_config.prefix_len` | `24` | VPN subnet prefix length |
+| `network_config.mtu` | `1346` | Inner tunnel MTU sent to clients in `ServerHello` |
+| `network_config.keepalive_secs` | `8` | Keepalive interval negotiated with clients (seconds) |
+| `network_config.ipv6_enabled` | `false` | Enable IPv6 NAT66 — assigns each client an IPv6 address from `ipv6_prefix` |
+| `network_config.ipv6_prefix` | `fd10:cafe::/48` | ULA /48 prefix for NAT66 client addresses |
+
 ### 3.1 Client Management
 
 AIVPN uses a client registration model similar to WireGuard/XRay: each client gets a unique PSK, a static VPN IP, and traffic statistics.
@@ -652,11 +690,30 @@ Enforced via eBPF TC when available, automatic userspace token-bucket fallback o
 ### Benchmarking & Diagnostics
 
 ```bash
+# Default: 10-second round-trip benchmark
 aivpn-client bench -k "aivpn://..."
 # P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+
+# Custom duration
+aivpn-client bench -k "aivpn://..." --duration 30
+
+# Machine-readable JSON output
+aivpn-client bench -k "aivpn://..." --json
 ```
 
 Available from CLI and from the diagnostics panel in all GUI clients (Windows, macOS, iOS, Android).
+
+Check mask recording progress:
+
+```bash
+aivpn-client record status -k "aivpn://..."
+```
+
+Clear stale kill-switch firewall rules left after an unclean shutdown:
+
+```bash
+aivpn-client kill-switch clear
+```
 
 ### Adaptive Mode
 
@@ -746,14 +803,43 @@ Connect two or more AIVPN server nodes so end-hosts on each site reach each othe
 
 Optional ed25519-signed client certificates (104 bytes) layered over the existing X25519 + PSK handshake. Backward-compatible: existing clients work unchanged when `required: false` (default).
 
+**1. Generate a CA key pair on the server:**
+
+```bash
+aivpn-server --gen-ca --key-file /etc/aivpn/server.key
+# Prints: CA public key (hex) and CA private key (hex)
+```
+
+**2. Issue a client certificate:**
+
+```bash
+aivpn-server --issue-cert "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --ca-key <CA_PRIVATE_KEY_HEX> \
+    --days 365
+# Prints a 104-byte certificate (base64) to give to the client
+```
+
+**3. Configure the server to accept/require certificates** (`server.json`):
+
 ```json
 {
   "mtls": {
-    "ca_public_key_hex": "aabbccdd...",
+    "ca_public_key_hex": "<CA_PUBLIC_KEY_HEX>",
     "required": false
   }
 }
 ```
+
+Set `"required": true` to reject clients that don't present a valid certificate.
+
+**4. Connect with the certificate (CLI client):**
+
+```bash
+aivpn-client -k "aivpn://..." --mtls-cert /path/to/client.cert
+```
+
+GUI clients (Windows, macOS, iOS, Android) have a dedicated mTLS certificate field in the connection profile settings.
 
 ### eBPF XDP Drop Telemetry
 
