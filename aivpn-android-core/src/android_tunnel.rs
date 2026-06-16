@@ -515,6 +515,7 @@ pub async fn run_tunnel_android(
             // ── UDP → TUN (inbound from server) ──
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
+                log::debug!("aivpn: udp.recv() → {} bytes", n);
                 last_rx = Instant::now();
                 upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
                 if transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -531,14 +532,19 @@ pub async fn run_tunnel_android(
                     Ok(decoded) => {
                         Some(decoded)
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!("aivpn: decode failed (primary keys): {}", e);
                         if let Some(fallback_keys) = transition_recv_keys.as_ref() {
-                            decode_packet_with_mdh_len(
+                            let r = decode_packet_with_mdh_len(
                                 &udp_buf[..n],
                                 fallback_keys,
                                 &mut transition_recv_win,
                                 mdh_len,
-                            ).ok()
+                            );
+                            if r.is_err() {
+                                log::debug!("aivpn: decode failed (fallback keys) — packet dropped");
+                            }
+                            r.ok()
                         } else {
                             None
                         }
@@ -546,11 +552,16 @@ pub async fn run_tunnel_android(
                 };
 
                 if let Some(decoded) = decoded {
+                    log::debug!("aivpn: decoded inner_type={:?} payload={} bytes",
+                        decoded.header.inner_type, decoded.payload.len());
                     if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
                         tun_async_write(&tun, &decoded.payload).await?;
                         session
                             .download_bytes
                             .fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
+                        log::debug!("aivpn: wrote {} bytes to TUN (rx total={})",
+                            decoded.payload.len(),
+                            session.download_bytes.load(Ordering::Relaxed));
                     }
                     // Any successfully decoded packet (including keepalive responses)
                     // proves the link is alive.
@@ -763,6 +774,21 @@ fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>>
     }
 
     session.stop_event_fd.store(control_fd, Ordering::SeqCst);
+
+    // If stop_active_tunnel() fired in the race window between the last
+    // stop_requested check and this function, the eventfd was never written
+    // to (stop_event_fd was -1 at that point). Arm it now so the main loop
+    // exits on its first poll instead of hanging forever.
+    if session.stop_requested.load(Ordering::SeqCst) {
+        let v: u64 = 1;
+        unsafe {
+            let _ = libc::write(
+                stop_fd,
+                &v as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
 
     let owned_stop_fd = unsafe { OwnedFd::from_raw_fd(stop_fd) };
     Ok(AsyncFd::new(owned_stop_fd)?)
