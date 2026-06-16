@@ -169,7 +169,11 @@ class AivpnService : VpnService() {
         restartJob = serviceScope.launch {
             serviceLifecycleMutex.withLock {
                 AivpnJni.stopTunnel()
-                serviceJob?.cancelAndJoin()
+                // AivpnJni.runTunnel() is a blocking native call — Kotlin coroutine
+                // cancellation cannot interrupt it.  Give it 3 s to exit after
+                // stopTunnel() fired the eventfd; proceed regardless so the mutex is
+                // never held indefinitely.
+                withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }
                 serviceJob = null
                 // Clear any STOP_PENDING flag that stopTunnel() set while no session
                 // was active (race window between old session exit and new activation).
@@ -296,11 +300,6 @@ class AivpnService : VpnService() {
 
         try {
             val error = withContext(Dispatchers.IO) {
-                // Clear any STOP_PENDING that arrived between the restartJob's earlier
-                // clearPendingStop() call and activate_session() running in Rust.  This
-                // window spans waitForConnectivity + ensureVpnInterface + the IO dispatch
-                // itself and is the primary source of "second disconnect" hangs.
-                AivpnJni.clearPendingStop()
                 AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
             }
             if (error.isNotEmpty()) throw RuntimeException(error)
