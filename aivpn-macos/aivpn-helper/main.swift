@@ -560,7 +560,9 @@ func readExact(_ fd: Int32, count: Int) -> Data? {
     var buf = [UInt8](repeating: 0, count: count)
     var total = 0
     while total < count {
-        let n = read(fd, &buf + total, count - total)
+        let n = buf.withUnsafeMutableBytes { bytes in
+            read(fd, bytes.baseAddress!.advanced(by: total), count - total)
+        }
         if n <= 0 { return nil }
         total += n
     }
