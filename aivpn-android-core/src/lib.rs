@@ -11,7 +11,8 @@ mod android_tunnel;
 
 use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 use android_tunnel::{
-    get_active_download_bytes, get_active_upload_bytes, run_tunnel_android, stop_active_tunnel,
+    clear_pending_stop, get_active_download_bytes, get_active_upload_bytes, run_tunnel_android,
+    stop_active_tunnel,
 };
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
@@ -159,6 +160,17 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
 #[no_mangle]
 pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopTunnel(_env: JNIEnv, _class: JClass) {
     stop_active_tunnel();
+}
+
+// clearPendingStop — called by the Kotlin restartJob right before launching a
+// new intentional connection so the STOP_PENDING flag from the cleanup-phase
+// stopTunnel() call does not propagate into the new session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_clearPendingStop(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    clear_pending_stop();
 }
 
 // ──────────────────────────────────────────────────────────

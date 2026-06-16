@@ -43,6 +43,13 @@ object AivpnJni {
      */
     external fun stopTunnel()
 
+    /**
+     * Clears the STOP_PENDING flag set by [stopTunnel] when no session was active.
+     * Must be called in the restartJob after [Job.cancelAndJoin] and before launching
+     * the new connection so the intentional new session is not immediately stopped.
+     */
+    external fun clearPendingStop()
+
     /** Total bytes written to the server UDP socket in the current session. */
     external fun getUploadBytes(): Long
 

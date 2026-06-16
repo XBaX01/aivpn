@@ -70,6 +70,14 @@ impl SessionRuntime {
 
 static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
 
+// Set by stop_active_tunnel() when called while no session is active (the gap
+// between the old session's ActiveSessionGuard drop and the new session's
+// activate_session() call).  activate_session() propagates this to the new
+// session so it stops immediately.  clear_pending_stop() resets the flag
+// when a new intentional connection is about to start (called from the
+// restartJob in Kotlin after cancelAndJoin()).
+static STOP_PENDING: AtomicBool = AtomicBool::new(false);
+
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
 }
@@ -113,6 +121,11 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
         // ACTIVE_SESSION only if ptr_eq matches — it won't touch ours.
     }
 
+    // Propagate any stop that arrived while no session was active.
+    if STOP_PENDING.swap(false, Ordering::SeqCst) {
+        session.stop_requested.store(true, Ordering::SeqCst);
+    }
+
     *guard = Some(session.clone());
     Ok(ActiveSessionGuard { session })
 }
@@ -132,7 +145,13 @@ pub fn stop_active_tunnel() {
                     s.stop_event_fd.load(Ordering::SeqCst),
                 )
             })
-            .unwrap_or((-1, -1))
+            .unwrap_or_else(|| {
+                // No active session in the window between the old session's
+                // guard drop and the new session's activate_session() call.
+                // Mark the flag so the next session inherits the stop.
+                STOP_PENDING.store(true, Ordering::SeqCst);
+                (-1, -1)
+            })
     };
 
     if stop_fd >= 0 {
@@ -162,6 +181,13 @@ pub fn stop_active_tunnel() {
             libc::close(udp_fd);
         };
     }
+}
+
+/// Called by the Kotlin restartJob after cancelAndJoin() — clears any pending
+/// stop that was set during the cleanup phase so the intentional new connection
+/// is not immediately stopped by a stale flag.
+pub fn clear_pending_stop() {
+    STOP_PENDING.store(false, Ordering::SeqCst);
 }
 
 pub fn get_active_upload_bytes() -> u64 {

@@ -171,6 +171,10 @@ class AivpnService : VpnService() {
                 AivpnJni.stopTunnel()
                 serviceJob?.cancelAndJoin()
                 serviceJob = null
+                // Clear any STOP_PENDING flag that stopTunnel() set while no session
+                // was active (race window between old session exit and new activation).
+                // We are about to start an intentional new connection.
+                AivpnJni.clearPendingStop()
                 closeTunnel()
 
                 createNotificationChannel()
