@@ -239,21 +239,28 @@ pub async fn run_tunnel_android(
     let mut dh = keypair.compute_shared(&server_key)?;
     let mut keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
 
-    // ── 2. Create and protect UDP socket ──
-    // Resolve host (async DNS so we don't block the tokio thread).
-    // Cap at 5 s so that a hanging mobile DNS doesn't permanently block
-    // the disconnect button (stop_requested is checked right after).
+    // ── 2. Create stop signal immediately — before DNS — so a disconnect press
+    //    during a slow/hung cellular DNS is handled instantly, not after a 5 s wait.
+    let stop_signal = create_stop_signal(&session)?;
+
+    // Resolve host; race against stop signal so disconnect is always responsive.
     let dest_str = format!("{}:{}", server_host, server_port);
-    let dns_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::lookup_host(&dest_str),
-    )
-    .await
-    .map_err(|_| Error::Session("DNS lookup timeout (5 s)".into()))?;
-    let dest: SocketAddr = dns_result
-        .map_err(Error::Io)?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
+    let dest: SocketAddr = tokio::select! {
+        biased;
+        _ = wait_for_stop_signal(&stop_signal) => {
+            return Err(Error::Session("Stop requested".into()));
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host(&dest_str),
+        ) => {
+            result
+                .map_err(|_| Error::Session("DNS lookup timeout (5 s)".into()))?
+                .map_err(Error::Io)?
+                .find(|a| a.is_ipv4())
+                .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?
+        }
+    };
 
     if session.stop_requested.load(Ordering::SeqCst) {
         return Err(Error::Session("Stop requested".into()));
@@ -265,8 +272,6 @@ pub async fn run_tunnel_android(
         unsafe { libc::close(raw_udp_fd) };
         return Err(Error::Session("Stop requested".into()));
     }
-
-    let stop_signal = create_stop_signal(&session)?;
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──
     let owned_tun_fd = unsafe { libc::dup(tun_fd_int) };
@@ -703,8 +708,7 @@ fn create_protected_udp_socket(
         );
     }
 
-    // Bind to INADDR_ANY:0 before connect() — matches Linux client behaviour and
-    // is required by Network.bindSocket() (socket must not be connected when called).
+    // Bind to INADDR_ANY:0 before connect() — matches Linux client behaviour.
     unsafe {
         let mut any: libc::sockaddr_in = std::mem::zeroed();
         any.sin_family = libc::AF_INET as libc::sa_family_t;
@@ -715,19 +719,6 @@ fn create_protected_udp_socket(
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         );
     }
-
-    // Bind the socket to the current underlying (cellular/WiFi) network via
-    // Network.bindSocket(). This supplements protect() and ensures inbound packets
-    // are delivered correctly on asymmetric-CGNAT carriers (Megafon, MTS).
-    // Must be called after bind() and before connect(). Non-fatal.
-    let _ = guard
-        .call_method(
-            vpn_service,
-            "bindSocketToNetwork",
-            "(I)Z",
-            &[jni::objects::JValue::Int(fd)],
-        )
-        .and_then(|v| v.z());
 
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).
     let SocketAddr::V4(v4) = dest else {

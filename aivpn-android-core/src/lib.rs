@@ -49,6 +49,16 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     mtls_cert_obj: JObject<'local>, // nullable JByteArray
     adaptive: jboolean,
 ) -> jstring {
+    // ── Initialize Android logcat logger once per process lifetime ──
+    static LOG_INIT: std::sync::Once = std::sync::Once::new();
+    LOG_INIT.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Debug)
+                .with_tag("aivpn"),
+        );
+    });
+
     // ── Unpack arguments ──
     let host = match env.get_string(&server_host) {
         Ok(s) => String::from(s),
