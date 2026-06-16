@@ -596,9 +596,9 @@ class MainActivity : AppCompatActivity() {
     private fun showOptionsMenu(anchor: View) {
         val popup = PopupMenu(this, anchor)
         val adaptiveOn = isAdaptiveEnabled()
-        popup.menu.add(0, MENU_ADAPTIVE, 0,
-            if (adaptiveOn) getString(R.string.adaptive_enabled)
-            else getString(R.string.adaptive_disabled))
+        val adaptiveItem = popup.menu.add(0, MENU_ADAPTIVE, 0, getString(R.string.adaptive_mode))
+        adaptiveItem.isCheckable = true
+        adaptiveItem.isChecked = adaptiveOn
         popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -606,8 +606,7 @@ class MainActivity : AppCompatActivity() {
                     val newVal = !isAdaptiveEnabled()
                     getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
                         .edit().putBoolean("adaptive_enabled", newVal).apply()
-                    item.title = if (newVal) getString(R.string.adaptive_enabled)
-                                 else getString(R.string.adaptive_disabled)
+                    item.isChecked = newVal
                     Toast.makeText(this,
                         if (newVal) getString(R.string.adaptive_enabled)
                         else getString(R.string.adaptive_disabled),

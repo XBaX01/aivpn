@@ -15,7 +15,7 @@ use android_tunnel::{
 };
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::JNIEnv;
 
 // ──────────────────────────────────────────────────────────
@@ -46,6 +46,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_key_arr: JByteArray<'local>,
     psk_obj: JObject<'local>,       // nullable JByteArray
     mtls_cert_obj: JObject<'local>, // nullable JByteArray
+    adaptive: jboolean,
 ) -> jstring {
     // ── Unpack arguments ──
     let host = match env.get_string(&server_host) {
@@ -141,6 +142,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         psk,
         mtls_cert,
         DEFAULT_MDH_LEN,
+        adaptive != 0,
     ));
 
     match result {

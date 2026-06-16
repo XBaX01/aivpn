@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.8.2] - 2026-06-16
+
+### Fixed
+
+- **Adaptive mode was a UI-only no-op on all platforms** — the adaptive toggle saved a preference but nothing read it; adaptive mode now fully changes connection behaviour end-to-end
+- **Android adaptive mode**: TUN MTU is lowered to 1200 (from 1346) when adaptive is enabled, reducing fragmentation on restrictive mobile networks (MTS, Megafon); keepalive interval is shortened to 4 s (from 8 s) to prevent silent NAT timeouts on CGNAT cellular with short UDP state windows
+- **iOS adaptive mode**: `PacketTunnelProvider` now reads `adaptiveMode` from `providerConfiguration` and sets `NEPacketTunnelNetworkSettings.mtu = 1200` when enabled (was hardcoded 1400 regardless)
+- **macOS compile error**: `VPNManager.connect()` was missing the `adaptiveMode: Bool` parameter that `ContentView` already passed, causing a build failure; parameter added
+- **macOS helper adaptive passthrough**: `aivpn-helper` now appends `--adaptive` to the `aivpn-client` subprocess arguments when `adaptiveMode` is true; `HelperRequest` struct updated in both the app and the helper daemon
+- **CLI adaptive MTU**: `aivpn-client --adaptive` now caps the initial `ClientNetworkConfig.mtu` at 1200, overriding higher values from the connection key; `AdaptiveMonitor` is active and continues step-down under packet loss
+
+### Changed
+
+- **Android adaptive UI**: the adaptive toggle in the options popup is now a checkable menu item with a system checkmark indicator instead of text that switched between "Adaptive: ON" and "Adaptive: OFF"
+- Version bumped 0.8.1 → 0.8.2 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, macOS/iOS version strings, Android `version_footer`
+
+---
+
+## [0.8.2] — 2026-06-16
+
+### Исправлено
+
+- **Адаптивный режим был заглушкой UI на всех платформах** — переключатель сохранял настройку, но нигде она не использовалась; теперь адаптив реально меняет поведение соединения на всех уровнях
+- **Android адаптивный режим**: MTU TUN-интерфейса снижается до 1200 (с 1346) при включённом адаптиве — уменьшает фрагментацию в ограничивающих сетях (МТС, Мегафон); keepalive сокращается до 4 с (с 8 с) для предотвращения незаметных тайм-аутов NAT в сотовых CGNAT-сетях с коротким окном UDP-состояния
+- **iOS адаптивный режим**: `PacketTunnelProvider` теперь читает `adaptiveMode` из `providerConfiguration` и устанавливает `NEPacketTunnelNetworkSettings.mtu = 1200` при включённом адаптиве (ранее всегда 1400 независимо от настройки)
+- **Ошибка компиляции macOS**: `VPNManager.connect()` не принимал параметр `adaptiveMode: Bool`, который `ContentView` уже передавал — добавлен недостающий параметр
+- **Передача адаптива в macOS helper**: `aivpn-helper` теперь добавляет `--adaptive` в аргументы subprocess `aivpn-client` при `adaptiveMode = true`; структура `HelperRequest` обновлена в обоих компонентах
+- **CLI MTU в адаптивном режиме**: `aivpn-client --adaptive` теперь ограничивает начальный `ClientNetworkConfig.mtu` значением 1200, переопределяя бо́льшие значения из ключа подключения; `AdaptiveMonitor` активен и продолжает снижать MTU при потере пакетов
+
+### Изменено
+
+- **Android UI адаптива**: переключатель адаптивного режима в меню опций теперь является чекбоксом с системной галочкой вместо текста «Adaptive: ON» / «Adaptive: OFF»
+- Версия поднята с 0.8.1 до 0.8.2 во всём workspace: `Cargo.toml`, все crate-файлы, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строки версий Swift, Android `version_footer`
+
+---
+
 ## [0.8.1] - 2026-06-16
 
 ### Added

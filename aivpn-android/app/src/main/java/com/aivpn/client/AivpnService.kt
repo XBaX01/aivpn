@@ -44,6 +44,7 @@ class AivpnService : VpnService() {
         // Match the desktop client's WAN-safe TUN MTU so encrypted outer UDP
         // datagrams stay below the path-MTU ceiling on real networks.
         private const val DEFAULT_TUN_MTU = 1346
+        private const val ADAPTIVE_TUN_MTU = 1200
         private const val LEGACY_PREFIX_LEN = 24
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
@@ -291,7 +292,7 @@ class AivpnService : VpnService() {
 
         try {
             val error = withContext(Dispatchers.IO) {
-                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert)
+                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
             }
             if (error.isNotEmpty()) throw RuntimeException(error)
         } finally {
@@ -418,6 +419,10 @@ class AivpnService : VpnService() {
         }
     }
 
+    private fun isAdaptiveEnabled(): Boolean =
+        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+            .getBoolean("adaptive_enabled", false)
+
     private fun isVpnNetwork(cm: ConnectivityManager, network: Network): Boolean {
         val caps = cm.getNetworkCapabilities(network)
         return caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
@@ -497,7 +502,7 @@ class AivpnService : VpnService() {
 
         val tunAddress4 = savedVpnIp ?: "10.0.0.2"
         val tunPrefixLen = savedVpnPrefixLen.coerceIn(1, 30)
-        val tunMtu = savedVpnMtu.coerceAtLeast(576)
+        val tunMtu = if (isAdaptiveEnabled()) ADAPTIVE_TUN_MTU else savedVpnMtu.coerceAtLeast(576)
 
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.

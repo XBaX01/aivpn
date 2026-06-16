@@ -33,6 +33,7 @@ const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8); // below typical provider NAT UDP timeout (~10-15s)
+const ADAPTIVE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // aggressive keepalive for restrictive mobile NAT (MTS/Megafon)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
@@ -188,6 +189,7 @@ pub async fn run_tunnel_android(
     psk: Option<[u8; 32]>,
     mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
+    adaptive: bool,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
     let _active_session_guard = activate_session(session.clone())?;
@@ -295,11 +297,17 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         mdh_len,
     )?;
-    let keepalive_interval = server_network_cfg
+    let base_keepalive = server_network_cfg
+        .as_ref()
         .and_then(|c| c.keepalive_secs)
         .filter(|&s| s > 0)
         .map(|s| Duration::from_secs(s as u64))
         .unwrap_or(KEEPALIVE_INTERVAL);
+    let keepalive_interval = if adaptive {
+        base_keepalive.min(ADAPTIVE_KEEPALIVE_INTERVAL)
+    } else {
+        base_keepalive
+    };
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
         psk.as_ref(),

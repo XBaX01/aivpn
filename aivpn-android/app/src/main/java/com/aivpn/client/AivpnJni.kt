@@ -34,6 +34,7 @@ object AivpnJni {
         serverKey: ByteArray,
         psk: ByteArray?,
         mtlsCert: ByteArray?,
+        adaptive: Boolean,
     ): String
 
     /**
