@@ -349,6 +349,18 @@ pub async fn run_tunnel_android(
         udp.send(&pkt).await?;
         log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
     }
+    // Immediately send a keepalive to prevent CGNAT outbound mapping expiry.
+    // Megafon/MTS CGNAT can expire the outbound UDP binding in the gap between the
+    // last handshake packet and the upload pipeline's first keepalive tick (which is
+    // intentionally skipped). One early packet keeps the NAT entry alive.
+    {
+        let ka = ControlPayload::Keepalive.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+            send_seq = send_seq.wrapping_add(1);
+            let _ = udp.send(&pkt).await;
+        }
+    }
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
 

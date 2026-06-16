@@ -637,16 +637,27 @@ class MainActivity : AppCompatActivity() {
                 )
                 val logs = proc.inputStream.bufferedReader().readText()
                 proc.destroy()
+                if (logs.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        toast.cancel()
+                        Toast.makeText(this@MainActivity, getString(R.string.export_logs_empty), Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                val logFile = java.io.File(cacheDir, "aivpn-debug.txt")
+                logFile.writeText(logs)
                 withContext(Dispatchers.Main) {
                     toast.cancel()
-                    if (logs.isBlank()) {
-                        Toast.makeText(this@MainActivity, getString(R.string.export_logs_empty), Toast.LENGTH_SHORT).show()
-                        return@withContext
-                    }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity,
+                        "${packageName}.provider",
+                        logFile
+                    )
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
                         putExtra(Intent.EXTRA_SUBJECT, "AIVPN Debug Logs")
-                        putExtra(Intent.EXTRA_TEXT, logs)
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     startActivity(Intent.createChooser(intent, getString(R.string.export_logs)))
                 }
