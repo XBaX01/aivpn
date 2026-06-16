@@ -148,8 +148,7 @@ pub async fn run_upload_loop(
     enc: &mut impl PacketEncryptor,
     config: &UploadConfig,
 ) -> Result<()> {
-    let mut ka_interval =
-        time::interval_at(tokio::time::Instant::now(), config.keepalive_interval);
+    let mut ka_interval = time::interval_at(tokio::time::Instant::now(), config.keepalive_interval);
     let mut data_packet_count: u64 = 0;
 
     loop {
