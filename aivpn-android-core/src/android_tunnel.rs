@@ -32,8 +32,8 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 const BUF_SIZE: usize = 1500;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8); // below typical provider NAT UDP timeout (~10-15s)
-const ADAPTIVE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // aggressive keepalive for restrictive mobile NAT (MTS/Megafon)
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // below typical provider NAT UDP timeout (~10-15s)
+const ADAPTIVE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2); // aggressive keepalive for restrictive mobile NAT (MTS/Megafon)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
@@ -101,10 +101,16 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
         .lock()
         .map_err(|_| Error::Session("Active session lock poisoned".into()))?;
 
-    if guard.is_some() {
-        return Err(Error::Session(
-            "Another Android tunnel session is already active".into(),
-        ));
+    if let Some(existing) = guard.as_ref() {
+        if !existing.stop_requested.load(Ordering::SeqCst) {
+            return Err(Error::Session(
+                "Another Android tunnel session is already active".into(),
+            ));
+        }
+        // Previous session was told to stop but the Rust task has not yet
+        // exited (service destroyed before JNI returned).  Evict it so the
+        // new connection can proceed; the old ActiveSessionGuard will clear
+        // ACTIVE_SESSION only if ptr_eq matches — it won't touch ours.
     }
 
     *guard = Some(session.clone());
@@ -293,6 +299,9 @@ pub async fn run_tunnel_android(
                 }
             }
             _ = &mut retry => {
+                if session.stop_requested.load(Ordering::SeqCst) {
+                    return Err(Error::Session("Tunnel stop requested".into()));
+                }
                 // Fresh keypair on every retry: if the server already has a session
                 // from a prior attempt (ServerHello sent but never received by the
                 // client), reusing the same keypair causes retry packets to match the
