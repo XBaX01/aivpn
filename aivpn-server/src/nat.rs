@@ -14,10 +14,12 @@ use tracing::{debug, info};
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::VpnNetworkConfig;
 
-/// Default server TUN MTU. Conservative enough to avoid fragmentation on
-/// most paths (outer UDP ≈ inner + 57 bytes, so outer ≈ 1477 on a 1500 MTU link).
-/// Lower to 1380 for tunnelled uplinks (L2TP, VXLAN, GRE).
-pub const DEFAULT_TUN_MTU: u16 = 1420;
+/// Default server TUN MTU.  Aligned with DEFAULT_VPN_MTU (1346) so the server→client
+/// outer UDP datagram stays ≤ 1424 bytes on the wire (inner 1346 + ~50 aivpn overhead
+/// + 28 outer IP/UDP).  This safely clears LTE/GTP-U paths (≈1464 effective MTU) and
+/// CGNAT carriers such as Megafon/MTS.  Higher values like 1420 produce ≥1498-byte
+/// datagrams that fragment on cellular paths — CGNAT drops fragments → RX=0.
+pub const DEFAULT_TUN_MTU: u16 = 1346;
 
 // ── Firewall backend ───────────────────────────────────────────────────────
 

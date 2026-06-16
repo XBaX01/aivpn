@@ -296,6 +296,11 @@ class AivpnService : VpnService() {
 
         try {
             val error = withContext(Dispatchers.IO) {
+                // Clear any STOP_PENDING that arrived between the restartJob's earlier
+                // clearPendingStop() call and activate_session() running in Rust.  This
+                // window spans waitForConnectivity + ensureVpnInterface + the IO dispatch
+                // itself and is the primary source of "second disconnect" hangs.
+                AivpnJni.clearPendingStop()
                 AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
             }
             if (error.isNotEmpty()) throw RuntimeException(error)
@@ -484,7 +489,11 @@ class AivpnService : VpnService() {
         unregisterNetworkCallback()
         AivpnJni.stopTunnel()
         serviceJob?.cancel()
-        serviceJob = null
+        // Do NOT null serviceJob here — the finally block (line ~235) sets it after the
+        // native call actually returns.  startVpn's cancelAndJoin() uses this reference
+        // to wait for the old session to fully unwind before starting a new one; a
+        // premature null turns that join into a no-op and lets two runTunnel calls
+        // overlap → "Max sessions active" errors and disconnect appearing to hang.
         closeTunnel()
         isRunning = false
         lastStatusText = getString(R.string.status_disconnected)
