@@ -2062,17 +2062,15 @@ impl Gateway {
         // Record traffic stats for neural resonance (Patent 1)
         if self.config.enable_neural {
             let packet_size = packet_data.len() as u16;
-            // Compute byte-level entropy of the encrypted payload
-            let entropy = Self::compute_entropy(encrypted_payload);
-            // Compute real IAT from session's last_seen timestamp
-            let iat_ms = {
-                let sess = session.lock();
-                let elapsed = sess.last_seen.elapsed();
-                elapsed.as_secs_f64() * 1000.0
-            };
             // Neural model update is expensive under lock. Sampling every 16th packet
             // preserves trends while reducing lock contention in the receive hot path.
+            // compute_entropy and IAT are inside the gate so they only run when needed.
             if counter & 0x0f == 0 {
+                let entropy = Self::compute_entropy(encrypted_payload);
+                let iat_ms = {
+                    let sess = session.lock();
+                    sess.last_seen.elapsed().as_secs_f64() * 1000.0
+                };
                 self.neural_module
                     .lock()
                     // is_rx=true: packet from client → server (uplink direction)

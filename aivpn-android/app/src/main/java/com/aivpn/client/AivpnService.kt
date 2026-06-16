@@ -118,6 +118,12 @@ class AivpnService : VpnService() {
                 loadAndStartVpnFromProfile(profileId)
             }
             ACTION_DISCONNECT -> stopVpn()
+            else -> {
+                // START_STICKY restart with null intent — OS restarted us after a kill.
+                // If no active session was in progress (e.g. we were killed while idle),
+                // stop immediately to avoid a zombie foreground service with no tunnel.
+                if (!isServiceActive) stopSelf()
+            }
         }
         return START_STICKY
     }
@@ -194,6 +200,18 @@ class AivpnService : VpnService() {
 
                 unregisterNetworkCallback()
                 registerNetworkCallback()
+
+                // Second manualDisconnect guard: closes the race window between
+                // the first check (above) and the launch below.  If stopVpn()
+                // fires after clearPendingStop() but before this launch, the
+                // STOP_PENDING flag is already cleared and serviceJob is still
+                // null (so stopVpn's cancel() was a no-op).  Without this check
+                // the new session starts with no stop signal and runs until the
+                // TX_WITHOUT_RX watchdog (~20 s), making the disconnect button
+                // appear broken on the 2nd connection.
+                if (manualDisconnect) {
+                    return@withLock
+                }
 
                 serviceJob = serviceScope.launch {
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
@@ -299,52 +317,24 @@ class AivpnService : VpnService() {
         updateNotification(getString(R.string.notification_connecting))
 
         // Poll Rust traffic counters once per second and forward to UI.
-        val statsJob = serviceScope.launch {
-            while (isActive) {
-                delay(1_000L)
-                val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
-            }
-        }
-
-        try {
-            val error = withContext(Dispatchers.IO) {
-                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
-            }
-            if (error.isNotEmpty()) throw RuntimeException(error)
-        } finally {
-            statsJob.cancel()
-            isRunning = false
-        }
-    }
-
-    /**
-     * Called from Rust (JNI) after protect() — binds the UDP socket to the current
-     * underlying (cellular/WiFi) network so that inbound packets are delivered correctly
-     * on carriers with asymmetric CGNAT (Megafon, MTS).
-     *
-     * Must be called BEFORE connect() on the socket.
-     * Non-fatal: if no underlying network is available, protect() already covers outbound.
-     */
-    @Suppress("unused")
-    fun bindSocketToNetwork(fd: Int): Boolean {
-        val network = currentUnderlyingNetwork ?: run {
-            Log.d(TAG, "bindSocketToNetwork: no underlying network, skipping")
-            return true
-        }
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val pfd = ParcelFileDescriptor.fromFd(fd)
-                try {
-                    network.bindSocket(pfd.fileDescriptor)
-                    Log.d(TAG, "bindSocketToNetwork: bound to $network")
-                } finally {
-                    pfd.close()
+        // Use coroutineScope so statsJob is automatically cancelled when runTunnel exits,
+        // preventing stale callbacks after disconnect.
+        coroutineScope {
+            val statsJob = launch {
+                while (isActive) {
+                    delay(1_000L)
+                    val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
                 }
             }
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "bindSocketToNetwork failed: ${e.message}")
-            true
+            try {
+                val error = withContext(Dispatchers.IO) {
+                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
+                }
+                if (error.isNotEmpty()) throw RuntimeException(error)
+            } finally {
+                statsJob.cancel()
+                isRunning = false
+            }
         }
     }
 
@@ -399,8 +389,19 @@ class AivpnService : VpnService() {
                 if (previous != null && previous != network && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
                     if (now < postConnectUntilMs) {
-                        // VPN just came up — Android re-registers network IDs; ignore this churn.
-                        currentUnderlyingNetwork = network
+                        // VPN just came up — Android reshuffles network IDs; ignore same-transport churn.
+                        // But if the transport type actually changed (e.g. WiFi → cellular), restart now
+                        // so the tunnel doesn't stay bound to the dead network until the RX watchdog fires.
+                        val prevCaps = cm.getNetworkCapabilities(previous)
+                        if (prevCaps != null && isTransportChange(prevCaps, caps)) {
+                            val now2 = SystemClock.elapsedRealtime()
+                            if (now2 - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                                lastNetworkEventAtMs = now2
+                                Log.d(TAG, "Transport type changed within post-connect cooldown; restarting tunnel")
+                                networkTrigger = true
+                                AivpnJni.stopTunnel()
+                            }
+                        }
                     } else if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
                         Log.d(TAG, "Underlying network switched: $previous -> $network; restarting tunnel")
@@ -442,7 +443,13 @@ class AivpnService : VpnService() {
                     return
                 }
 
-                if (!hasUsableDefault && isRunning) {
+                // Only abort an established session on total network loss.
+                // During handshake (sessionEstablished=false) Android transiently
+                // reshuffles network IDs as the VPN interface comes up, causing
+                // momentary hasUsableDefault=false even when the link is healthy.
+                // Stopping the tunnel here before sessionEstablished produces
+                // repeated rapid reconnects ("jitter") on initial connect.
+                if (!hasUsableDefault && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
@@ -470,9 +477,12 @@ class AivpnService : VpnService() {
         getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
             .getBoolean("adaptive_enabled", false)
 
-    private fun isVpnNetwork(cm: ConnectivityManager, network: Network): Boolean {
-        val caps = cm.getNetworkCapabilities(network)
-        return caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+    private fun isTransportChange(prev: NetworkCapabilities, next: NetworkCapabilities): Boolean {
+        val prevWifi     = prev.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val nextWifi     = next.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val prevCellular = prev.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        val nextCellular = next.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        return prevWifi != nextWifi || prevCellular != nextCellular
     }
 
     private fun unregisterNetworkCallback() {
@@ -697,7 +707,9 @@ class AivpnService : VpnService() {
             }
         }
         val lastColon = serverAddr.lastIndexOf(':')
-        val port = if (lastColon >= 0) serverAddr.substring(lastColon + 1).toIntOrNull() else null
+        val port = if (lastColon >= 0)
+            serverAddr.substring(lastColon + 1).toIntOrNull()?.takeIf { it in 1..65535 }
+        else null
         return if (port != null)
             Pair(serverAddr.substring(0, lastColon), port)
         else

@@ -323,7 +323,10 @@ impl Session {
                     if bool::from(expected.ct_eq(tag)) {
                         // C-S-2: use the dedicated pre-ratchet bitmap to detect
                         // replay of old-key packets during the grace window.
-                        let bit = (*counter).min(255) as usize;
+                        // counter % TAG_WINDOW_SIZE gives a unique bit per counter
+                        // in any 256-entry window; counter.min(255) collapsed all
+                        // counters ≥255 to a single bit, causing false replay drops.
+                        let bit = (*counter % TAG_WINDOW_SIZE as u64) as usize;
                         if self.pre_ratchet_bitmap.get_bit(bit) {
                             return None; // Already received — replay
                         }
@@ -383,7 +386,7 @@ impl Session {
 
     /// Mark a pre-ratchet counter as received so it cannot be replayed (C-S-2).
     pub fn mark_pre_ratchet_received(&mut self, counter: u64) {
-        let bit = counter.min(255) as usize;
+        let bit = (counter % TAG_WINDOW_SIZE as u64) as usize;
         self.pre_ratchet_bitmap.set_bit(bit);
     }
 
@@ -983,8 +986,9 @@ impl SessionManager {
     ) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
         let current_tw =
             crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
-        // Search up to 65536 counters ahead from the session's last known counter
-        const RECOVERY_RANGE: u64 = 65536;
+        // Search up to 1024 counters ahead — enough to recover from drift
+        // without becoming a per-packet CPU DoS (65536 × 3 BLAKE3 ops per session).
+        const RECOVERY_RANGE: u64 = 1024;
 
         for entry in self.sessions.iter() {
             let session = entry.value().clone();

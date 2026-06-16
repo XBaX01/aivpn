@@ -29,7 +29,7 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 
 // ──────────── Constants ────────────
 
-const BUF_SIZE: usize = 1500;
+const BUF_SIZE: usize = 2048;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // below typical provider NAT UDP timeout (~10-15s)
@@ -94,11 +94,10 @@ impl Drop for ActiveSessionGuard {
             unsafe { libc::close(stop_fd) };
         }
 
-        if let Ok(mut guard) = ACTIVE_SESSION.lock() {
-            if let Some(current) = guard.as_ref() {
-                if Arc::ptr_eq(current, &self.session) {
-                    *guard = None;
-                }
+        let mut guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = guard.as_ref() {
+            if Arc::ptr_eq(current, &self.session) {
+                *guard = None;
             }
         }
     }
@@ -132,10 +131,9 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
 
 pub fn stop_active_tunnel() {
     let (udp_fd, stop_fd) = {
-        let guard = ACTIVE_SESSION.lock().ok();
+        let guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .as_ref()
-            .and_then(|g| g.as_ref())
             .map(|s| {
                 // Set the flag FIRST so early init phases (DNS lookup, socket
                 // creation) see it before the eventfd/UDP fd are available.
@@ -305,6 +303,7 @@ pub async fn run_tunnel_android(
     // ── 5. Wait for ServerHello with timeout ──
     let mut recv_buf = vec![0u8; BUF_SIZE];
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut retry_count: u32 = 0;
     let n = loop {
         let now = Instant::now();
         if now >= handshake_deadline {
@@ -333,17 +332,20 @@ pub async fn run_tunnel_android(
                 if session.stop_requested.load(Ordering::SeqCst) {
                     return Err(Error::Session("Tunnel stop requested".into()));
                 }
-                // Fresh keypair on every retry: if the server already has a session
-                // from a prior attempt (ServerHello sent but never received by the
-                // client), reusing the same keypair causes retry packets to match the
-                // existing session's tag window and be treated as keepalives — the
-                // server never sends a new ServerHello. A new keypair produces new
-                // tags, forcing the server to treat it as a fresh handshake.
-                keypair = KeyPair::generate();
-                dh = keypair.compute_shared(&server_key)?;
-                keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
-                send_counter = 0;
-                send_seq = 0;
+                retry_count += 1;
+                // Rotate keypair only once, on the 2nd retry (~1.5 s after first send).
+                // Rotating on every retry created a new server session per 750 ms (~13
+                // ghost sessions per 10 s timeout), which caused CGNAT per-IP cap (5)
+                // to be hit on the 2nd handshake attempt.  A single rotation at retry 2
+                // limits server ghost sessions to 2 max while still forcing a fresh
+                // handshake if the server lost the original one.
+                if retry_count == 2 {
+                    keypair = KeyPair::generate();
+                    dh = keypair.compute_shared(&server_key)?;
+                    keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                    send_counter = 0;
+                    send_seq = 0;
+                }
                 let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
                 let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
                 let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
@@ -684,6 +686,9 @@ fn create_protected_udp_socket(
         .unwrap_or(false);
 
     if !protected {
+        // Clear any pending JNI exception from protect() before returning
+        // to avoid confusing subsequent JNI calls in the same thread.
+        let _ = guard.exception_clear();
         unsafe { libc::close(fd) };
         return Err(Error::Session("VpnService.protect() returned false".into()));
     }
