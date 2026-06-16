@@ -692,6 +692,32 @@ fn create_protected_udp_socket(
         );
     }
 
+    // Bind to INADDR_ANY:0 before connect() — matches Linux client behaviour and
+    // is required by Network.bindSocket() (socket must not be connected when called).
+    unsafe {
+        let mut any: libc::sockaddr_in = std::mem::zeroed();
+        any.sin_family = libc::AF_INET as libc::sa_family_t;
+        // port 0 and addr 0 — kernel assigns ephemeral port
+        let _ = libc::bind(
+            fd,
+            &any as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        );
+    }
+
+    // Bind the socket to the current underlying (cellular/WiFi) network via
+    // Network.bindSocket(). This supplements protect() and ensures inbound packets
+    // are delivered correctly on asymmetric-CGNAT carriers (Megafon, MTS).
+    // Must be called after bind() and before connect(). Non-fatal.
+    let _ = guard
+        .call_method(
+            vpn_service,
+            "bindSocketToNetwork",
+            "(I)Z",
+            &[jni::objects::JValue::Int(fd)],
+        )
+        .and_then(|v| v.z());
+
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).
     let SocketAddr::V4(v4) = dest else {
         unsafe { libc::close(fd) };

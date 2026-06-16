@@ -306,6 +306,37 @@ class AivpnService : VpnService() {
     }
 
     /**
+     * Called from Rust (JNI) after protect() — binds the UDP socket to the current
+     * underlying (cellular/WiFi) network so that inbound packets are delivered correctly
+     * on carriers with asymmetric CGNAT (Megafon, MTS).
+     *
+     * Must be called BEFORE connect() on the socket.
+     * Non-fatal: if no underlying network is available, protect() already covers outbound.
+     */
+    @Suppress("unused")
+    fun bindSocketToNetwork(fd: Int): Boolean {
+        val network = currentUnderlyingNetwork ?: run {
+            Log.d(TAG, "bindSocketToNetwork: no underlying network, skipping")
+            return true
+        }
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pfd = ParcelFileDescriptor.fromFd(fd)
+                try {
+                    network.bindSocket(pfd.fileDescriptor)
+                    Log.d(TAG, "bindSocketToNetwork: bound to $network")
+                } finally {
+                    pfd.close()
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "bindSocketToNetwork failed: ${e.message}")
+            true
+        }
+    }
+
+    /**
      * Called from Rust (JNI) when handshake and key ratchet are complete.
      * This is the first moment when "connected" is actually true.
      */
