@@ -32,7 +32,7 @@ RUN apk add --no-cache iproute2 ca-certificates \
     && rm -rf /var/cache/apk/*
 
 COPY --from=builder /aivpn-client /usr/local/bin/aivpn-client
-COPY entrypoint.sh /entrypoint.sh
+COPY aivpn-mikrotik/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh /usr/local/bin/aivpn-client
 
 # Required at runtime: /dev/net/tun must be mounted from RouterOS host
