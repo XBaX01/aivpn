@@ -33,8 +33,73 @@ pub struct MultiChannelLoadStats {
     pub elapsed_ms: u64,
 }
 
+/// Validate a bootstrap URL before fetching.
+///
+/// Rejects:
+/// - Non-HTTPS schemes (prevents plaintext interception).
+/// - Private/loopback/link-local hostnames (prevents SSRF against internal services).
+fn validate_bootstrap_url(url: &str) -> Result<()> {
+    // Must start with https:// — no HTTP, no custom schemes.
+    if !url.starts_with("https://") {
+        return Err(Error::Session(format!(
+            "Bootstrap URL '{}' rejected: only HTTPS is allowed",
+            url
+        )));
+    }
+
+    // Extract the host portion (between "https://" and the next '/', ':', or '?').
+    let after_scheme = &url["https://".len()..];
+    let host_end = after_scheme
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    let host_and_port = &after_scheme[..host_end];
+    // Strip optional port suffix (e.g., "host:8443" → "host").
+    let host = match host_and_port.rfind(':') {
+        Some(pos) => {
+            // Only strip as port if the suffix is digits (avoids mangling IPv6 literals).
+            let suffix = &host_and_port[pos + 1..];
+            if suffix.chars().all(|c| c.is_ascii_digit()) {
+                &host_and_port[..pos]
+            } else {
+                host_and_port
+            }
+        }
+        None => host_and_port,
+    };
+
+    // Reject loopback and private-range hostnames.
+    let blocked = matches!(
+        host,
+        "localhost" | "ip6-localhost" | "ip6-loopback" | "[::1]" | "::1"
+    ) || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || {
+            // 172.16.0.0/12 — second octet 16..=31
+            if let Some(rest) = host.strip_prefix("172.") {
+                rest.split('.')
+                    .next()
+                    .and_then(|octet| octet.parse::<u8>().ok())
+                    .map_or(false, |n| (16..=31).contains(&n))
+            } else {
+                false
+            }
+        };
+
+    if blocked {
+        return Err(Error::Session(format!(
+            "Bootstrap URL '{}' rejected: private/loopback addresses are not allowed",
+            url
+        )));
+    }
+
+    Ok(())
+}
+
 /// Load descriptors from a CDN channel
 async fn load_from_cdn(url: &str) -> Result<Vec<BootstrapDescriptor>> {
+    validate_bootstrap_url(url)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -102,6 +167,9 @@ async fn load_from_telegram(
 
 /// Load descriptors from a GitHub releases channel
 async fn load_from_github(repo: &str, asset_name: &str) -> Result<Vec<BootstrapDescriptor>> {
+    // The GitHub API URL is constructed from the repo slug, not user input, so
+    // it is always a safe HTTPS URL. The asset download URL from the release JSON
+    // is user-influenced via the connection key and must be validated.
     let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
 
     let client = reqwest::Client::builder()
@@ -146,6 +214,14 @@ async fn load_from_github(repo: &str, asset_name: &str) -> Result<Vec<BootstrapD
                     if let Some(download_url) =
                         asset.get("browser_download_url").and_then(|u| u.as_str())
                     {
+                        // Validate the asset URL before fetching — the download
+                        // URL comes from GitHub's API response and must be HTTPS.
+                        if let Err(e) = validate_bootstrap_url(download_url) {
+                            return Err(Error::Session(format!(
+                                "GitHub asset URL rejected: {}",
+                                e
+                            )));
+                        }
                         // Download the asset
                         let asset_response =
                             client.get(download_url).send().await.map_err(|e| {
@@ -176,6 +252,8 @@ async fn load_from_ipfs(hash: &str, gateway: Option<&str>) -> Result<Vec<Bootstr
         Some(g) => format!("{}/ipfs/{}", g, hash),
         None => format!("https://ipfs.io/ipfs/{}", hash),
     };
+
+    validate_bootstrap_url(&url)?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))

@@ -114,6 +114,8 @@ impl VpnManager {
         full_tunnel: bool,
         proxy_listen: Option<&str>,
         mtls_cert_path: Option<&str>,
+        exclude_routes: &[String],
+        kill_switch: bool,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
@@ -148,6 +150,16 @@ impl VpnManager {
 
         if let Some(cert) = mtls_cert_path {
             cmd.arg("--mtls-cert").arg(cert);
+        }
+
+        for route in exclude_routes {
+            if !route.trim().is_empty() {
+                cmd.arg("--exclude-routes").arg(route.trim());
+            }
+        }
+
+        if kill_switch {
+            cmd.arg("--kill-switch");
         }
 
         // Hide console window on Windows

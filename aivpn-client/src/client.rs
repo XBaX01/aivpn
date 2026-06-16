@@ -61,6 +61,10 @@ fn packet_mdh_len_for_mask(mask: &MaskProfile) -> usize {
 pub struct ClientConfig {
     pub server_addr: String,
     pub server_public_key: [u8; X25519_PUBLIC_KEY_SIZE],
+    /// Ed25519 signing public key for verifying ServerHello signatures and mask updates.
+    /// When `Some`, the client rejects unsigned or incorrectly signed messages from
+    /// the server, preventing MITM attacks.
+    pub server_signing_key: Option<[u8; 32]>,
     pub preshared_key: Option<[u8; 32]>,
     pub initial_mask: MaskProfile,
     pub tun_config: TunnelConfig,
@@ -320,18 +324,6 @@ impl AivpnClient {
         info!("Connected to server at {}", self.config.server_addr);
         info!("TUN device: {}", self.tunnel.name());
 
-        if let Some(cert) = self.config.mtls_cert.clone() {
-            match self
-                .send_control(&ControlPayload::ClientCert {
-                    cert_bytes: cert.clone(),
-                })
-                .await
-            {
-                Ok(()) => debug!("mTLS: ClientCert sent ({} bytes)", cert.len()),
-                Err(e) => warn!("mTLS: failed to send ClientCert: {}", e),
-            }
-        }
-
         Ok(())
     }
 
@@ -403,6 +395,9 @@ impl AivpnClient {
         let (admin_tx, mut admin_rx) = mpsc::channel::<String>(16);
         let (control_tx, control_rx) = mpsc::channel::<ControlPayload>(32);
         self.control_tx = Some(control_tx.clone());
+
+        // mTLS ClientCert is sent inside the ServerHello handler, after the PFS
+        // ratchet completes, so it is protected by the ratcheted session keys.
 
         // Spawn local IPC listener for CLI commands. Stored in AbortOnDrop so the task
         // (and its bound UDP socket) is cancelled when run() returns. Without this,
@@ -898,16 +893,46 @@ impl AivpnClient {
     /// Handle control messages from server
     async fn handle_server_control(&mut self, control: ControlPayload) -> Result<()> {
         match control {
-            ControlPayload::MaskUpdate { mask_data, .. } => {
+            ControlPayload::MaskUpdate {
+                mask_data,
+                signature,
+            } => {
+                // The server signs the raw mask_data bytes (sign_mask() in session.rs).
+                // Verify before deserialising so a bad signature is caught immediately.
+                if let Some(signing_key) = &self.config.server_signing_key {
+                    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                    match VerifyingKey::from_bytes(signing_key) {
+                        Ok(vk) => {
+                            let sig = Signature::from_bytes(&signature);
+                            if vk.verify(&mask_data, &sig).is_err() {
+                                warn!("MaskUpdate rejected: invalid ed25519 signature");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            warn!("MaskUpdate rejected: bad signing key in config: {}", e);
+                            return Ok(());
+                        }
+                    }
+                }
                 match rmp_serde::from_slice::<MaskProfile>(&mask_data) {
                     Ok(new_mask) => self.update_mask(new_mask),
                     Err(e) => warn!("Failed to parse mask update: {}", e),
                 }
             }
             ControlPayload::BootstrapDescriptorUpdate { descriptor_data } => {
+                if descriptor_data.len() > 512 * 1024 {
+                    warn!(
+                        "BootstrapDescriptorUpdate rejected: payload too large ({} bytes)",
+                        descriptor_data.len()
+                    );
+                    return Ok(());
+                }
                 match rmp_serde::from_slice::<BootstrapDescriptor>(&descriptor_data) {
                     Ok(descriptor) => {
-                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, None)
+                        let trusted = self.config.server_signing_key.as_ref();
+                        if let Err(e) =
+                            bootstrap_cache::store_verified_descriptor(descriptor, trusted)
                         {
                             warn!("Failed to store bootstrap descriptor: {}", e);
                         }
@@ -920,9 +945,37 @@ impl AivpnClient {
             }
             ControlPayload::ServerHello {
                 server_eph_pub,
-                signature: _,
+                signature,
                 network_config,
             } => {
+                // Verify ed25519 signature over (server_eph_pub || client_eph_pub).
+                // The server signs this tuple in session.rs create_session().
+                if let Some(signing_key) = &self.config.server_signing_key {
+                    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                    match VerifyingKey::from_bytes(signing_key) {
+                        Ok(vk) => {
+                            let mut msg = Vec::with_capacity(64);
+                            msg.extend_from_slice(&server_eph_pub);
+                            msg.extend_from_slice(&self.keypair.public_key_bytes());
+                            let sig = Signature::from_bytes(&signature);
+                            if vk.verify(&msg, &sig).is_err() {
+                                error!(
+                                    "ServerHello rejected: ed25519 signature verification failed \
+                                     — possible MITM attack"
+                                );
+                                return Err(Error::Crypto("ServerHello signature invalid".into()));
+                            }
+                        }
+                        Err(e) => {
+                            error!("ServerHello: invalid signing key in config: {}", e);
+                            return Err(Error::Crypto(format!(
+                                "Invalid server signing key: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+
                 info!("ServerHello received — completing PFS ratchet");
 
                 if let Some(network_config) = network_config {
@@ -964,6 +1017,26 @@ impl AivpnClient {
                     info!("Outbound ratchet activated — upload switched to new keys");
                 }
                 info!("PFS ratchet complete — forward secrecy established");
+
+                // Send mTLS ClientCert now that the PFS ratchet is complete.
+                // Sending it here ensures the cert is protected by the ratcheted
+                // session keys, not the initial zero-RTT keys.
+                if let Some(cert) = self.config.mtls_cert.clone() {
+                    if let Err(e) = self
+                        .send_control(&ControlPayload::ClientCert {
+                            cert_bytes: cert.clone(),
+                        })
+                        .await
+                    {
+                        warn!("mTLS: failed to queue ClientCert after ratchet: {}", e);
+                    } else {
+                        debug!(
+                            "mTLS: ClientCert queued after PFS ratchet ({} bytes)",
+                            cert.len()
+                        );
+                    }
+                }
+
                 let _ = self
                     .send_control(&ControlPayload::RecordingStatusRequest)
                     .await;

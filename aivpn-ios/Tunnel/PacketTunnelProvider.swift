@@ -33,6 +33,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let fullTunnel = cfg["fullTunnel"] as? Bool ?? true
 
+        // Split-tunnel lists forwarded by VPNManager from App Group UserDefaults.
+        let excludedRoutes = (cfg["excluded_routes"] as? String ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let excludedDomains = (cfg["excluded_domains"] as? String ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
         guard let key = TunnelConnectionKey(rawKey: keyStr) else {
             completionHandler(makeError("invalid connection key"))
             return
@@ -59,7 +69,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         _ = fcntl(sp[0], F_SETFL, flags | O_NONBLOCK)
 
         let vpnIP    = key.vpnIP ?? "10.8.0.2"
-        let settings = buildSettings(vpnIP: vpnIP, serverHost: key.serverHost, fullTunnel: fullTunnel)
+        let settings = buildSettings(vpnIP: vpnIP, serverHost: key.serverHost,
+                                     fullTunnel: fullTunnel,
+                                     excludedRoutes: excludedRoutes,
+                                     excludedDomains: excludedDomains)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self = self else { return }
@@ -74,9 +87,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let pskArr  = key.psk
             let rustFd  = self.sp[1]
 
-            // Decode optional base64-encoded mTLS cert (must be exactly 104 bytes)
+            // Decode optional base64-encoded mTLS cert
             let certBytes: [UInt8]? = (cfg["mtlsCert"] as? String).flatMap {
-                guard let data = Data(base64Encoded: $0), data.count == 104 else { return nil }
+                guard let data = Data(base64Encoded: $0), !data.isEmpty else { return nil }
                 return Array(data)
             }
 
@@ -170,6 +183,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ]
             completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
 
+        case "record_start", "record_stop", "record_status":
+            // Recording requires full Rust control-plane wiring not yet implemented
+            // in the tunnel extension. Return a well-formed error response so the
+            // UI does not get stuck in .starting state waiting for a nil reply.
+            let resp: [String: Any] = [
+                "canRecord": false,
+                "error":     "not supported in tunnel extension",
+            ]
+            completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
+
         default:
             completionHandler?(nil)
         }
@@ -226,13 +249,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Network settings
 
     private func buildSettings(vpnIP: String, serverHost: String,
-                               fullTunnel: Bool) -> NEPacketTunnelNetworkSettings {
+                               fullTunnel: Bool,
+                               excludedRoutes: [String] = [],
+                               excludedDomains: [String] = []) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
         settings.mtu = 1400
 
         let ipv4 = NEIPv4Settings(addresses: [vpnIP], subnetMasks: ["255.255.255.0"])
         if fullTunnel {
             ipv4.includedRoutes = [NEIPv4Route.default()]
+
+            // Build NEIPv4Route entries for any user-specified CIDR exclusions.
+            // Only applies in full-tunnel mode; split-tunnel mode already routes
+            // only the VPN subnet so there is nothing to exclude.
+            if !excludedRoutes.isEmpty {
+                ipv4.excludedRoutes = excludedRoutes.compactMap { cidr -> NEIPv4Route? in
+                    parseCIDR(cidr)
+                }
+            }
         } else {
             ipv4.includedRoutes = [NEIPv4Route(destinationAddress: "10.8.0.0",
                                                subnetMask: "255.255.255.0")]
@@ -241,9 +275,43 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if fullTunnel {
             let dns = NEDNSSettings(servers: ["10.8.0.1", "1.1.1.1"])
+            // matchDomains routes DNS queries for listed domains *outside* the VPN
+            // DNS servers, letting those domains resolve via the default resolver.
+            // Note: this controls only DNS resolution path, not the traffic path.
+            // For traffic exclusion of specific IPs, use excludedRoutes above.
+            if !excludedDomains.isEmpty {
+                dns.matchDomains = excludedDomains
+            }
             settings.dnsSettings = dns
         }
         return settings
+    }
+
+    // MARK: - CIDR helpers
+
+    /// Parses a CIDR string (e.g. "192.168.1.0/24") into an NEIPv4Route.
+    /// Returns nil for malformed input.
+    private func parseCIDR(_ cidr: String) -> NEIPv4Route? {
+        let parts = cidr.split(separator: "/")
+        guard parts.count == 2,
+              let prefixLen = Int(parts[1]), prefixLen >= 0, prefixLen <= 32 else {
+            return nil
+        }
+        let address = String(parts[0])
+        let mask = prefixLengthToMask(prefixLen)
+        // Validate that address looks like an IPv4 dotted-decimal string
+        guard address.split(separator: ".").count == 4 else { return nil }
+        return NEIPv4Route(destinationAddress: address, subnetMask: mask)
+    }
+
+    /// Converts a prefix length (0-32) to a dotted-decimal subnet mask string.
+    private func prefixLengthToMask(_ length: Int) -> String {
+        let bits: UInt32 = length == 0 ? 0 : ~UInt32(0) << (32 - length)
+        let b0 = (bits >> 24) & 0xFF
+        let b1 = (bits >> 16) & 0xFF
+        let b2 = (bits >>  8) & 0xFF
+        let b3 =  bits        & 0xFF
+        return "\(b0).\(b1).\(b2).\(b3)"
     }
 
     // MARK: - Helpers

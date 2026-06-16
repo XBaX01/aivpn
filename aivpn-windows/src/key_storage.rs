@@ -124,6 +124,9 @@ pub struct ConnectionKey {
     /// Path to client mTLS cert file. Stored plaintext — only `key` is DPAPI-encrypted.
     #[serde(default)]
     pub mtls_cert_path: Option<String>,
+    /// CIDRs to exclude from the VPN tunnel (split-tunnel bypass list).
+    #[serde(default)]
+    pub exclude_routes: Vec<String>,
 }
 
 impl ConnectionKey {
@@ -144,6 +147,7 @@ impl ConnectionKey {
             full_tunnel: false,
             proxy_listen: None,
             mtls_cert_path: None,
+            exclude_routes: Vec::new(),
         })
     }
 }
@@ -211,6 +215,7 @@ impl KeyStorage {
         full_tunnel: bool,
         proxy_listen: Option<String>,
         mtls_cert_path: Option<String>,
+        exclude_routes: Vec<String>,
     ) -> Result<(), String> {
         // Validate key format
         let mut ck = ConnectionKey::from_key_string(name, key)
@@ -218,6 +223,7 @@ impl KeyStorage {
         ck.full_tunnel = full_tunnel;
         ck.proxy_listen = proxy_listen;
         ck.mtls_cert_path = mtls_cert_path;
+        ck.exclude_routes = exclude_routes;
 
         // Check for duplicates
         if self.keys.iter().any(|k| k.key == ck.key) {
@@ -240,6 +246,7 @@ impl KeyStorage {
         full_tunnel: bool,
         proxy_listen: Option<String>,
         mtls_cert_path: Option<String>,
+        exclude_routes: Vec<String>,
     ) -> Result<(), String> {
         if idx >= self.keys.len() {
             return Err("Invalid key index".to_string());
@@ -249,6 +256,7 @@ impl KeyStorage {
         ck.full_tunnel = full_tunnel;
         ck.proxy_listen = proxy_listen;
         ck.mtls_cert_path = mtls_cert_path;
+        ck.exclude_routes = exclude_routes;
         self.keys[idx] = ck;
         self.save();
         Ok(())

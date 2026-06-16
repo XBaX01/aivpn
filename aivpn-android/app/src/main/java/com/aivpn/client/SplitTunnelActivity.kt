@@ -243,6 +243,14 @@ class SplitTunnelActivity : AppCompatActivity() {
                 true
             } else false
         }
+
+        // Domain exclusions require API 33 (Android 13) for addRoute(IpPrefix, excluded).
+        // On older devices, saved domains are stored but not applied to VPN routing.
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            binding.textDomainNote.visibility = android.view.View.VISIBLE
+        } else {
+            binding.textDomainNote.visibility = android.view.View.GONE
+        }
     }
 
     private fun addDomain() {

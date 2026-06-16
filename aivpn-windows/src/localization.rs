@@ -110,6 +110,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::Ru, "proxy_mode") => "Прокси-режим (без прав адм.)",
         (Lang::En, "proxy_addr") => "Listen address",
         (Lang::Ru, "proxy_addr") => "Адрес прослушивания",
+        (Lang::En, "exclude_routes") => "Exclude routes (one CIDR per line)",
+        (Lang::Ru, "exclude_routes") => "Исключить маршруты (по одному CIDR)",
+        (Lang::En, "exclude_routes_hint") => "e.g. 192.168.1.0/24",
+        (Lang::Ru, "exclude_routes_hint") => "напр. 192.168.1.0/24",
 
         // Misc
         (Lang::En, "show") => "Show",
@@ -148,6 +152,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::Ru, "recording_self_test_failed") => "Самотест не пройден",
         (Lang::En, "dismiss") => "Dismiss",
         (Lang::Ru, "dismiss") => "Закрыть",
+
+        // Kill-switch
+        (Lang::En, "kill_switch") => "Kill Switch (block traffic if VPN drops)",
+        (Lang::Ru, "kill_switch") => "Kill Switch (блок трафика при разрыве VPN)",
 
         // Adaptive / diagnostics
         (Lang::En, "adaptive_mode") => "Adaptive Mode",

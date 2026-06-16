@@ -11,6 +11,7 @@ import android.net.Network
 import android.net.NetworkRequest
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Base64
@@ -19,6 +20,8 @@ import kotlinx.coroutines.*
 import org.json.JSONObject
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.Inet4Address
+import java.net.InetAddress
 
 /**
  * Android VPN service — thin orchestrator over the Rust core (libaivpn_core.so).
@@ -44,6 +47,8 @@ class AivpnService : VpnService() {
         private const val LEGACY_PREFIX_LEN = 24
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
+        // Android reshuffles underlying network IDs for 5-10s after VPN comes up.
+        // 15s covers even slow devices without delaying genuine network-switch detection.
         private const val TAG = "AivpnService"
 
         @Volatile var statusCallback:  ((Boolean, String) -> Unit)? = null
@@ -52,6 +57,9 @@ class AivpnService : VpnService() {
         @Volatile var isRunning     = false
         @Volatile var isServiceActive = false
         @Volatile var lastStatusText = ""
+
+        /** Weak reference to the live service instance, used for socket protection only. */
+        @Volatile var instance: AivpnService? = null
     }
 
     // TUN interface wrapper kept open across reconnects so Android does not tear down
@@ -90,9 +98,14 @@ class AivpnService : VpnService() {
     private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
     // Android reshuffles underlying network IDs when VPN comes up; ignore churn for this window.
     @Volatile private var postConnectUntilMs: Long = 0L
-    private val POST_CONNECT_COOLDOWN_MS = 5_000L
+    private val POST_CONNECT_COOLDOWN_MS = 15_000L
 
     // ──────────── Service lifecycle ────────────
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -193,7 +206,7 @@ class AivpnService : VpnService() {
                         }
 
                         lastStatusText = getString(R.string.status_reconnecting)
-                        statusCallback?.invoke(false, lastStatusText)
+                        val cb0 = statusCallback; cb0?.invoke(false, lastStatusText)
                         updateNotification(getString(R.string.notification_connecting))
 
                         if (delayMs > 0) {
@@ -265,14 +278,14 @@ class AivpnService : VpnService() {
         isRunning          = true
         sessionId++     // new session — invalidates any queued upgradePendingJob
         lastStatusText = getString(R.string.status_connecting)
-        statusCallback?.invoke(false, lastStatusText)
+        val cb1 = statusCallback; cb1?.invoke(false, lastStatusText)
         updateNotification(getString(R.string.notification_connecting))
 
         // Poll Rust traffic counters once per second and forward to UI.
         val statsJob = serviceScope.launch {
             while (isActive) {
                 delay(1_000L)
-                trafficCallback?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
+                val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
             }
         }
 
@@ -300,8 +313,8 @@ class AivpnService : VpnService() {
         sessionEstablished = true
         isRunning = true
         lastStatusText = getString(R.string.status_connected, host)
-        statusCallback?.invoke(true, lastStatusText)
-        tileCallback?.invoke()
+        val cb2 = statusCallback; cb2?.invoke(true, lastStatusText)
+        val ticb0 = tileCallback; ticb0?.invoke()
         updateNotification(getString(R.string.notification_connected, host))
         Log.d(TAG, "Tunnel ready: host=$host")
     }
@@ -435,8 +448,8 @@ class AivpnService : VpnService() {
         closeTunnel()
         isRunning = false
         lastStatusText = getString(R.string.status_disconnected)
-        statusCallback?.invoke(false, lastStatusText)
-        tileCallback?.invoke()
+        val cb3 = statusCallback; cb3?.invoke(false, lastStatusText)
+        val ticb1 = tileCallback; ticb1?.invoke()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -448,14 +461,14 @@ class AivpnService : VpnService() {
 
     /**
      * Called when Android revokes the VPN permission (e.g. another VPN app takes over).
-     * Default VpnService.onRevoke() calls stopSelf() which kills the service with no reconnect.
-     * We signal Rust to exit cleanly; the reconnect loop in serviceJob will then restart the
-     * tunnel automatically (unless manualDisconnect is true).
+     * Mark as manual disconnect so the reconnect loop does not attempt to reconnect, stop
+     * the tunnel, and call super so Android tears down the VPN interface and service cleanly.
      */
     override fun onRevoke() {
-        Log.w(TAG, "onRevoke() — signalling Rust to exit, reconnect loop will restart")
-        AivpnJni.stopTunnel()
-        // Do NOT call super.onRevoke() — it calls stopSelf() which bypasses reconnect.
+        Log.w(TAG, "onRevoke() — OS revoked VPN permission, stopping permanently")
+        manualDisconnect = true
+        stopVpn()
+        super.onRevoke()
     }
 
     override fun onDestroy() {
@@ -470,6 +483,10 @@ class AivpnService : VpnService() {
         closeTunnel()
         isRunning = false
         serviceScope.cancel()
+        statusCallback = null
+        trafficCallback = null
+        tileCallback = null
+        instance = null
         super.onDestroy()
     }
 
@@ -503,14 +520,71 @@ class AivpnService : VpnService() {
             }
         }
 
-        // Domain-based split tunnel is not yet implemented.
-        // Resolving domains to static IPs at connect time is unreliable — IPs rotate,
-        // and CDNs serve different addresses per client. Full support requires a local
-        // DNS proxy that intercepts queries and adds per-query /32 exclusion routes
-        // dynamically (via VpnService.Builder addRoute exclusion on API 33+ or a custom
-        // DNS server running on the loopback). Tracked for future implementation.
+        // Domain-based split tunnel: resolve each excluded domain to IPv4 addresses at
+        // connect time and add /32 exclusion routes so that traffic to those IPs bypasses
+        // the VPN tunnel. This is the same approach used by NordVPN and ExpressVPN on
+        // Android. Limitation: CDN IPs rotate and may differ per client, so exclusions
+        // are best-effort. The domain list is re-resolved on every tunnel (re)connect.
+        applyDomainExclusions(builder)
 
         vpnInterface = builder.establish() ?: throw Exception("Failed to establish VPN interface")
+    }
+
+    /**
+     * Resolve each excluded domain to IPv4 addresses and register them as exclusion routes
+     * via [Builder.excludeRoute] so traffic to those IPs bypasses the VPN tunnel.
+     *
+     * [Builder.excludeRoute] was added in API 33 (Android 13). On older devices the builder
+     * has no exclusion-route primitive; we log a warning and skip — the stored domain list
+     * will take effect once the device is on API 33+.
+     *
+     * Limitation: CDN IPs rotate and vary per client. Domains are re-resolved on every
+     * tunnel (re)connect. DNS resolution runs synchronously here because
+     * [ensureVpnInterface] is already called from a background coroutine (Dispatchers.IO).
+     */
+    private fun applyDomainExclusions(builder: Builder) {
+        val domains = SecureStorage.loadExcludedDomains(this)
+        if (domains.isEmpty()) return
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Log.w(TAG, "Domain split tunnel requires API 33 (Android 13); " +
+                "${domains.size} domain(s) configured but skipped on API ${Build.VERSION.SDK_INT}")
+            return
+        }
+
+        val resolvedIps = mutableSetOf<Inet4Address>()
+
+        for (domain in domains) {
+            try {
+                val addrs = InetAddress.getAllByName(domain)
+                val v4addrs = addrs.filterIsInstance<Inet4Address>()
+                if (v4addrs.isEmpty()) {
+                    Log.d(TAG, "Domain $domain: no IPv4 addresses returned — skipping")
+                } else {
+                    Log.d(TAG, "Domain $domain resolved: ${v4addrs.map { it.hostAddress }}")
+                    resolvedIps.addAll(v4addrs)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "DNS resolution failed for excluded domain $domain: ${e.message}")
+            }
+        }
+
+        if (resolvedIps.isEmpty()) {
+            Log.d(TAG, "No IPv4 addresses resolved for excluded domains")
+            return
+        }
+
+        for (addr in resolvedIps) {
+            try {
+                // Builder.excludeRoute(IpPrefix) — API 33+. Traffic to this /32 prefix
+                // is routed through the underlying network, not through the VPN tunnel.
+                @Suppress("NewApi")
+                builder.excludeRoute(android.net.IpPrefix(addr, 32))
+                Log.d(TAG, "Exclusion route applied: ${addr.hostAddress}/32")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to add exclusion route for ${addr.hostAddress}: ${e.message}")
+            }
+        }
     }
 
     // ──────────── Network waiting ────────────

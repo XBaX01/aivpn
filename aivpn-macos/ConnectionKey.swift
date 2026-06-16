@@ -8,12 +8,14 @@ struct ConnectionKey: Identifiable, Codable, Equatable {
     let serverAddress: String?  // Извлеченный адрес сервера
     let vpnIP: String?  // Извлеченный VPN IP
     let canRecord: Bool?  // Права на запись масок (из поля can_record в ключе)
+    var mtlsCertPath: String?  // Путь к mTLS-сертификату клиента (опционально)
 
-    init(id: String = UUID().uuidString, name: String, keyValue: String) {
+    init(id: String = UUID().uuidString, name: String, keyValue: String, mtlsCertPath: String? = nil) {
         self.id = id
         self.name = name
         self.keyValue = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
+        self.mtlsCertPath = mtlsCertPath
 
         // Извлекаем данные из ключа (URL-safe base64 без padding)
         var server: String? = nil
@@ -112,14 +114,14 @@ class KeychainStorage: ObservableObject {
     }
     
     /// Добавить новый ключ
-    func addKey(name: String, keyValue: String) -> ConnectionKey? {
+    func addKey(name: String, keyValue: String, mtlsCertPath: String? = nil) -> ConnectionKey? {
         // Проверить дубликат по значению ключа
         if keys.contains(where: { $0.keyValue == keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "") }) {
             return nil
         }
-        
-        let newKey = ConnectionKey(name: name, keyValue: keyValue)
+
+        let newKey = ConnectionKey(name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath)
         keys.append(newKey)
         saveKeys()
         
@@ -140,22 +142,20 @@ class KeychainStorage: ObservableObject {
     }
 
     /// Обновить ключ полностью (имя + keyValue)
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
+    func updateKey(id: String, name: String, keyValue: String, mtlsCertPath: String? = nil) -> Bool {
         guard let index = keys.firstIndex(where: { $0.id == id }) else {
             return false
         }
-        
+
         let normalizedKey = keyValue.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
-        
-        // Проверить дубликат (если ключ меняем на другой существующий)
+
         if normalizedKey != keys[index].keyValue &&
            keys.contains(where: { $0.id != id && $0.keyValue == normalizedKey }) {
             return false
         }
-        
-        // Создать новый struct с обновлёнными данными
-        keys[index] = ConnectionKey(id: id, name: name, keyValue: keyValue)
+
+        keys[index] = ConnectionKey(id: id, name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath)
         saveKeys()
         return true
     }

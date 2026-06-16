@@ -59,6 +59,7 @@
     mounts=aivpn-tun \
     dns=8.8.8.8 \
     logging=yes \
+    cap=net-admin \
     comment="AIVPN client"
 
 /container/start [find comment="AIVPN client"]

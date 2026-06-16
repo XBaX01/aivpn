@@ -11,6 +11,7 @@ struct HelperRequest: Codable {
     let binaryPath: String?
     let service: String?
     let mtlsCertPath: String?
+    let excludeRoutes: String?
 }
 
 struct HelperResponse: Codable {
@@ -199,12 +200,6 @@ class VPNManager: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    // MARK: - Key Storage (UserDefaults — no keychain prompts)
-
-    private func saveKey(_ key: String) {
-        defaults.set(key, forKey: "connection_key")
-    }
-    
     // MARK: - Key Management
     
     /// Выбрать ключ по ID
@@ -218,8 +213,8 @@ class VPNManager: ObservableObject {
     }
     
     /// Добавить новый ключ
-    func addKey(name: String, keyValue: String) -> Bool {
-        if let newKey = KeychainStorage.shared.addKey(name: name, keyValue: keyValue) {
+    func addKey(name: String, keyValue: String, mtlsCertPath: String? = nil) -> Bool {
+        if let newKey = KeychainStorage.shared.addKey(name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath) {
             KeychainStorage.shared.selectKey(id: newKey.id)
             selectedKeyId = newKey.id
             savedKey = newKey.keyValue
@@ -243,8 +238,8 @@ class VPNManager: ObservableObject {
     }
     
     /// Обновить ключ полностью
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
-        let updated = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+    func updateKey(id: String, name: String, keyValue: String, mtlsCertPath: String? = nil) -> Bool {
+        let updated = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath)
         if updated, selectedKeyId == id,
            let key = KeychainStorage.shared.keys.first(where: { $0.id == id }) {
             savedKey = key.keyValue
@@ -304,11 +299,18 @@ class VPNManager: ObservableObject {
                 return
             }
 
-            // Send request
-            if let requestData = try? JSONEncoder().encode(request),
-               let requestStr = String(data: requestData, encoding: .utf8) {
-                _ = requestStr.withCString { ptr in
-                    write(fd, ptr, Int(strlen(ptr)))
+            // Send request with 4-byte big-endian length prefix
+            if let requestData = try? JSONEncoder().encode(request) {
+                let payloadLen = requestData.count
+                var lenBuf: [UInt8] = [
+                    UInt8((payloadLen >> 24) & 0xFF),
+                    UInt8((payloadLen >> 16) & 0xFF),
+                    UInt8((payloadLen >>  8) & 0xFF),
+                    UInt8( payloadLen        & 0xFF),
+                ]
+                _ = write(fd, &lenBuf, 4)
+                _ = requestData.withUnsafeBytes { ptr in
+                    write(fd, ptr.baseAddress!, payloadLen)
                 }
             }
 
@@ -340,8 +342,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
-                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
             if let response = response, response.status == "ok" {
@@ -364,14 +365,13 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
 
         savedKey = normalizedKey
-        saveKey(normalizedKey)
 
         isConnecting = true
         lastError = nil
@@ -392,7 +392,8 @@ class VPNManager: ObservableObject {
             fullTunnel: fullTunnel,
             binaryPath: binaryPath,
             service: nil,
-            mtlsCertPath: mtlsCertPath
+            mtlsCertPath: mtlsCertPath,
+            excludeRoutes: excludeRoutes
         )
 
         sendToHelper(request) { [weak self] response in
@@ -425,7 +426,11 @@ class VPNManager: ObservableObject {
             .replacingOccurrences(of: "aivpn://", with: "")
 
         savedKey = normalizedKey
-        saveKey(normalizedKey)
+
+        // Warn if an mTLS cert is configured — it is silently ignored in proxy mode
+        if let certPath = selectedKey?.mtlsCertPath, !certPath.isEmpty {
+            print("Warning: mTLS certificate '\(certPath)' is not used in SOCKS5 proxy mode")
+        }
 
         isConnecting = true
         isProxyMode = true
@@ -546,8 +551,7 @@ class VPNManager: ObservableObject {
             return
         }
 
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil)
-
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil)
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
             self.stopStatusPolling()
@@ -633,8 +637,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
-                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
             guard response.status == "ok" else { return }
@@ -766,8 +769,7 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil),
-                     timeoutSeconds: 1.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,
                   response.status == "ok" else {

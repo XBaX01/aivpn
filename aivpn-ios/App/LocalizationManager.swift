@@ -31,8 +31,9 @@ class LocalizationManager: ObservableObject {
         "delete_key_confirm":  ["en": "Delete Key?",    "ru": "Удалить ключ?"],
         "delete_key_message":  ["en": "Are you sure you want to delete this key?",
                                 "ru": "Вы уверены что хотите удалить этот ключ?"],
-        "split_tunnel":        ["en": "Split Tunneling","ru": "Разделение трафика"],
-        "split_tunnel_none":   ["en": "All traffic via VPN", "ru": "Весь трафик через VPN"],
+        "split_tunnel":        ["en": "Excluded Domains (Split DNS)", "ru": "Исключённые домены (Split DNS)"],
+        "split_tunnel_routes": ["en": "Excluded Routes (CIDR)",      "ru": "Исключённые маршруты (CIDR)"],
+        "split_tunnel_none":   ["en": "None",                         "ru": "Нет"],
         "record_new_mask":     ["en": "Record New Mask", "ru": "Записать новую маску"],
         "stop_recording":      ["en": "Stop Recording", "ru": "Остановить запись"],
         "record_service_name": ["en": "Mask Service Name", "ru": "Имя сервиса для маски"],
@@ -53,8 +54,8 @@ class LocalizationManager: ObservableObject {
         "upload":              ["en": "Upload",   "ru": "Исходящий"],
         "download":            ["en": "Download", "ru": "Входящий"],
         "duration":            ["en": "Duration", "ru": "Длительность"],
-        "version_footer":      ["en": "v0.8.0 · Neural Resonance VPN",
-                                "ru": "v0.8.0 · Neural Resonance VPN"],
+        "version_footer":      ["en": "v0.8.1 · Neural Resonance VPN",
+                                "ru": "v0.8.1 · Neural Resonance VPN"],
         "error_invalid_key":   ["en": "Invalid connection key format",
                                 "ru": "Неверный формат ключа подключения"],
         "no_profiles":         ["en": "No saved keys. Tap + to add one.",
@@ -69,12 +70,18 @@ class LocalizationManager: ObservableObject {
         "bench_running":       ["en": "Running benchmark…",     "ru": "Тест запущен…"],
         "bench_idle":          ["en": "Tap to measure latency and connection quality.",
                                 "ru": "Нажмите для измерения задержки и качества соединения."],
+        "mtls_cert_hint":      ["en": "mTLS cert (base64, leave empty to disable)",
+                                "ru": "mTLS сертификат (base64, оставьте пустым для отключения)"],
     ]
 
     init() {
-        language = UserDefaults.standard.string(forKey: "app_language")
-            ?? Locale.current.language.languageCode?.identifier
-            ?? "en"
+        let systemLang: String?
+        if #available(iOS 16, *) {
+            systemLang = Locale.current.language.languageCode?.identifier
+        } else {
+            systemLang = Locale.current.languageCode
+        }
+        language = UserDefaults.standard.string(forKey: "app_language") ?? systemLang ?? "en"
         if language != "en" && language != "ru" { language = "en" }
     }
 

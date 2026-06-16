@@ -15,6 +15,11 @@ import SystemConfiguration
 
 let SOCKET_PATH = "/var/run/aivpn/helper.sock"
 let DEFAULT_CLIENT_PATH = "/Library/Application Support/AIVPN/aivpn-client"
+let ALLOWED_CLIENT_PATHS = [
+    "/Applications/AIVPN.app/Contents/MacOS/aivpn-client",
+    "/Applications/AIVPN.app/Contents/Resources/aivpn-client",
+    DEFAULT_CLIENT_PATH,
+]
 let LOG_PATH = "/var/run/aivpn/client.log"
 let PID_PATH = "/var/run/aivpn/client.pid"
 let RECORDING_STATUS_PATH = "/var/run/aivpn/recording.status"
@@ -30,6 +35,7 @@ struct HelperRequest: Codable {
     let binaryPath: String?  // custom binary path (for connect/dev)
     let service: String?     // service name (for record_start)
     let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
+    let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
 }
 
 struct HelperResponse: Codable {
@@ -148,10 +154,24 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil) -> HelperResponse {
     killExistingClient()
 
-    let clientPath = binaryPath ?? DEFAULT_CLIENT_PATH
+    // Resolve the requested path; fall back to default
+    let requestedPath = binaryPath ?? DEFAULT_CLIENT_PATH
+
+    // Canonicalize to prevent symlink/traversal tricks
+    let clientPath: String
+    if let resolved = URL(fileURLWithPath: requestedPath).standardized.path as String?,
+       ALLOWED_CLIENT_PATHS.contains(resolved) {
+        clientPath = resolved
+    } else if ALLOWED_CLIENT_PATHS.contains(requestedPath) {
+        clientPath = requestedPath
+    } else {
+        log("ERROR: binaryPath '\(requestedPath)' not in allowlist — rejected")
+        return HelperResponse(status: "error",
+                              message: "Rejected: binary path is not permitted")
+    }
 
     guard FileManager.default.isExecutableFile(atPath: clientPath) else {
         log("ERROR: aivpn-client not found at \(clientPath)")
@@ -174,12 +194,33 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         args.append("--full-tunnel")
     }
     if let certPath = mtlsCertPath {
-        guard !certPath.contains("..") && !certPath.contains("\0") else {
-            log("ERROR: invalid mtlsCertPath — rejected")
+        let homeDir = NSHomeDirectory()
+        let allowedPrefixes = [homeDir, "/etc/ssl", "/usr/local/etc"]
+        let certOk = certPath.count <= 512
+            && allowedPrefixes.contains(where: { certPath.hasPrefix($0) })
+            && certPath.range(of: #"^[\w/\.\-]+\.(pem|crt|cer)$"#,
+                              options: .regularExpression) != nil
+        guard certOk else {
+            log("ERROR: invalid mtlsCertPath '\(certPath)' — rejected")
             return HelperResponse(status: "error", message: "Invalid mTLS cert path")
         }
         args.append("--mtls-cert")
         args.append(certPath)
+    }
+    if let routes = excludeRoutes {
+        // Validate: each token must look like a CIDR (digits, dots, colons, slash).
+        // Reject anything containing shell-special characters or path traversal.
+        let tokens = routes.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let cidrCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:./")
+        let allValid = tokens.allSatisfy { token in
+            !token.isEmpty && token.unicodeScalars.allSatisfy { cidrCharset.contains($0) }
+        }
+        guard !tokens.isEmpty && allValid else {
+            log("ERROR: invalid excludeRoutes — rejected")
+            return HelperResponse(status: "error", message: "Invalid exclude-routes value")
+        }
+        args.append("--exclude-routes")
+        args.append(tokens.joined(separator: ","))
     }
 
     // Use posix_spawn for reliable process management
@@ -514,6 +555,18 @@ func createSocket() -> Int32 {
     return fd
 }
 
+/// Read exactly `count` bytes from `fd`, returning nil on EOF/error/timeout.
+func readExact(_ fd: Int32, count: Int) -> Data? {
+    var buf = [UInt8](repeating: 0, count: count)
+    var total = 0
+    while total < count {
+        let n = read(fd, &buf + total, count - total)
+        if n <= 0 { return nil }
+        total += n
+    }
+    return Data(buf)
+}
+
 /// Handle a single client connection
 func handleConnection(_ clientFD: Int32) {
     // 5-second read timeout
@@ -521,18 +574,19 @@ func handleConnection(_ clientFD: Int32) {
     setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO,
                &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-    var buffer = [UInt8](repeating: 0, count: 8192)
-    let bytesRead = read(clientFD, &buffer, buffer.count)
-    guard bytesRead > 0 else { return }
-
-    let data = Data(bytes: buffer, count: bytesRead)
-    guard let requestStr = String(data: data, encoding: .utf8) else {
-        sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid encoding"))
+    // Read 4-byte big-endian length prefix
+    guard let lenBytes = readExact(clientFD, count: 4) else { return }
+    let payloadLen = Int(lenBytes[0]) << 24 | Int(lenBytes[1]) << 16
+                   | Int(lenBytes[2]) << 8  | Int(lenBytes[3])
+    guard payloadLen > 0 && payloadLen <= 65535 else {
+        sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid message length"))
         return
     }
 
-    guard let requestData = requestStr.data(using: .utf8),
-          let request = try? JSONDecoder().decode(HelperRequest.self, from: requestData) else {
+    // Read exactly payloadLen bytes
+    guard let data = readExact(clientFD, count: payloadLen) else { return }
+
+    guard let request = try? JSONDecoder().decode(HelperRequest.self, from: data) else {
         sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid JSON"))
         return
     }
@@ -549,7 +603,8 @@ func handleConnection(_ clientFD: Int32) {
         response = startClient(key: key,
                                fullTunnel: request.fullTunnel ?? false,
                                binaryPath: request.binaryPath,
-                               mtlsCertPath: request.mtlsCertPath)
+                               mtlsCertPath: request.mtlsCertPath,
+                               excludeRoutes: request.excludeRoutes)
 
     case "disconnect":
         response = stopClient()

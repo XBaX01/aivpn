@@ -11,7 +11,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use aivpn_common::error::Result;
 use aivpn_common::mask::MaskProfile;
@@ -232,11 +232,20 @@ impl SteganographicEncoder {
 
     /// Encode mask for image LSB steganography.
     pub fn encode_for_image(&self, _mask: &MaskProfile) -> Result<Vec<u8>> {
-        unimplemented!("image LSB steganography encoding is not yet implemented")
+        // H-S-6: return a proper error instead of panicking with unimplemented!()
+        warn!("passive_distribution: image_lsb channel is not implemented");
+        Err(aivpn_common::error::Error::Session(
+            "passive_distribution: image_lsb channel is not implemented in this build".into(),
+        ))
     }
 
     /// Encode mask for blockchain OP_RETURN.
     pub fn encode_for_blockchain(&self, _mask: &MaskProfile) -> Result<Vec<u8>> {
-        unimplemented!("blockchain OP_RETURN encoding is not yet implemented")
+        // H-S-6: return a proper error instead of panicking with unimplemented!()
+        warn!("passive_distribution: blockchain_op_return channel is not implemented");
+        Err(aivpn_common::error::Error::Session(
+            "passive_distribution: blockchain_op_return channel is not implemented in this build"
+                .into(),
+        ))
     }
 }

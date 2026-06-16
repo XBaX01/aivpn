@@ -213,7 +213,25 @@
                 android:textSize="11sp"
                 android:textColor="@color/text_secondary"
                 android:gravity="center"
-                android:padding="8dp" />
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="2dp" />
+
+            <!-- CDN / API note — shown on API < 33 as a warning that domain exclusions are inactive -->
+            <TextView
+                android:id="@+id/textDomainNote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/split_tunnel_domain_note"
+                android:textSize="10sp"
+                android:textColor="@color/text_secondary"
+                android:gravity="center"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="8dp"
+                android:alpha="0.7"
+                android:visibility="gone" />
         </LinearLayout>
     </FrameLayout>
 

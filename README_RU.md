@@ -324,6 +324,44 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
 
 Порт автоматически вшивается в ключи подключения — клиентам не нужна ручная настройка. Переменная окружения `AIVPN_LISTEN` или флаг `--listen` переопределяют значение из `server.json`.
 
+#### Полный справочник server.json
+
+```json
+{
+  "listen_addr": "0.0.0.0:443",
+  "tun_name": "aivpn0",
+  "tun_mtu": "auto",
+  "mask_dir": "/var/lib/aivpn/masks",
+  "bootstrap_mask_files": ["/etc/aivpn/masks/custom.json"],
+  "session_timeout_secs": 0,
+  "idle_timeout_secs": 300,
+  "network_config": {
+    "server_vpn_ip": "10.0.0.1",
+    "prefix_len": 24,
+    "mtu": 1346,
+    "keepalive_secs": 8,
+    "ipv6_enabled": false,
+    "ipv6_prefix": "fd10:cafe::/48"
+  }
+}
+```
+
+| Поле | По умолчанию | Описание |
+|------|-------------|----------|
+| `listen_addr` | `0.0.0.0:443` | UDP-адрес и порт прослушивания |
+| `tun_name` | случайный | Имя TUN-устройства (`aivpn0`, `tun0`, …) |
+| `tun_mtu` | _(не задан)_ | `"auto"` — автоопределение MTU по физическому интерфейсу (−64 байта накладных расходов, при ошибке — 1346); или целое число, например `1400` |
+| `mask_dir` | `/var/lib/aivpn/masks` | Папка с `.json`-файлами профилей масок |
+| `bootstrap_mask_files` | `[]` | Дополнительные маски, загружаемые при старте (снижают задержку первого подключения) |
+| `session_timeout_secs` | `0` | Жёсткий лимит сессии в секундах; `0` = без ограничений |
+| `idle_timeout_secs` | `300` | Отключить клиента после N секунд тишины |
+| `network_config.server_vpn_ip` | `10.0.0.1` | IP сервера в TUN-интерфейсе |
+| `network_config.prefix_len` | `24` | Длина префикса VPN-подсети |
+| `network_config.mtu` | `1346` | Внутренний MTU туннеля, передаваемый клиенту в `ServerHello` |
+| `network_config.keepalive_secs` | `8` | Интервал keepalive, согласуемый с клиентами (сек.) |
+| `network_config.ipv6_enabled` | `false` | Включить IPv6 NAT66 — каждому клиенту назначается IPv6-адрес из `ipv6_prefix` |
+| `network_config.ipv6_prefix` | `fd10:cafe::/48` | ULA /48-префикс для клиентских IPv6-адресов |
+
 ### 3.1 Управление клиентами
 
 AIVPN использует модель регистрации клиентов по аналогии с WireGuard/XRay: у каждого клиента — уникальный PSK, статический VPN IP и статистика трафика.
@@ -666,11 +704,30 @@ aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
 ### Бенчмарк и диагностика
 
 ```bash
+# По умолчанию: 10-секундный тест
 aivpn-client bench -k "aivpn://..."
 # P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+
+# Задать продолжительность
+aivpn-client bench -k "aivpn://..." --duration 30
+
+# Вывод в JSON
+aivpn-client bench -k "aivpn://..." --json
 ```
 
 Доступен из CLI и в панели диагностики всех GUI-клиентов (Windows, macOS, iOS, Android).
+
+Проверить статус записи маски:
+
+```bash
+aivpn-client record status -k "aivpn://..."
+```
+
+Удалить зависшие правила kill-switch после некорректного завершения:
+
+```bash
+aivpn-client kill-switch clear
+```
 
 ### Адаптивный режим
 
@@ -717,6 +774,42 @@ aivpn-client -k "aivpn://..." --adaptive
 ### mTLS-сертификаты клиентов
 
 Опциональный ed25519-сертификат (104 байта) поверх X25519 + PSK. `required: false` (по умолчанию) — обратная совместимость. `required: true` — блокирует данные до предъявления сертификата.
+
+**1. Генерация CA-ключа на сервере:**
+
+```bash
+aivpn-server --gen-ca --key-file /etc/aivpn/server.key
+# Выводит: публичный и приватный ключи CA в hex
+```
+
+**2. Выпуск клиентского сертификата:**
+
+```bash
+aivpn-server --issue-cert "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --ca-key <CA_PRIVATE_KEY_HEX> \
+    --days 365
+# Выводит 104-байтовый сертификат (base64) для передачи клиенту
+```
+
+**3. Настройка сервера** (`server.json`):
+
+```json
+{
+  "mtls": {
+    "ca_public_key_hex": "<CA_PUBLIC_KEY_HEX>",
+    "required": false
+  }
+}
+```
+
+**4. Подключение с сертификатом (CLI-клиент):**
+
+```bash
+aivpn-client -k "aivpn://..." --mtls-cert /path/to/client.cert
+```
+
+GUI-клиенты (Windows, macOS, iOS, Android) имеют отдельное поле mTLS в настройках профиля.
 
 ### Телеметрия дропов eBPF XDP
 

@@ -341,6 +341,20 @@ impl ClientDatabase {
                     merged += 1;
                 }
             } else {
+                // H-S-2: Reject incoming records whose vpn_ip is already
+                // assigned to a *different* client — prevents pool sync from
+                // overwriting IP assignments and causing routing collisions.
+                let ip_conflict = data
+                    .clients
+                    .iter()
+                    .any(|c| c.vpn_ip == inc.vpn_ip && c.id != inc.id);
+                if ip_conflict {
+                    warn!(
+                        "merge_from_json: skipping client '{}' — vpn_ip {} already assigned to another client",
+                        inc.id, inc.vpn_ip
+                    );
+                    continue;
+                }
                 data.clients.push(inc);
                 merged += 1;
             }

@@ -16,12 +16,9 @@
 //! wall-clock window.  The 511-counter tag window covers ±42 minutes of clock
 //! drift, making time-based replay attacks impractical.
 
-use std::net::SocketAddr;
 use portable_atomic::AtomicU64;
-use std::sync::{
-    atomic::Ordering,
-    Arc,
-};
+use std::net::SocketAddr;
+use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
 use rand::Rng;

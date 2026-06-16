@@ -31,6 +31,7 @@ use aivpn_common::protocol::{
 };
 use libc;
 
+use crate::audit_log::{AuditActor, AuditLogger};
 use crate::client_db::ClientDatabase;
 use crate::ebpf_observer::EbpfObserver;
 use crate::mask_gen::generate_and_store_mask;
@@ -90,6 +91,9 @@ pub struct GatewayConfig {
     /// injects them directly into the TUN device (exit-node role).
     /// Must be set explicitly — defaults to `false` to prevent open relay.
     pub exit_node_enabled: bool,
+    /// Append-only audit log (H-S-8). Records security-relevant session events.
+    /// Defaults to `AuditLogger::disabled()` (writes to /dev/null).
+    pub audit_log: AuditLogger,
 }
 
 impl Default for GatewayConfig {
@@ -120,6 +124,7 @@ impl Default for GatewayConfig {
             chain_forwarder: None,
             mtls: None,
             exit_node_enabled: false,
+            audit_log: AuditLogger::disabled(),
         }
     }
 }
@@ -283,6 +288,8 @@ pub struct Gateway {
     qos_enforcer: Arc<QosEnforcer>,
     /// Multi-hop exit node forwarder (None = local NAT).
     chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
+    /// Append-only audit log (H-S-8).
+    audit_log: AuditLogger,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -581,6 +588,7 @@ impl Gateway {
 
         let event_bus = config.event_bus.clone();
         let qos_enforcer = config.qos_enforcer.clone();
+        let audit_log = config.audit_log.clone();
 
         Ok(Self {
             config: config.clone(),
@@ -602,6 +610,7 @@ impl Gateway {
             event_bus,
             qos_enforcer,
             chain_forwarder: config.chain_forwarder.clone(),
+            audit_log,
         })
     }
 
@@ -830,6 +839,7 @@ impl Gateway {
             let ka_cleanup = self.kernel_accel.clone();
             let rate_limits_cleanup = self.rate_limits.clone();
             let handshake_cooldowns_cleanup = self.handshake_cooldowns.clone();
+            let handshake_locks_cleanup = self.handshake_locks.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -859,10 +869,15 @@ impl Gateway {
                         }
                     }
 
-                    // Prune stale per-IP rate-limit and handshake-cooldown entries.
+                    // Prune stale per-IP rate-limit, handshake-cooldown, and
+                    // handshake-lock entries.  handshake_locks is never pruned
+                    // elsewhere so it grows without bound under sustained churn.
+                    // Entries whose Arc strong_count == 1 have no active waiters
+                    // and are safe to remove.
                     rate_limits_cleanup.retain(|_, v| v.1.elapsed() < Duration::from_secs(30));
                     handshake_cooldowns_cleanup
                         .retain(|_, v| v.1.elapsed() < Duration::from_secs(60));
+                    handshake_locks_cleanup.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
 
                     let removed = sessions.cleanup_expired();
                     for session_id in &removed {
@@ -1988,6 +2003,11 @@ impl Gateway {
         let (session_id, refresh_tags) = {
             let mut sess = session.lock();
             sess.mark_tag_received(counter);
+            // C-S-2: if this packet matched a pre-ratchet (old-key) tag, mark
+            // it in the pre_ratchet_bitmap to prevent replay within the grace window.
+            if sess.is_pre_ratchet_counter(counter) {
+                sess.mark_pre_ratchet_received(counter);
+            }
             sess.last_seen = std::time::Instant::now();
 
             // IP migration: update stored client address when a validated packet
@@ -2307,6 +2327,12 @@ impl Gateway {
                         service,
                         hash_addr(&client_addr)
                     );
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "RecordingStart",
+                        &format!("service={} peer={}", service, hash_addr(&client_addr)),
+                        "ok",
+                    );
                 }
             }
             ControlPayload::RecordingStop {
@@ -2335,6 +2361,12 @@ impl Gateway {
                         Some(session.clone()),
                     )
                     .await;
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "RecordingStop",
+                        &hash_addr(&client_addr),
+                        "ok",
+                    );
                 }
             }
             ControlPayload::RecordingStatusRequest => {
@@ -2370,7 +2402,22 @@ impl Gateway {
                 // Client-side only, ignore on server
             }
             ControlPayload::PoolSync { clients_json } => {
-                if let Some(ref db) = self.client_db {
+                // Only accept PoolSync from sessions registered as pool peers.
+                // A regular VPN client sending PoolSync would be able to inject
+                // or overwrite arbitrary client records in the database.
+                let is_pool = session.lock().is_pool_peer;
+                if !is_pool {
+                    warn!(
+                        "pool_sync: rejected from non-pool session {}",
+                        hash_addr(&client_addr)
+                    );
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "PoolSync",
+                        &hash_addr(&client_addr),
+                        "rejected: not a pool peer",
+                    );
+                } else if let Some(ref db) = self.client_db {
                     let json_str = String::from_utf8_lossy(&clients_json);
                     match db.merge_from_json(&json_str) {
                         Ok(n) => info!(
@@ -2411,8 +2458,34 @@ impl Gateway {
                             ip_version,
                             payload.len()
                         );
-                    } else if let Some(ref tx) = self.tun_write_tx {
-                        let _ = tx.send(payload).await;
+                    } else {
+                        // C-S-4: Validate that the injected packet's source IP
+                        // matches the session's assigned VPN IP to prevent
+                        // IP spoofing through the exit-node relay path.
+                        let src_ip_ok = {
+                            let sess = session.lock();
+                            match ip_version {
+                                Some(4) => {
+                                    if payload.len() >= 20 {
+                                        let src: [u8; 4] = payload[12..16].try_into().unwrap();
+                                        let pkt_src = std::net::Ipv4Addr::from(src);
+                                        sess.vpn_ip.map_or(false, |vpn| vpn == pkt_src)
+                                    } else {
+                                        false
+                                    }
+                                }
+                                // IPv6: no per-session IPv6 address assigned — reject
+                                _ => false,
+                            }
+                        };
+                        if !src_ip_ok {
+                            warn!(
+                                "chain_forward: source IP mismatch from {} — dropping",
+                                hash_addr(&client_addr)
+                            );
+                        } else if let Some(ref tx) = self.tun_write_tx {
+                            let _ = tx.send(payload).await;
+                        }
                     }
                 } else {
                     warn!(
@@ -2433,10 +2506,22 @@ impl Gateway {
                     session.lock().mtls_ok = ok;
                     if ok {
                         debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "ClientCert",
+                            &hash_addr(&client_addr),
+                            "accepted",
+                        );
                     } else {
                         warn!(
                             "mtls: client {} cert rejected — Data will be dropped",
                             hash_addr(&client_addr)
+                        );
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "ClientCert",
+                            &hash_addr(&client_addr),
+                            "rejected",
                         );
                         // Notify client so it can re-provision rather than inferring failure from Data drops.
                         let _ = self

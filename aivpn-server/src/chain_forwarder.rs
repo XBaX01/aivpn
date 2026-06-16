@@ -23,12 +23,9 @@
 //! The exit node needs no additional config — its gateway already handles
 //! `ChainForward` in the `handle_control_message()` match.
 
-use std::net::SocketAddr;
 use portable_atomic::AtomicU64;
-use std::sync::{
-    atomic::Ordering,
-    Arc,
-};
+use std::net::SocketAddr;
+use std::sync::{atomic::Ordering, Arc};
 
 use rand::{rngs::OsRng, Rng, RngCore};
 use tokio::net::UdpSocket;

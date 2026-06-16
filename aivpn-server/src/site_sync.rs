@@ -25,13 +25,10 @@
 //! }
 //! ```
 
+use portable_atomic::AtomicU64;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use portable_atomic::AtomicU64;
-use std::sync::{
-    atomic::Ordering,
-    Arc, OnceLock,
-};
+use std::sync::{atomic::Ordering, Arc, OnceLock};
 use std::time::Duration;
 
 use base64::Engine as _;

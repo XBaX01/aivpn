@@ -207,6 +207,7 @@ pub struct AivpnApp {
     new_key_name: String,
     new_key_value: String,
     new_key_full_tunnel: bool,
+    new_key_exclude_routes: String,
     new_key_use_proxy: bool,
     new_key_proxy_listen: String,
     new_key_mtls_cert: String,
@@ -215,6 +216,8 @@ pub struct AivpnApp {
     error_timer: Option<std::time::Instant>,
     // Recording UI state
     recording_service_name: String,
+    // Kill-switch
+    kill_switch: bool,
     // Adaptive / diagnostics
     adaptive_enabled: bool,
     show_diagnostics: bool,
@@ -241,6 +244,7 @@ impl AivpnApp {
             new_key_name: String::new(),
             new_key_value: String::new(),
             new_key_full_tunnel: false,
+            new_key_exclude_routes: String::new(),
             new_key_use_proxy: false,
             new_key_proxy_listen: String::new(),
             new_key_mtls_cert: String::new(),
@@ -248,6 +252,7 @@ impl AivpnApp {
             error_message: None,
             error_timer: None,
             recording_service_name: String::new(),
+            kill_switch: false,
             adaptive_enabled: false,
             show_diagnostics: false,
             bench_p50: None,
@@ -325,9 +330,12 @@ impl eframe::App for AivpnApp {
             if self.vpn.is_connected() {
                 self.vpn.disconnect();
             }
-            // Drop tray icon to remove it from system tray
+            // Drop tray icon to remove it from system tray before the window
+            // closes so the icon is gone before the process exits.  Dropping
+            // it here (before send_viewport_cmd) guarantees the tray thread
+            // has already been joined inside TrayManager::drop().
             self.tray = None;
-            std::process::exit(0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         // ── Update tray tooltip ────────────────────────────────────────

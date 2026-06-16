@@ -85,7 +85,9 @@ class VPNManager: ObservableObject {
                 self.manager = m
             }
             self.observeStatus()
-            self.syncStatus()
+            // loadAllFromPreferences calls back on a private queue; marshal to main
+            // before touching @Published properties via syncStatus().
+            DispatchQueue.main.async { self.syncStatus() }
         }
     }
 
@@ -136,7 +138,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: ConnectionKey, fullTunnel: Bool) {
+    func connect(key: ConnectionKey, fullTunnel: Bool, adaptiveMode: Bool = false) {
         guard let manager = manager else { return }
         guard !isConnecting else { return }
 
@@ -153,10 +155,29 @@ class VPNManager: ObservableObject {
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = bundleId
         proto.serverAddress = key.serverAddress ?? "aivpn"
-        proto.providerConfiguration = [
+        var providerConfig: [String: Any] = [
             "key": key.fullKey,
             "fullTunnel": fullTunnel,
         ]
+        if adaptiveMode {
+            providerConfig["adaptiveMode"] = true
+        }
+        if let cert = key.mtlsCert, !cert.isEmpty {
+            providerConfig["mtlsCert"] = cert
+        }
+
+        // Pass split-tunnel lists from App Group UserDefaults to the tunnel extension.
+        // The tunnel reads these from providerConfiguration because the extension
+        // process cannot share in-memory state with the app process.
+        let splitDefaults = UserDefaults(suiteName: "group.com.aivpn.client")
+        if let routes = splitDefaults?.stringArray(forKey: "excluded_routes"), !routes.isEmpty {
+            providerConfig["excluded_routes"] = routes.joined(separator: ",")
+        }
+        if let domains = splitDefaults?.stringArray(forKey: "excluded_domains"), !domains.isEmpty {
+            providerConfig["excluded_domains"] = domains.joined(separator: ",")
+        }
+
+        proto.providerConfiguration = providerConfig
         manager.protocolConfiguration = proto
         manager.localizedDescription = "AIVPN"
         manager.isEnabled = true
@@ -188,8 +209,8 @@ class VPNManager: ObservableObject {
 
     // MARK: - Key management (delegates to KeychainStorage)
 
-    func addKey(name: String, keyValue: String) -> Bool {
-        guard let k = KeychainStorage.shared.addKey(name: name, keyValue: keyValue) else { return false }
+    func addKey(name: String, keyValue: String, mtlsCert: String? = nil) -> Bool {
+        guard let k = KeychainStorage.shared.addKey(name: name, keyValue: keyValue, mtlsCert: mtlsCert) else { return false }
         KeychainStorage.shared.selectKey(id: k.id)
         objectWillChange.send()
         return true
@@ -200,8 +221,8 @@ class VPNManager: ObservableObject {
         objectWillChange.send()
     }
 
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
-        let ok = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+    func updateKey(id: String, name: String, keyValue: String, mtlsCert: String? = nil) -> Bool {
+        let ok = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue, mtlsCert: mtlsCert)
         if ok { objectWillChange.send() }
         return ok
     }
