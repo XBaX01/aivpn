@@ -600,6 +600,7 @@ class MainActivity : AppCompatActivity() {
         adaptiveItem.isCheckable = true
         adaptiveItem.isChecked = adaptiveOn
         popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
+        popup.menu.add(0, MENU_EXPORT_LOGS, 2, getString(R.string.export_logs))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_ADAPTIVE -> {
@@ -614,6 +615,7 @@ class MainActivity : AppCompatActivity() {
                     true
                 }
                 MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
+                MENU_EXPORT_LOGS -> { exportLogs(); true }
                 else -> false
             }
         }
@@ -623,6 +625,39 @@ class MainActivity : AppCompatActivity() {
     private fun isAdaptiveEnabled(): Boolean =
         getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
             .getBoolean("adaptive_enabled", false)
+
+    private fun exportLogs() {
+        val toast = Toast.makeText(this, getString(R.string.export_logs_collecting), Toast.LENGTH_SHORT)
+        toast.show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val pid = android.os.Process.myPid().toString()
+                val proc = Runtime.getRuntime().exec(
+                    arrayOf("logcat", "-d", "-t", "1000", "-v", "time", "--pid=$pid")
+                )
+                val logs = proc.inputStream.bufferedReader().readText()
+                proc.destroy()
+                withContext(Dispatchers.Main) {
+                    toast.cancel()
+                    if (logs.isBlank()) {
+                        Toast.makeText(this@MainActivity, getString(R.string.export_logs_empty), Toast.LENGTH_SHORT).show()
+                        return@withContext
+                    }
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "AIVPN Debug Logs")
+                        putExtra(Intent.EXTRA_TEXT, logs)
+                    }
+                    startActivity(Intent.createChooser(intent, getString(R.string.export_logs)))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    toast.cancel()
+                    Toast.makeText(this@MainActivity, getString(R.string.export_logs_error), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     private fun showDiagnosticsDialog() {
         if (!isConnected) {
@@ -722,5 +757,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val MENU_ADAPTIVE = 1001
         private const val MENU_DIAGNOSTICS = 1002
+        private const val MENU_EXPORT_LOGS = 1003
     }
 }

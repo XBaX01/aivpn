@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,9 @@ pub struct SessionRuntime {
     stop_event_fd: AtomicI32,
     upload_bytes: AtomicU64,
     download_bytes: AtomicU64,
+    // Set by stop_active_tunnel() before eventfd/socket are ready so that early
+    // init phases (DNS, socket creation) can check and bail out immediately.
+    stop_requested: AtomicBool,
 }
 
 impl SessionRuntime {
@@ -60,6 +63,7 @@ impl SessionRuntime {
             stop_event_fd: AtomicI32::new(-1),
             upload_bytes: AtomicU64::new(0),
             download_bytes: AtomicU64::new(0),
+            stop_requested: AtomicBool::new(false),
         }
     }
 }
@@ -108,18 +112,22 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
 }
 
 pub fn stop_active_tunnel() {
-    let (udp_fd, stop_fd) = ACTIVE_SESSION
-        .lock()
-        .ok()
-        .and_then(|guard| {
-            guard.as_ref().map(|s| {
+    let (udp_fd, stop_fd) = {
+        let guard = ACTIVE_SESSION.lock().ok();
+        guard
+            .as_ref()
+            .and_then(|g| g.as_ref())
+            .map(|s| {
+                // Set the flag FIRST so early init phases (DNS lookup, socket
+                // creation) see it before the eventfd/UDP fd are available.
+                s.stop_requested.store(true, Ordering::SeqCst);
                 (
                     s.udp_control_fd.swap(-1, Ordering::SeqCst),
                     s.stop_event_fd.load(Ordering::SeqCst),
                 )
             })
-        })
-        .unwrap_or((-1, -1));
+            .unwrap_or((-1, -1))
+    };
 
     if stop_fd >= 0 {
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -201,14 +209,31 @@ pub async fn run_tunnel_android(
 
     // ── 2. Create and protect UDP socket ──
     // Resolve host (async DNS so we don't block the tokio thread).
+    // Cap at 5 s so that a hanging mobile DNS doesn't permanently block
+    // the disconnect button (stop_requested is checked right after).
     let dest_str = format!("{}:{}", server_host, server_port);
-    let dest: SocketAddr = tokio::net::lookup_host(&dest_str)
-        .await
-        .map_err(|e| Error::Io(e))?
+    let dns_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host(&dest_str),
+    )
+    .await
+    .map_err(|_| Error::Session("DNS lookup timeout (5 s)".into()))?;
+    let dest: SocketAddr = dns_result
+        .map_err(Error::Io)?
         .find(|a| a.is_ipv4())
         .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
 
+    if session.stop_requested.load(Ordering::SeqCst) {
+        return Err(Error::Session("Stop requested".into()));
+    }
+
     let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest, &session)?;
+
+    if session.stop_requested.load(Ordering::SeqCst) {
+        unsafe { libc::close(raw_udp_fd) };
+        return Err(Error::Session("Stop requested".into()));
+    }
+
     let stop_signal = create_stop_signal(&session)?;
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──

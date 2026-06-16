@@ -80,4 +80,8 @@
     <string name="mtls_cert">mTLS Certificate</string>
     <string name="mtls_cert_hint">Paste base64 cert (leave empty to disable)</string>
     <string name="mtls_cert_invalid">Invalid mTLS certificate (must be 104 bytes when decoded)</string>
+    <string name="export_logs">Export Logs</string>
+    <string name="export_logs_collecting">Collecting logs…</string>
+    <string name="export_logs_empty">No logs collected</string>
+    <string name="export_logs_error">Failed to collect logs</string>
 </resources>
