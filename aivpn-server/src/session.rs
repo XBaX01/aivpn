@@ -139,6 +139,10 @@ pub struct Session {
     /// carry `ControlPayload::PoolSync` messages — any other session sending
     /// PoolSync is an attempt to inject or overwrite client records.
     pub is_pool_peer: bool,
+
+    /// Number of ServerHello messages sent for this session. Capped at
+    /// MAX_HELLO_RESENDS to prevent unbounded ed25519 signing under asymmetric loss.
+    pub server_hello_sent: u8,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -234,6 +238,7 @@ impl Session {
             mtls_ok: true,
             is_site_peer: false,
             is_pool_peer: false,
+            server_hello_sent: 0,
         }
     }
 

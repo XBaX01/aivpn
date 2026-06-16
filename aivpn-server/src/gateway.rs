@@ -2228,7 +2228,25 @@ impl Gateway {
                     // The client is still retrying the initial handshake. If the
                     // first ServerHello was lost, replying with a normal pre-ratchet
                     // ControlAck leaves the client stuck forever.
-                    self.send_server_hello(session, client_addr).await?;
+                    // Cap resends to avoid unbounded ed25519 signing under asymmetric loss.
+                    const MAX_HELLO_RESENDS: u8 = 5;
+                    let should_resend = {
+                        let mut sess = session.lock();
+                        if sess.server_hello_sent < MAX_HELLO_RESENDS {
+                            sess.server_hello_sent += 1;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if should_resend {
+                        self.send_server_hello(session, client_addr).await?;
+                    } else {
+                        warn!(
+                            "ServerHello resend limit reached for {}",
+                            hash_addr(&client_addr)
+                        );
+                    }
                     return Ok(());
                 }
                 // Send ACK

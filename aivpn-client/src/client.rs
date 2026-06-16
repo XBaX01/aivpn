@@ -623,6 +623,13 @@ impl AivpnClient {
         let mut shutdown_tick = tokio::time::interval(Duration::from_secs(1));
         shutdown_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // RX silence watchdog: detect silent path failure (NAT rebind, carrier drop).
+        // The UDP socket stays open and recv() blocks indefinitely when the path dies,
+        // so we track the last received packet and reconnect after 45 s of silence.
+        let mut rx_watchdog = tokio::time::interval(Duration::from_secs(15));
+        rx_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_rx = std::time::Instant::now();
+
         let run_res: Result<()> = loop {
             tokio::select! {
                 // Allow fast shutdown.
@@ -631,6 +638,14 @@ impl AivpnClient {
                         info!("Shutdown requested");
                         stats_task.abort();
                         break Ok(());
+                    }
+                }
+
+                _ = rx_watchdog.tick() => {
+                    const RX_SILENCE: Duration = Duration::from_secs(45);
+                    if last_rx.elapsed() > RX_SILENCE {
+                        warn!("No server traffic for {:?} — reconnecting", last_rx.elapsed());
+                        break Err(Error::Session("RX silence timeout".into()));
                     }
                 }
 
@@ -682,6 +697,7 @@ impl AivpnClient {
                         Some(p) => p,
                         None => break Err(Error::Channel("UDP->TUN channel closed".into())),
                     };
+                    last_rx = std::time::Instant::now();
 
                     if let Err(e) = self.receive_and_write_packet(&packet).await {
                         match &e {

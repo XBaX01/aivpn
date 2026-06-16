@@ -183,6 +183,10 @@ pub async fn run_upload_loop(
                         }
                     }
                 }
+                // Suppress the next keepalive tick: a keepalive immediately after
+                // real data wastes bandwidth and the server's ACK resets the peer's
+                // rx-silence timer anyway.
+                ka_interval.reset();
             }
 
             // ── Keepalive (fires only when data path is idle) ──
