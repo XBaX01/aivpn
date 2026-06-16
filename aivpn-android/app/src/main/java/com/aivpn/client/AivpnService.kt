@@ -175,6 +175,14 @@ class AivpnService : VpnService() {
                 // never held indefinitely.
                 withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }
                 serviceJob = null
+                // If a manual disconnect arrived during the cancelAndJoin window, abort
+                // the restart so we don't launch a new session that immediately hangs
+                // for TX_WITHOUT_RX_TIMEOUT (~20 s) before the watchdog kills it.
+                if (manualDisconnect) {
+                    AivpnJni.clearPendingStop()
+                    closeTunnel()
+                    return@withLock
+                }
                 // Clear any STOP_PENDING flag that stopTunnel() set while no session
                 // was active (race window between old session exit and new activation).
                 // We are about to start an intentional new connection.

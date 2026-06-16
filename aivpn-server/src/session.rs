@@ -14,7 +14,7 @@ use hex;
 use parking_lot::Mutex;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use aivpn_common::crypto::{
     self, KeyPair, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE, X25519_PUBLIC_KEY_SIZE,
@@ -27,7 +27,7 @@ use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 pub const MAX_SESSIONS: usize = 500;
 
 /// Session idle timeout (default)
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Session hard timeout — 0 means unlimited (Issue #33).
 /// Configurable via `session_timeout_secs` in server.json.
@@ -573,6 +573,11 @@ impl SessionManager {
             .filter(|e| e.value().lock().client_addr.ip() == client_addr.ip())
             .count();
         if ip_count >= 5 {
+            warn!(
+                "Per-IP session limit reached for {} ({} active sessions)",
+                client_addr.ip(),
+                ip_count
+            );
             return Err(Error::Session("Per-IP session limit reached".into()));
         }
 
