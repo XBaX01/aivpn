@@ -10,6 +10,7 @@
 - **Server: double mutex acquisition in KeyRotate handler** — `session_id` and `has_pending` were fetched in two separate `session.lock()` calls; merged into a single critical section
 - **Android: zombie coroutine kills new session via `stopSelf()`** — when `AivpnJni.runTunnel()` did not exit within the 3 s `cancelAndJoin` timeout the old `serviceJob` continued running; when it eventually exited its `finally{}` block checked `manualDisconnect` (already reset to `false` by the new `startVpn()`) and called `stopSelf()`, killing the freshly started session; `sessionId` is now captured at launch time and compared in `finally{}` — stale jobs skip `stopSelf()`
 - **Android: `serviceJob` not `@Volatile`** — `serviceJob` was written from `restartJob` on `Dispatchers.IO` and read from `stopVpn()` on the main thread without a JVM visibility guarantee; added `@Volatile`
+- **macOS: disconnect callback clobbers new session state** — `VPNManager.disconnect()` fires `sendToHelper` asynchronously; if the user pressed Connect before the callback returned, the callback unconditionally reset `isConnecting` and `isConnected` to `false`, leaving the UI showing Disconnected while the tunnel was actively connecting; a `connectGeneration` counter is now captured before the async call and compared inside the callback — stale callbacks skip the state reset
 
 ---
 
@@ -23,6 +24,7 @@
 - **Сервер: двойной захват мьютекса в обработчике KeyRotate** — `session_id` и `has_pending` считывались в двух отдельных вызовах `session.lock()`; объединено в одну критическую секцию
 - **Android: зомби-корутина убивала новую сессию через `stopSelf()`** — если `AivpnJni.runTunnel()` не завершался в течение 3 с таймаута `cancelAndJoin`, старый `serviceJob` продолжал работу; когда он завершался, его блок `finally{}` проверял `manualDisconnect` (уже сброшен в `false` новым `startVpn()`) и вызывал `stopSelf()`, убивая только что запущенную сессию; `sessionId` теперь фиксируется при запуске и сравнивается в `finally{}` — устаревшие задачи пропускают `stopSelf()`
 - **Android: `serviceJob` без аннотации `@Volatile`** — `serviceJob` записывался в `restartJob` на `Dispatchers.IO` и читался в `stopVpn()` из главного потока без гарантии видимости JVM; добавлено `@Volatile`
+- **macOS: колбэк disconnect затирал состояние новой сессии** — `VPNManager.disconnect()` вызывает `sendToHelper` асинхронно; если пользователь нажимал Connect до возврата колбэка, тот безусловно сбрасывал `isConnecting` и `isConnected` в `false`, показывая UI «Отключено» пока тоннель уже подключался; счётчик `connectGeneration` теперь фиксируется до асинхронного вызова и сравнивается внутри колбэка — устаревшие колбэки пропускают сброс состояния
 
 ---
 

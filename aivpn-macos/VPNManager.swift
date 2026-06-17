@@ -67,6 +67,7 @@ class VPNManager: ObservableObject {
 
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
+    private var connectGeneration: Int = 0
     @Published var lastError: String?
     @Published var bytesSent: Int64 = 0
     @Published var bytesReceived: Int64 = 0
@@ -374,6 +375,7 @@ class VPNManager: ObservableObject {
 
         savedKey = normalizedKey
 
+        connectGeneration += 1
         isConnecting = true
         lastError = nil
         bytesSent = 0
@@ -554,6 +556,7 @@ class VPNManager: ObservableObject {
         }
 
         let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil)
+        let disconnectGen = connectGeneration
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
             self.stopStatusPolling()
@@ -566,6 +569,9 @@ class VPNManager: ObservableObject {
             self.minimumRecordingStatusTimestamp = 0
 
             DispatchQueue.main.async {
+                // Guard: skip state reset if connect() was called again before this
+                // callback fired (stale disconnect clobbering new connection state).
+                guard self.connectGeneration == disconnectGen else { return }
                 self.isConnecting = false
                 self.isConnected = false
             }
