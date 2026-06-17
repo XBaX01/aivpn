@@ -560,8 +560,6 @@ class AivpnService : VpnService() {
         closeTunnel()
         isRunning = false
         serviceScope.cancel()
-        statusCallback = null
-        trafficCallback = null
         tileCallback = null
         instance = null
         super.onDestroy()
