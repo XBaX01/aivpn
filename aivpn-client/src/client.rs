@@ -655,6 +655,7 @@ impl AivpnClient {
             upload_pending_mask,
             self.keepalive_interval,
             self.keepalive_sent_ms.clone(),
+            self.adaptive_level.fec_n(),
         ));
 
         // Main loop: download + shutdown + upload health
@@ -773,6 +774,7 @@ impl AivpnClient {
         pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
         keepalive_interval: Duration,
         keepalive_sent_ms: Arc<AtomicU64>,
+        fec_n: u8,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
@@ -781,6 +783,8 @@ impl AivpnClient {
             bytes_sent: Arc<AtomicU64>,
             pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
             keepalive_sent_ms: Arc<AtomicU64>,
+            fec_encoder: Option<aivpn_common::fec::FecEncoder>,
+            pending_fec: Option<Vec<u8>>,
         }
 
         impl MimicryEncryptor {
@@ -802,7 +806,30 @@ impl AivpnClient {
                     .engine
                     .build_packet(&inner, &keys, &mut state.counter, None)?;
                 self.engine.update_fsm();
+
+                // FEC: feed payload; if group complete, pre-encrypt repair datagram
+                if let Some(fec) = self.fec_encoder.as_mut() {
+                    if let Some(repair) = fec.feed(payload) {
+                        let repair_payload = repair.encode();
+                        let repair_inner = build_inner_packet(
+                            InnerType::FecRepair,
+                            state.seq,
+                            &repair_payload,
+                        );
+                        state.seq = state.seq.wrapping_add(1);
+                        if let Ok(enc_repair) =
+                            self.engine.build_packet(&repair_inner, &keys, &mut state.counter, None)
+                        {
+                            self.pending_fec = Some(enc_repair);
+                        }
+                    }
+                }
+
                 Ok(pkt)
+            }
+
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.pending_fec.take()
             }
 
             fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
@@ -845,6 +872,12 @@ impl AivpnClient {
             bytes_sent,
             pending_mask,
             keepalive_sent_ms,
+            fec_encoder: if fec_n > 0 {
+                Some(aivpn_common::fec::FecEncoder::new(fec_n, 1500))
+            } else {
+                None
+            },
+            pending_fec: None,
         };
         let config = UploadConfig {
             keepalive_interval,

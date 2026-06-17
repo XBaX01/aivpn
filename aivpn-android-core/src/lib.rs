@@ -45,9 +45,10 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_host: JString<'local>,
     server_port: jint,
     server_key_arr: JByteArray<'local>,
-    psk_obj: JObject<'local>,       // nullable JByteArray
-    mtls_cert_obj: JObject<'local>, // nullable JByteArray
+    psk_obj: JObject<'local>,            // nullable JByteArray
+    mtls_cert_obj: JObject<'local>,      // nullable JByteArray
     adaptive: jboolean,
+    static_privkey_obj: JObject<'local>, // nullable JByteArray — device binding key
 ) -> jstring {
     // ── Initialize Android logcat logger once per process lifetime ──
     static LOG_INIT: std::sync::Once = std::sync::Once::new();
@@ -124,6 +125,26 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         }
     };
 
+    let static_privkey: Option<[u8; 32]> = if static_privkey_obj.is_null() {
+        None
+    } else {
+        match env.is_instance_of(&static_privkey_obj, "[B") {
+            Ok(true) => {}
+            Ok(false) => return make_str(&mut env, "static_privkey must be a byte array (byte[])"),
+            Err(e) => return make_str(&mut env, &format!("static_privkey type check failed: {e}")),
+        }
+        let arr: JByteArray<'local> = unsafe { JByteArray::from_raw(static_privkey_obj.as_raw()) };
+        match env.convert_byte_array(&arr) {
+            Ok(b) if b.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&b);
+                Some(out)
+            }
+            Ok(b) => return make_str(&mut env, &format!("static_privkey must be 32 bytes, got {}", b.len())),
+            Err(e) => return make_str(&mut env, &format!("bad static_privkey: {e}")),
+        }
+    };
+
     // ── Get JavaVM for use inside the tokio runtime ──
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
@@ -154,7 +175,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         mtls_cert,
         DEFAULT_MDH_LEN,
         adaptive != 0,
-        None, // static_privkey: Android Keystore integration in future sprint
+        static_privkey,
     ));
 
     match result {

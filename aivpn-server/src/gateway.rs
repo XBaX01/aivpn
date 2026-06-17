@@ -27,7 +27,7 @@ use aivpn_common::mask::{
 };
 use aivpn_common::network_config::VpnNetworkConfig;
 use aivpn_common::protocol::{
-    ControlPayload, ControlSubtype, InnerHeader, InnerType, MAX_PACKET_SIZE,
+    ControlPayload, InnerHeader, InnerType, MAX_PACKET_SIZE,
 };
 use libc;
 
@@ -2365,12 +2365,16 @@ impl Gateway {
                     self.send_server_hello(session, client_addr).await?;
                     return Ok(());
                 }
-                // Send ACK
-                let ack = ControlPayload::ControlAck {
-                    ack_seq: 0,
-                    ack_for_subtype: ControlSubtype::Keepalive as u8,
-                };
-                self.send_control_message(&ack, session).await?;
+                // Echo timestamp so client can compute RTT (KeepaliveAck, 0.9.0+).
+                let echo_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                self.send_control_message(
+                    &ControlPayload::KeepaliveAck { echo_ts },
+                    session,
+                )
+                .await?;
             }
             ControlPayload::TelemetryRequest { metric_flags: _ } => {
                 debug!("Telemetry request from {}", hash_addr(&client_addr));
@@ -2724,10 +2728,23 @@ impl Gateway {
                 debug!("KeepaliveAck from {} echo_ts={}", hash_addr(&client_addr), echo_ts);
             }
             ControlPayload::QualityReport { quality, rtt_ms, loss_ppm, jitter_ms } => {
-                debug!(
+                info!(
                     "QualityReport from {}: quality={} rtt={}ms loss={}ppm jitter={}ms",
                     hash_addr(&client_addr), quality, rtt_ms, loss_ppm, jitter_ms
                 );
+                // Persist quality score on the session for monitoring/metrics.
+                session.lock().client_quality = quality;
+                // Push adaptive hint back so client adjusts keepalive + FEC immediately.
+                let level = aivpn_common::quality::AdaptiveLevel::suggest(quality);
+                if let Err(e) = self
+                    .send_control_message(
+                        &ControlPayload::AdaptiveHint { level: level as u8 },
+                        session,
+                    )
+                    .await
+                {
+                    debug!("AdaptiveHint send failed: {}", e);
+                }
             }
             ControlPayload::AdaptiveHint { .. } => {
                 debug!("AdaptiveHint from client {} ignored", hash_addr(&client_addr));

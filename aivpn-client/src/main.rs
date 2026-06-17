@@ -121,6 +121,15 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub adaptive: bool,
 
+    /// Start a local DNS proxy on this address to prevent DNS leaks (e.g. 127.0.0.1:5300).
+    /// Point /etc/resolv.conf at this address after connecting.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub dns_proxy: Option<String>,
+
+    /// Upstream DNS resolver used by --dns-proxy (default: 1.1.1.1:53).
+    #[arg(long, value_name = "HOST:PORT", default_value = "1.1.1.1:53")]
+    pub dns_upstream: String,
+
     #[command(subcommand)]
     pub command: Option<ClientCommand>,
 }
@@ -756,6 +765,15 @@ async fn main() {
             proxy_listen,
             mtls_cert: mtls_cert.clone(),
         };
+
+        // Start DNS proxy before connecting so it is ready as soon as the tunnel is up.
+        let _dns_proxy_handle = args.dns_proxy.as_deref().and_then(|bind_str| {
+            let bind_addr = bind_str.parse::<std::net::SocketAddr>().ok()?;
+            let upstream_addr = args.dns_upstream.parse::<std::net::SocketAddr>().ok()?;
+            Some(aivpn_client::dns_proxy::spawn_dns_proxy(
+                aivpn_client::dns_proxy::DnsProxyConfig { listen_addr: bind_addr, upstream_addr },
+            ))
+        });
 
         match AivpnClient::new(config) {
             Ok(mut client) => {

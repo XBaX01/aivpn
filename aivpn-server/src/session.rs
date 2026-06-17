@@ -152,6 +152,8 @@ pub struct Session {
     pub last_rekey_at: Instant,
     /// Bytes sent+received since last rekey (for data-triggered rotation).
     pub bytes_since_rekey: u64,
+    /// Last reported client-side quality score (0–100). Updated via QualityReport (0.9.0+).
+    pub client_quality: u8,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -250,6 +252,7 @@ impl Session {
             pending_rekey_keypair: None,
             last_rekey_at: now,
             bytes_since_rekey: 0,
+            client_quality: 100,
         }
     }
 

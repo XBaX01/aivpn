@@ -51,6 +51,9 @@ pub trait PacketEncryptor: Send {
     /// Called after a data datagram has been successfully sent.
     /// Use this for stats tracking, FSM transitions, etc.
     fn on_data_sent(&mut self, payload_len: usize);
+    /// Return a pre-encrypted FEC repair datagram if one is ready, else None.
+    /// Called after every data send; default is a no-op.
+    fn take_fec_repair(&mut self) -> Option<Vec<u8>> { None }
 }
 
 // ──────────── Ready-made encryptor: zero MDH ────────────
@@ -164,6 +167,9 @@ pub async fn run_upload_loop(
 
                 let encrypted = enc.encrypt_data(&pkt_data)?;
                 send_tolerant(udp, &encrypted).await?;
+                if let Some(repair) = enc.take_fec_repair() {
+                    send_tolerant(udp, &repair).await?;
+                }
                 data_packet_count = data_packet_count.wrapping_add(1);
                 enc.on_data_sent(pkt_data.len());
 
@@ -173,6 +179,9 @@ pub async fn run_upload_loop(
                         Ok(pkt) => {
                             let encrypted = enc.encrypt_data(&pkt)?;
                             send_tolerant(udp, &encrypted).await?;
+                            if let Some(repair) = enc.take_fec_repair() {
+                                send_tolerant(udp, &repair).await?;
+                            }
                             data_packet_count = data_packet_count.wrapping_add(1);
                             enc.on_data_sent(pkt.len());
                         }

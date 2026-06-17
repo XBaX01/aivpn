@@ -124,6 +124,8 @@ struct ServerFileConfig {
     #[cfg(feature = "dns")]
     #[serde(default)]
     dns: Option<DnsProxyConfig>,
+    #[serde(default)]
+    allow_peer_routing: Option<bool>,
 }
 
 #[tokio::main]
@@ -371,7 +373,10 @@ async fn main() {
             .and_then(|c| c.pool.as_ref())
             .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
         audit_log: audit_logger, // H-S-8: wire audit logger into gateway
-        allow_peer_routing: args.allow_peer_routing,
+        allow_peer_routing: file_config
+            .as_ref()
+            .and_then(|c| c.allow_peer_routing)
+            .unwrap_or(args.allow_peer_routing),
     };
 
     // Spawn management API (Unix socket, optional)

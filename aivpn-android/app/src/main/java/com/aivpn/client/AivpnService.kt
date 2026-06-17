@@ -338,8 +338,14 @@ class AivpnService : VpnService() {
                 }
             }
             try {
+                // Load or generate the device private key for JIT Device Enrollment.
+                val deviceKey: ByteArray = SecureStorage.loadDeviceKey(this@AivpnService)
+                    ?: ByteArray(32).also { bytes ->
+                        java.security.SecureRandom().nextBytes(bytes)
+                        SecureStorage.saveDeviceKey(this@AivpnService, bytes)
+                    }
                 val error = withContext(Dispatchers.IO) {
-                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
+                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled(), deviceKey)
                 }
                 if (error.isNotEmpty()) throw RuntimeException(error)
             } finally {
