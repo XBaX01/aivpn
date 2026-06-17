@@ -4,6 +4,10 @@ import Combine
 class LocalizationManager: ObservableObject {
     static let shared = LocalizationManager()
 
+    private static let appVersion: String = {
+        return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }()
+
     @Published var language: String = "en" {
         didSet { UserDefaults.standard.set(language, forKey: "app_language") }
     }
@@ -54,8 +58,8 @@ class LocalizationManager: ObservableObject {
         "upload":              ["en": "Upload",   "ru": "Исходящий"],
         "download":            ["en": "Download", "ru": "Входящий"],
         "duration":            ["en": "Duration", "ru": "Длительность"],
-        "version_footer":      ["en": "v\(Bundle.main.infoDictionary?[\"CFBundleShortVersionString\"] as? String ?? \"?\") · Neural Resonance VPN",
-                                "ru": "v\(Bundle.main.infoDictionary?[\"CFBundleShortVersionString\"] as? String ?? \"?\") · Neural Resonance VPN"],
+        "version_footer":      ["en": "v\(LocalizationManager.appVersion) · Neural Resonance VPN",
+                                "ru": "v\(LocalizationManager.appVersion) · Neural Resonance VPN"],
         "error_invalid_key":   ["en": "Invalid connection key format",
                                 "ru": "Неверный формат ключа подключения"],
         "no_profiles":         ["en": "No saved keys. Tap + to add one.",

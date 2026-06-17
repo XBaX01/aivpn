@@ -110,7 +110,11 @@ pub fn assign_ipv6_to_tun(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn assign_ipv6_to_tun(_tun_name: &str, _addr: &str, _prefix_len: u8) -> std::result::Result<(), String> {
+pub fn assign_ipv6_to_tun(
+    _tun_name: &str,
+    _addr: &str,
+    _prefix_len: u8,
+) -> std::result::Result<(), String> {
     Err("assign_ipv6_to_tun is only supported on Linux".to_string())
 }
 
