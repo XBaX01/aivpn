@@ -1862,6 +1862,32 @@ impl Gateway {
                 debug!("Client '{}' authenticated via PSK", cid);
             }
 
+            // Clean up any stale sessions for the same authenticated client
+            // (handles WiFi→cellular reconnect where source IP changes but PSK is the same).
+            if let Some(ref cid) = matched_client_id {
+                let session_id = session.lock().session_id;
+                let removed_cid = self
+                    .session_manager
+                    .cleanup_old_sessions_for_client_id(cid, &session_id);
+                if let Some(ref recorder) = self.recording_manager {
+                    let socket = self.udp_socket.as_ref().unwrap().clone();
+                    let store = recorder.store();
+                    let mdh = self.mask_catalog.packet_mdh_bytes();
+                    for sid in removed_cid {
+                        let outcome = recorder.stop_for_session_end(sid);
+                        Self::handle_recording_outcome(
+                            &socket,
+                            &self.session_manager,
+                            &store,
+                            &mdh,
+                            outcome,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             self.send_server_hello(&session, client_addr).await?;
             self.send_bootstrap_descriptors(&session).await?;
 
@@ -1999,7 +2025,6 @@ impl Gateway {
         if is_ratcheted_tag {
             let session_id = session.lock().session_id;
             self.session_manager.complete_session_ratchet(&session_id);
-            self.session_manager.refresh_session_tags(&session_id);
             let sess = session.lock();
             info!(
                 "PFS ratchet complete for {} — send_counter={}, counter={}",
@@ -2251,10 +2276,10 @@ impl Gateway {
 
         match control {
             ControlPayload::KeyRotate { new_eph_pub } => {
-                let session_id = session.lock().session_id;
-                // Only process if we have a pending rekey keypair for this session
-                // (i.e., we sent KeyRotate first and the client is responding).
-                let has_pending = session.lock().pending_rekey_keypair.is_some();
+                let (session_id, has_pending) = {
+                    let sess = session.lock();
+                    (sess.session_id, sess.pending_rekey_keypair.is_some())
+                };
                 if has_pending {
                     info!(
                         "Inline rekey response from {} — committing new keys",
@@ -2262,7 +2287,7 @@ impl Gateway {
                     );
                     self.session_manager
                         .commit_session_rekey(&session_id, &new_eph_pub);
-                    self.session_manager.refresh_session_tags(&session_id);
+                    // refresh_session_tags is redundant — commit_session_rekey already updates tag_map
                 } else {
                     debug!(
                         "KeyRotate from {} ignored — no pending rekey",

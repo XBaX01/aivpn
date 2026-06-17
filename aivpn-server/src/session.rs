@@ -773,6 +773,41 @@ impl SessionManager {
         removed
     }
 
+    /// Remove old sessions for the same authenticated client (by client_id) except
+    /// the specified one. Handles reconnects from different source IPs (WiFi → cellular)
+    /// where source IP changes but PSK/client_id remains the same.
+    pub fn cleanup_old_sessions_for_client_id(
+        &self,
+        client_id: &str,
+        keep_session_id: &[u8; 16],
+    ) -> Vec<[u8; 16]> {
+        let to_remove: Vec<[u8; 16]> = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                let session = entry.value().lock();
+                if session.client_id.as_deref() == Some(client_id) && entry.key() != keep_session_id
+                {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut removed = Vec::new();
+        for session_id in to_remove {
+            info!(
+                "Removing stale session for client '{}' after successful re-handshake",
+                client_id
+            );
+            if self.remove_session(&session_id).is_some() {
+                removed.push(session_id);
+            }
+        }
+        removed
+    }
+
     /// Rollback a session that was created but failed tag validation.
     /// Restores vpn_ip_map to the old session that still owns that IP.
     pub fn rollback_failed_session(&self, session_id: &[u8; 16]) {
@@ -1017,16 +1052,19 @@ impl SessionManager {
                         drop(sess);
                         {
                             let mut s = session.lock();
+                            // Collect old tags before updating window so we can
+                            // do targeted removal (retain would create a visibility gap).
+                            let old_tags: Vec<[u8; TAG_SIZE]> =
+                                s.expected_tags.values().cloned().collect();
                             s.counter = c;
                             s.update_tag_window();
+                            for t in &old_tags {
+                                self.tag_map.remove(t);
+                            }
+                            for t in s.expected_tags.values() {
+                                self.tag_map.insert(*t, session_id);
+                            }
                         }
-                        // Refresh tag_map
-                        self.tag_map.retain(|_, id| id != &session_id);
-                        let s = session.lock();
-                        for t in s.expected_tags.values() {
-                            self.tag_map.insert(*t, session_id);
-                        }
-                        drop(s);
                         return Some((session, c, false));
                     }
                 }

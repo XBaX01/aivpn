@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.5] - 2026-06-17
+
+### Fixed
+
+- **Server: ghost session on WiFi → cellular reconnect (0 RX for 5–10 s)** — `cleanup_old_sessions_for_vpn_ip` was called with the new session's VPN IP; when the client reconnects from a different source IP (cellular vs WiFi) the old session still owns the same VPN IP but was never removed, leaving the server routing downlink to the dead WiFi address for up to 300 s; new `cleanup_old_sessions_for_client_id` removes stale sessions by PSK identity immediately on successful re-handshake
+- **Server: tag_map visibility gap in counter recovery** — `recover_session_by_tag` used `DashMap::retain()` to update the tag map, briefly removing ALL tags for a session before re-inserting new ones; concurrent packets during this window saw no matching tag and triggered unnecessary handshakes or were dropped; fixed to targeted per-tag removal that never leaves a gap
+- **Server: redundant tag_map refresh after PFS ratchet and inline rekey** — `complete_session_ratchet()` and `commit_session_rekey()` already update the tag map internally; the extra `refresh_session_tags()` calls after each caused double-writes and extra lock contention; removed
+- **Server: double mutex acquisition in KeyRotate handler** — `session_id` and `has_pending` were fetched in two separate `session.lock()` calls; merged into a single critical section
+- **Android: zombie coroutine kills new session via `stopSelf()`** — when `AivpnJni.runTunnel()` did not exit within the 3 s `cancelAndJoin` timeout the old `serviceJob` continued running; when it eventually exited its `finally{}` block checked `manualDisconnect` (already reset to `false` by the new `startVpn()`) and called `stopSelf()`, killing the freshly started session; `sessionId` is now captured at launch time and compared in `finally{}` — stale jobs skip `stopSelf()`
+- **Android: `serviceJob` not `@Volatile`** — `serviceJob` was written from `restartJob` on `Dispatchers.IO` and read from `stopVpn()` on the main thread without a JVM visibility guarantee; added `@Volatile`
+
+---
+
+## [0.8.5] — 2026-06-17
+
+### Исправлено
+
+- **Сервер: фантомная сессия при переключении WiFi→сотовая сеть (0 RX 5–10 с)** — `cleanup_old_sessions_for_vpn_ip` вызывалась с VPN IP новой сессии; при переподключении клиента с другого IP (сотовая vs WiFi) старая сессия со своим VPN IP не удалялась, и сервер продолжал слать даунлинк на мёртвый WiFi-адрес до 300 с; новая функция `cleanup_old_sessions_for_client_id` удаляет устаревшие сессии по PSK-идентификатору сразу после успешного повторного рукопожатия
+- **Сервер: разрыв видимости в tag_map при восстановлении счётчика** — `recover_session_by_tag` использовал `DashMap::retain()` для обновления карты тегов, на мгновение удаляя ВСЕ теги сессии перед вставкой новых; параллельные пакеты в этот момент не находили тег и вызывали лишние рукопожатия или дропались; исправлено точечным удалением конкретных тегов без разрыва видимости
+- **Сервер: избыточное обновление tag_map после PFS-рачета и inline rekey** — `complete_session_ratchet()` и `commit_session_rekey()` уже обновляют tag_map внутри себя; лишние вызовы `refresh_session_tags()` после каждого создавали двойные записи и лишние блокировки; удалены
+- **Сервер: двойной захват мьютекса в обработчике KeyRotate** — `session_id` и `has_pending` считывались в двух отдельных вызовах `session.lock()`; объединено в одну критическую секцию
+- **Android: зомби-корутина убивала новую сессию через `stopSelf()`** — если `AivpnJni.runTunnel()` не завершался в течение 3 с таймаута `cancelAndJoin`, старый `serviceJob` продолжал работу; когда он завершался, его блок `finally{}` проверял `manualDisconnect` (уже сброшен в `false` новым `startVpn()`) и вызывал `stopSelf()`, убивая только что запущенную сессию; `sessionId` теперь фиксируется при запуске и сравнивается в `finally{}` — устаревшие задачи пропускают `stopSelf()`
+- **Android: `serviceJob` без аннотации `@Volatile`** — `serviceJob` записывался в `restartJob` на `Dispatchers.IO` и читался в `stopVpn()` из главного потока без гарантии видимости JVM; добавлено `@Volatile`
+
+---
+
 ## [0.8.4] - 2026-06-17
 
 ### Fixed

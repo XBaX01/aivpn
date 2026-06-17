@@ -68,7 +68,7 @@ class AivpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     // Coroutine lifecycle
-    private var serviceJob: Job? = null
+    @Volatile private var serviceJob: Job? = null
     private var restartJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val serviceLifecycleMutex = Mutex()
@@ -213,7 +213,9 @@ class AivpnService : VpnService() {
                     return@withLock
                 }
 
+                val capturedSessionId = ++sessionId
                 serviceJob = serviceScope.launch {
+            val mySessionId = capturedSessionId
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
             try {
                 while (isActive && !manualDisconnect) {
@@ -263,7 +265,7 @@ class AivpnService : VpnService() {
             } finally {
                 isRunning = false
                 serviceJob = null
-                if (!manualDisconnect) {
+                if (!manualDisconnect && mySessionId == sessionId) {
                     isServiceActive = false
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
@@ -311,7 +313,6 @@ class AivpnService : VpnService() {
 
         sessionEstablished = false
         isRunning          = true
-        sessionId++     // new session — invalidates any queued upgradePendingJob
         lastStatusText = getString(R.string.status_connecting)
         val cb1 = statusCallback; cb1?.invoke(false, lastStatusText)
         updateNotification(getString(R.string.notification_connecting))
