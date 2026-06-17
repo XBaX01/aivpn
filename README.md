@@ -725,7 +725,7 @@ aivpn-client -k "aivpn://..." --adaptive
 
 ---
 
-## 0.9.0 Features
+## Connection Security & Reliability
 
 ### 3Д Device Binding (JIT Device Enrollment)
 
@@ -759,7 +759,8 @@ aivpn-server --reset-device "Alice-Phone" \
 |---|---|
 | Linux / macOS | `~/.config/aivpn/device.key` (600 perms, auto-generated) |
 | Windows | `%APPDATA%\aivpn\device.key` |
-| Android / iOS | Auto-generated per install (future: Keystore/Keychain) |
+| Android | Auto-generated per install, persisted in EncryptedSharedPreferences (Android Keystore) |
+| iOS | Auto-generated per install, persisted in Keychain (`kSecAttrAccessibleAfterFirstUnlock`) |
 
 **Scenario 1: Corporate laptop**
 
@@ -775,7 +776,7 @@ A VPN provider distributes a one-time config via a secure channel (Telegram, Sig
 
 ---
 
-### Connection Quality Score (0.9.0)
+### Connection Quality Score
 
 AIVPN continuously measures connection health and computes a **0–100 quality score**:
 
@@ -797,7 +798,7 @@ The score drives **Adaptive Mode** automatically:
 
 ---
 
-### XOR Forward Error Correction (FEC, 0.9.0)
+### XOR Forward Error Correction (FEC)
 
 On lossy links (mobile, satellite, congested ISP), AIVPN sends redundant repair packets so individual packet loss is recovered without a retransmit round-trip.
 
@@ -807,7 +808,7 @@ FEC adds 1/N bandwidth overhead (e.g., 12.5% at `Aggressive` N=8). Disabled on c
 
 ---
 
-### Client-to-Client Relay (0.9.0)
+### Client-to-Client Relay
 
 By default, VPN clients are isolated — they can only reach the internet via NAT. With `--allow-peer-routing`, the server routes packets directly between VPN clients inside the VPN subnet:
 
@@ -838,7 +839,7 @@ Or in `server.json`:
 
 ---
 
-### Local DNS Proxy (0.9.0)
+### Local DNS Proxy
 
 Prevent DNS leaks on Linux desktops without modifying system resolvers. AIVPN can start a local UDP DNS forwarder that sends all queries through the VPN tunnel:
 
