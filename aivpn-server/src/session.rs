@@ -27,7 +27,7 @@ use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 pub const MAX_SESSIONS: usize = 500;
 
 /// Session idle timeout (default)
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Session hard timeout — 0 means unlimited (Issue #33).
 /// Configurable via `session_timeout_secs` in server.json.
@@ -37,6 +37,11 @@ pub const HARD_TIMEOUT: Duration = Duration::ZERO;
 
 /// Tag window size (allow out-of-order packets)
 pub const TAG_WINDOW_SIZE: usize = 256;
+
+/// How often to rotate session keys (in-flight, no reconnect).
+pub const REKEY_INTERVAL_SECS: u64 = 120;
+/// Rotate after this many bytes even if the time interval hasn't elapsed.
+pub const REKEY_BYTES_THRESHOLD: u64 = 1_000_000;
 
 /// Session state
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,9 +145,13 @@ pub struct Session {
     /// PoolSync is an attempt to inject or overwrite client records.
     pub is_pool_peer: bool,
 
-    /// Number of ServerHello messages sent for this session. Capped at
-    /// MAX_HELLO_RESENDS to prevent unbounded ed25519 signing under asymmetric loss.
-    pub server_hello_sent: u8,
+    /// Pending keypair for in-flight key rotation. Set when server sends KeyRotate,
+    /// cleared when client responds.
+    pub pending_rekey_keypair: Option<KeyPair>,
+    /// Timestamp of the last successful key rotation (or session creation).
+    pub last_rekey_at: Instant,
+    /// Bytes sent+received since last rekey (for data-triggered rotation).
+    pub bytes_since_rekey: u64,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -238,7 +247,9 @@ impl Session {
             mtls_ok: true,
             is_site_peer: false,
             is_pool_peer: false,
-            server_hello_sent: 0,
+            pending_rekey_keypair: None,
+            last_rekey_at: now,
+            bytes_since_rekey: 0,
         }
     }
 
@@ -323,10 +334,7 @@ impl Session {
                     if bool::from(expected.ct_eq(tag)) {
                         // C-S-2: use the dedicated pre-ratchet bitmap to detect
                         // replay of old-key packets during the grace window.
-                        // counter % TAG_WINDOW_SIZE gives a unique bit per counter
-                        // in any 256-entry window; counter.min(255) collapsed all
-                        // counters ≥255 to a single bit, causing false replay drops.
-                        let bit = (*counter % TAG_WINDOW_SIZE as u64) as usize;
+                        let bit = (*counter).min(255) as usize;
                         if self.pre_ratchet_bitmap.get_bit(bit) {
                             return None; // Already received — replay
                         }
@@ -386,7 +394,7 @@ impl Session {
 
     /// Mark a pre-ratchet counter as received so it cannot be replayed (C-S-2).
     pub fn mark_pre_ratchet_received(&mut self, counter: u64) {
-        let bit = (counter % TAG_WINDOW_SIZE as u64) as usize;
+        let bit = counter.min(255) as usize;
         self.pre_ratchet_bitmap.set_bit(bit);
     }
 
@@ -576,11 +584,6 @@ impl SessionManager {
             .filter(|e| e.value().lock().client_addr.ip() == client_addr.ip())
             .count();
         if ip_count >= 5 {
-            warn!(
-                "Per-IP session limit reached for {} ({} active sessions)",
-                client_addr.ip(),
-                ip_count
-            );
             return Err(Error::Session("Per-IP session limit reached".into()));
         }
 
@@ -986,9 +989,8 @@ impl SessionManager {
     ) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
         let current_tw =
             crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
-        // Search up to 1024 counters ahead — enough to recover from drift
-        // without becoming a per-packet CPU DoS (65536 × 3 BLAKE3 ops per session).
-        const RECOVERY_RANGE: u64 = 1024;
+        // Search up to 65536 counters ahead from the session's last known counter
+        const RECOVERY_RANGE: u64 = 65536;
 
         for entry in self.sessions.iter() {
             let session = entry.value().clone();
@@ -1304,5 +1306,112 @@ impl SessionManager {
         packet.extend_from_slice(&ciphertext);
 
         Ok(packet)
+    }
+
+    /// Scan all sessions that need rekeying (time or bytes threshold exceeded).
+    /// Generates a new ephemeral keypair per session, stores it as pending, and
+    /// returns a Vec of (session_id, new_server_eph_pub) for the caller to send
+    /// KeyRotate control messages.
+    pub fn start_rekeying_sessions(&self) -> Vec<([u8; 16], [u8; X25519_PUBLIC_KEY_SIZE])> {
+        let now = Instant::now();
+        let mut due: Vec<([u8; 16], [u8; X25519_PUBLIC_KEY_SIZE])> = Vec::new();
+
+        for entry in self.sessions.iter() {
+            let session_id = *entry.key();
+            let mut sess = entry.value().lock();
+
+            // Skip pool/site peers, sessions still pending ratchet, or already pending rekey.
+            if sess.is_pool_peer || sess.is_site_peer || !sess.is_ratcheted {
+                continue;
+            }
+            if sess.pending_rekey_keypair.is_some() {
+                continue;
+            }
+
+            let time_due = now.duration_since(sess.last_rekey_at).as_secs() >= REKEY_INTERVAL_SECS;
+            let bytes_due = sess.bytes_since_rekey >= REKEY_BYTES_THRESHOLD;
+            if !time_due && !bytes_due {
+                continue;
+            }
+
+            let server_rekey_kp = crypto::KeyPair::generate();
+            let new_eph_pub = server_rekey_kp.public_key_bytes();
+            sess.pending_rekey_keypair = Some(server_rekey_kp);
+            due.push((session_id, new_eph_pub));
+        }
+
+        due
+    }
+
+    /// Complete an in-flight rekey: client has replied with its new ephemeral public key.
+    /// Derives new session keys, swaps tag maps, resets counters.
+    pub fn commit_session_rekey(
+        &self,
+        session_id: &[u8; 16],
+        client_rekey_eph_pub: &[u8; X25519_PUBLIC_KEY_SIZE],
+    ) {
+        let session = match self.sessions.get(session_id) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        let mut sess = session.lock();
+
+        let server_rekey_kp = match sess.pending_rekey_keypair.take() {
+            Some(kp) => kp,
+            None => {
+                warn!("commit_session_rekey: no pending keypair for session");
+                return;
+            }
+        };
+
+        let dh_rekey = match server_rekey_kp.compute_shared(client_rekey_eph_pub) {
+            Ok(dh) => dh,
+            Err(e) => {
+                warn!("commit_session_rekey: DH failed: {}", e);
+                return;
+            }
+        };
+
+        // Mirror exactly what the client does:
+        // new_keys = derive_session_keys(&dh_rekey, Some(&current_session_key), &client_rekey_eph_pub)
+        let current_session_key = sess.keys.session_key;
+        let new_keys = crypto::derive_session_keys(
+            &dh_rekey,
+            Some(&current_session_key),
+            client_rekey_eph_pub,
+        );
+
+        // Remove old tags from global tag_map.
+        for tag in sess.expected_tags.values() {
+            self.tag_map.remove(tag);
+        }
+        for tag in sess.ratcheted_expected_tags.values() {
+            self.tag_map.remove(tag);
+        }
+
+        // Preserve old keys for 2-second grace window (in-flight packets from client).
+        sess.pre_ratchet_tags = std::mem::take(&mut sess.expected_tags);
+        sess.pre_ratchet_expire = Some(Instant::now() + std::time::Duration::from_secs(2));
+        sess.pre_ratchet_bitmap.clear();
+
+        // Install new keys.
+        sess.keys = new_keys;
+        sess.counter = 0;
+        sess.send_counter = 0;
+        sess.tag_window_base = 0;
+        sess.received_bitmap.clear();
+        sess.bytes_since_rekey = 0;
+        sess.last_rekey_at = Instant::now();
+        sess.ratcheted_expected_tags.clear();
+
+        // Compute new tag window and insert into global map.
+        sess.update_tag_window();
+        let new_sid = *session_id;
+        for tag in sess.expected_tags.values() {
+            self.tag_map.insert(*tag, new_sid);
+        }
+
+        info!("Session inline rekey complete (new keys installed)");
     }
 }

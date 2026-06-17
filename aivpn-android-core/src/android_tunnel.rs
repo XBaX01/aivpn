@@ -41,7 +41,6 @@ const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // after only a few kilobytes of outbound browser traffic.
 const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(20);
 const TX_WITHOUT_RX_MIN_BYTES: u64 = 64 * 1024;
-const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 
 // ──────────── Session runtime (read by JNI exports in lib.rs) ────────────
@@ -215,8 +214,7 @@ pub fn get_active_download_bytes() -> u64 {
 // ──────────── Entry point ────────────
 
 /// Blocking async function that runs the whole tunnel session.
-/// Returns Ok(()) only on REKEY_INTERVAL expiry (clean reconnect trigger).
-/// All errors cause the Kotlin reconnect loop to kick in.
+/// Returns Err on any tunnel failure (causes the Kotlin reconnect loop to kick in).
 pub async fn run_tunnel_android(
     vm: JavaVM,
     vpn_service: GlobalRef,
@@ -493,9 +491,6 @@ pub async fn run_tunnel_android(
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
     });
-    let rekey_sleep = time::sleep(REKEY_INTERVAL);
-    tokio::pin!(rekey_sleep);
-
     // Periodic check for RX silence — uses a proper Interval so it's not
     // recreated every select! iteration (which would reset the timer).
     let mut rx_check = time::interval(RX_CHECK_INTERVAL);
@@ -517,14 +512,6 @@ pub async fn run_tunnel_android(
                 tun_reader_task.abort();
                 upload_sender_task.abort();
                 return Err(Error::Session("Tunnel stop requested".into()));
-            }
-
-            // ── Rekey (triggers fresh reconnect in Kotlin) ──
-            _ = &mut rekey_sleep => {
-                log::info!("aivpn: rekey interval — signalling reconnect");
-                tun_reader_task.abort();
-                upload_sender_task.abort();
-                return Ok(());
             }
 
             // ── UDP → TUN (inbound from server) ──
@@ -580,6 +567,42 @@ pub async fn run_tunnel_android(
                     }
                     // Any successfully decoded packet (including keepalive responses)
                     // proves the link is alive.
+                    // Handle server-initiated inline rekey (PFS without reconnect).
+                    if decoded.header.inner_type == InnerType::Control {
+                        if let Ok(ctrl) = ControlPayload::decode(&decoded.payload) {
+                            if let ControlPayload::KeyRotate { new_eph_pub } = ctrl {
+                                let rekey_kp = KeyPair::generate();
+                                if let Ok(dh) = rekey_kp.compute_shared(&new_eph_pub) {
+                                    let new_keys = derive_session_keys(
+                                        &dh,
+                                        Some(&keys.session_key),
+                                        &rekey_kp.public_key_bytes(),
+                                    );
+                                    // Respond with our new ephemeral pub using OLD keys
+                                    if let Ok(resp) = ControlPayload::KeyRotate {
+                                        new_eph_pub: rekey_kp.public_key_bytes()
+                                    }.encode() {
+                                        let inner = build_inner_packet(
+                                            InnerType::Control, send_seq, &resp,
+                                        );
+                                        if let Ok(pkt) = build_random_mdh_packet(
+                                            &keys, &mut send_counter, &inner, None, mdh_len,
+                                        ) {
+                                            let _ = udp.send(&pkt).await;
+                                            send_seq = send_seq.wrapping_add(1);
+                                        }
+                                    }
+                                    // Transition: old keys for receive 2 s, new keys for send
+                                    transition_recv_keys = Some(keys.clone());
+                                    transition_recv_deadline =
+                                        Some(Instant::now() + Duration::from_secs(2));
+                                    transition_recv_win.reset();
+                                    keys = new_keys;
+                                    log::info!("aivpn: inline PFS rekey complete");
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

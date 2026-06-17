@@ -904,6 +904,38 @@ impl Gateway {
             info!("Session cleanup / recording auto-finish task spawned (5s interval)");
         }
 
+        // Spawn periodic inline rekey task (PFS key rotation every 30s check, 120s actual)
+        {
+            let sessions = self.session_manager.clone();
+            let socket = self.udp_socket.as_ref().unwrap().clone();
+            let mdh = self.mask_catalog.packet_mdh_bytes();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let due = sessions.start_rekeying_sessions();
+                    for (session_id, new_eph_pub) in due {
+                        if let Some(session) = sessions.get_session(&session_id) {
+                            let payload =
+                                aivpn_common::protocol::ControlPayload::KeyRotate { new_eph_pub };
+                            if let Err(e) = Self::send_control_message_via(
+                                socket.as_ref(),
+                                &mdh,
+                                &payload,
+                                &session,
+                            )
+                            .await
+                            {
+                                warn!("Inline rekey: failed to send KeyRotate to session: {}", e);
+                            } else {
+                                info!("Inline rekey: KeyRotate sent to session");
+                            }
+                        }
+                    }
+                }
+            });
+            info!("Inline rekey task spawned (30s check interval, 120s rekey period)");
+        }
+
         // Spawn client DB stats flush task (persist traffic stats every 5 min)
         if let Some(ref db) = self.client_db {
             let db = db.clone();
@@ -2034,6 +2066,9 @@ impl Gateway {
             sess.pending_bytes_in = sess
                 .pending_bytes_in
                 .saturating_add(packet_data.len() as u64);
+            sess.bytes_since_rekey = sess
+                .bytes_since_rekey
+                .saturating_add(packet_data.len() as u64);
             if sess.pending_bytes_in >= 16 * 1024 || sess.pending_bytes_out >= 16 * 1024 {
                 if let Some(cid) = sess.client_id.clone() {
                     client_db_flush = Some((cid, sess.pending_bytes_in, sess.pending_bytes_out));
@@ -2062,15 +2097,17 @@ impl Gateway {
         // Record traffic stats for neural resonance (Patent 1)
         if self.config.enable_neural {
             let packet_size = packet_data.len() as u16;
+            // Compute byte-level entropy of the encrypted payload
+            let entropy = Self::compute_entropy(encrypted_payload);
+            // Compute real IAT from session's last_seen timestamp
+            let iat_ms = {
+                let sess = session.lock();
+                let elapsed = sess.last_seen.elapsed();
+                elapsed.as_secs_f64() * 1000.0
+            };
             // Neural model update is expensive under lock. Sampling every 16th packet
             // preserves trends while reducing lock contention in the receive hot path.
-            // compute_entropy and IAT are inside the gate so they only run when needed.
             if counter & 0x0f == 0 {
-                let entropy = Self::compute_entropy(encrypted_payload);
-                let iat_ms = {
-                    let sess = session.lock();
-                    sess.last_seen.elapsed().as_secs_f64() * 1000.0
-                };
                 self.neural_module
                     .lock()
                     // is_rx=true: packet from client → server (uplink direction)
@@ -2213,9 +2250,25 @@ impl Gateway {
         let control = ControlPayload::decode(payload)?;
 
         match control {
-            ControlPayload::KeyRotate { new_eph_pub: _ } => {
-                info!("Key rotation request from {}", hash_addr(&client_addr));
-                // TODO: Implement key rotation
+            ControlPayload::KeyRotate { new_eph_pub } => {
+                let session_id = session.lock().session_id;
+                // Only process if we have a pending rekey keypair for this session
+                // (i.e., we sent KeyRotate first and the client is responding).
+                let has_pending = session.lock().pending_rekey_keypair.is_some();
+                if has_pending {
+                    info!(
+                        "Inline rekey response from {} — committing new keys",
+                        hash_addr(&client_addr)
+                    );
+                    self.session_manager
+                        .commit_session_rekey(&session_id, &new_eph_pub);
+                    self.session_manager.refresh_session_tags(&session_id);
+                } else {
+                    debug!(
+                        "KeyRotate from {} ignored — no pending rekey",
+                        hash_addr(&client_addr)
+                    );
+                }
             }
             ControlPayload::MaskUpdate { .. } => {
                 warn!("Unexpected MASK_UPDATE from client");
@@ -2226,25 +2279,7 @@ impl Gateway {
                     // The client is still retrying the initial handshake. If the
                     // first ServerHello was lost, replying with a normal pre-ratchet
                     // ControlAck leaves the client stuck forever.
-                    // Cap resends to avoid unbounded ed25519 signing under asymmetric loss.
-                    const MAX_HELLO_RESENDS: u8 = 5;
-                    let should_resend = {
-                        let mut sess = session.lock();
-                        if sess.server_hello_sent < MAX_HELLO_RESENDS {
-                            sess.server_hello_sent += 1;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if should_resend {
-                        self.send_server_hello(session, client_addr).await?;
-                    } else {
-                        warn!(
-                            "ServerHello resend limit reached for {}",
-                            hash_addr(&client_addr)
-                        );
-                    }
+                    self.send_server_hello(session, client_addr).await?;
                     return Ok(());
                 }
                 // Send ACK

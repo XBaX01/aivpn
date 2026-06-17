@@ -41,7 +41,6 @@ const RX_SILENCE: Duration = Duration::from_secs(120);
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(20);
 const TX_WITHOUT_RX_MIN_BYTES: u64 = 64 * 1024;
-const REKEY_INTERVAL: Duration = Duration::from_secs(1800);
 const CHANNEL_SIZE: usize = 8192;
 
 // ──────────── Session runtime ────────────
@@ -362,8 +361,6 @@ pub async fn run_tunnel_ios(
         }
     });
 
-    let rekey = time::sleep(REKEY_INTERVAL);
-    tokio::pin!(rekey);
     let mut rx_check = time::interval(RX_CHECK_INTERVAL);
     rx_check.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -372,21 +369,8 @@ pub async fn run_tunnel_ios(
             biased;
 
             _ = wait_for_stop(&stop_signal) => {
-                // Send Shutdown before closing so the server drops the session
-                // immediately instead of waiting for the 30-second ghost timeout.
-                if let Ok(shutdown_bytes) = ControlPayload::Shutdown { reason: 0 }.encode() {
-                    let inner = build_inner_packet(InnerType::Control, send_seq, &shutdown_bytes);
-                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
-                        let _ = udp.send(&pkt).await;
-                    }
-                }
                 tun_reader.abort(); upload_task.abort();
                 return Err(Error::Session("Stop requested".into()));
-            }
-
-            _ = &mut rekey => {
-                tun_reader.abort(); upload_task.abort();
-                return Ok(());
             }
 
             r = udp.recv(&mut udp_buf) => {
@@ -405,6 +389,40 @@ pub async fn run_tunnel_ios(
                     if d.header.inner_type == InnerType::Data && !d.payload.is_empty() {
                         tun_async_write(&tun, &d.payload).await?;
                         session.download_bytes.fetch_add(d.payload.len() as u64, Ordering::Relaxed);
+                    }
+                    if d.header.inner_type == InnerType::Control {
+                        if let Ok(ctrl) = aivpn_common::protocol::ControlPayload::decode(&d.payload) {
+                            if let aivpn_common::protocol::ControlPayload::KeyRotate { new_eph_pub } = ctrl {
+                                log::info!("aivpn: inline rekey — KeyRotate received");
+                                let client_rekey_kp = aivpn_common::crypto::KeyPair::generate();
+                                let client_rekey_pub = client_rekey_kp.public_key_bytes();
+                                if let Ok(dh_rekey) = client_rekey_kp.compute_shared(&new_eph_pub) {
+                                    let current_key = keys.session_key;
+                                    let new_keys = aivpn_common::crypto::derive_session_keys(
+                                        &dh_rekey,
+                                        Some(&current_key),
+                                        &client_rekey_pub,
+                                    );
+                                    let response_payload = aivpn_common::protocol::ControlPayload::KeyRotate {
+                                        new_eph_pub: client_rekey_pub,
+                                    };
+                                    if let Ok(resp_bytes) = response_payload.encode() {
+                                        let inner = build_inner_packet(InnerType::Control, send_seq, &resp_bytes);
+                                        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                                            send_seq = send_seq.wrapping_add(1);
+                                            let _ = udp.send(&pkt).await;
+                                        }
+                                    }
+                                    tr_keys = Some(keys.clone());
+                                    tr_deadline = Some(Instant::now() + Duration::from_secs(2));
+                                    tr_win = std::mem::take(&mut recv_win);
+                                    keys = new_keys;
+                                    send_counter = 0;
+                                    recv_win.reset();
+                                    log::info!("aivpn: inline rekey complete");
+                                }
+                            }
+                        }
                     }
                 }
             }
