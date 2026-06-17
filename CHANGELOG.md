@@ -1,21 +1,5 @@
 # Changelog
 
-## [0.8.6] - 2026-06-17
-
-### Fixed
-
-- **Android: regression — `stopSelf()` always called on session cancellation** — the `sessionId` guard introduced in 0.8.5 was placed *after* `cancelAndJoin()`, so when the old `serviceJob`'s `finally{}` block fired during cancellation `sessionId` had not yet been incremented; the guard `mySessionId == sessionId` was always `true`, causing `stopSelf()` to kill the service on every reconnect trigger (network switch, periodic reconnect); `val capturedSessionId = ++sessionId` is now incremented *before* `cancelAndJoin()` so cancelled jobs correctly see a mismatched `sessionId` and skip `stopSelf()`
-
----
-
-## [0.8.6] — 2026-06-17
-
-### Исправлено
-
-- **Android: регрессия — `stopSelf()` всегда вызывался при отмене сессии** — guard `sessionId`, добавленный в 0.8.5, был расположен *после* `cancelAndJoin()`, поэтому когда блок `finally{}` старого `serviceJob` срабатывал во время отмены, `sessionId` ещё не был увеличен; условие `mySessionId == sessionId` всегда было истинным, и `stopSelf()` убивал сервис при каждом триггере переподключения (смена сети, периодический реконнект); `val capturedSessionId = ++sessionId` теперь вызывается *до* `cancelAndJoin()`, так что отменённые задачи корректно видят несовпадающий `sessionId` и не вызывают `stopSelf()`
-
----
-
 ## [0.8.5] - 2026-06-17
 
 ### Fixed
@@ -27,6 +11,7 @@
 - **Android: zombie coroutine kills new session via `stopSelf()`** — when `AivpnJni.runTunnel()` did not exit within the 3 s `cancelAndJoin` timeout the old `serviceJob` continued running; when it eventually exited its `finally{}` block checked `manualDisconnect` (already reset to `false` by the new `startVpn()`) and called `stopSelf()`, killing the freshly started session; `sessionId` is now captured at launch time and compared in `finally{}` — stale jobs skip `stopSelf()`
 - **Android: `serviceJob` not `@Volatile`** — `serviceJob` was written from `restartJob` on `Dispatchers.IO` and read from `stopVpn()` on the main thread without a JVM visibility guarantee; added `@Volatile`
 - **macOS: disconnect callback clobbers new session state** — `VPNManager.disconnect()` fires `sendToHelper` asynchronously; if the user pressed Connect before the callback returned, the callback unconditionally reset `isConnecting` and `isConnected` to `false`, leaving the UI showing Disconnected while the tunnel was actively connecting; a `connectGeneration` counter is now captured before the async call and compared inside the callback — stale callbacks skip the state reset
+- **Android: `++sessionId` placed after `cancelAndJoin` — guard fires on every reconnect** — in the initial 0.8.5 implementation `val capturedSessionId = ++sessionId` was placed *after* `withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }`; when the old `serviceJob`'s `finally{}` block fired during cancellation `sessionId` had not yet been incremented, so `mySessionId == sessionId` was always `true` and `stopSelf()` killed the service on every reconnect trigger (network switch, periodic rekey), causing 0 RX on cellular and a broken disconnect button; `++sessionId` is now incremented *before* `cancelAndJoin()`
 
 ---
 
@@ -41,6 +26,7 @@
 - **Android: зомби-корутина убивала новую сессию через `stopSelf()`** — если `AivpnJni.runTunnel()` не завершался в течение 3 с таймаута `cancelAndJoin`, старый `serviceJob` продолжал работу; когда он завершался, его блок `finally{}` проверял `manualDisconnect` (уже сброшен в `false` новым `startVpn()`) и вызывал `stopSelf()`, убивая только что запущенную сессию; `sessionId` теперь фиксируется при запуске и сравнивается в `finally{}` — устаревшие задачи пропускают `stopSelf()`
 - **Android: `serviceJob` без аннотации `@Volatile`** — `serviceJob` записывался в `restartJob` на `Dispatchers.IO` и читался в `stopVpn()` из главного потока без гарантии видимости JVM; добавлено `@Volatile`
 - **macOS: колбэк disconnect затирал состояние новой сессии** — `VPNManager.disconnect()` вызывает `sendToHelper` асинхронно; если пользователь нажимал Connect до возврата колбэка, тот безусловно сбрасывал `isConnecting` и `isConnected` в `false`, показывая UI «Отключено» пока тоннель уже подключался; счётчик `connectGeneration` теперь фиксируется до асинхронного вызова и сравнивается внутри колбэка — устаревшие колбэки пропускают сброс состояния
+- **Android: `++sessionId` стоял после `cancelAndJoin` — guard срабатывал при каждом переподключении** — в исходной реализации 0.8.5 `val capturedSessionId = ++sessionId` располагался *после* `withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }`; когда блок `finally{}` старого `serviceJob` срабатывал во время отмены, `sessionId` ещё не был увеличен, поэтому `mySessionId == sessionId` всегда был истинным и `stopSelf()` убивал сервис при каждом триггере переподключения (смена сети, периодический rekey), вызывая 0 RX на сотовой сети и зависание кнопки отключения; `++sessionId` теперь вызывается *до* `cancelAndJoin()`
 
 ---
 
