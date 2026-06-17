@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.6] - 2026-06-17
+
+### Fixed
+
+- **Android: regression — `stopSelf()` always called on session cancellation** — the `sessionId` guard introduced in 0.8.5 was placed *after* `cancelAndJoin()`, so when the old `serviceJob`'s `finally{}` block fired during cancellation `sessionId` had not yet been incremented; the guard `mySessionId == sessionId` was always `true`, causing `stopSelf()` to kill the service on every reconnect trigger (network switch, periodic reconnect); `val capturedSessionId = ++sessionId` is now incremented *before* `cancelAndJoin()` so cancelled jobs correctly see a mismatched `sessionId` and skip `stopSelf()`
+
+---
+
+## [0.8.6] — 2026-06-17
+
+### Исправлено
+
+- **Android: регрессия — `stopSelf()` всегда вызывался при отмене сессии** — guard `sessionId`, добавленный в 0.8.5, был расположен *после* `cancelAndJoin()`, поэтому когда блок `finally{}` старого `serviceJob` срабатывал во время отмены, `sessionId` ещё не был увеличен; условие `mySessionId == sessionId` всегда было истинным, и `stopSelf()` убивал сервис при каждом триггере переподключения (смена сети, периодический реконнект); `val capturedSessionId = ++sessionId` теперь вызывается *до* `cancelAndJoin()`, так что отменённые задачи корректно видят несовпадающий `sessionId` и не вызывают `stopSelf()`
+
+---
+
 ## [0.8.5] - 2026-06-17
 
 ### Fixed

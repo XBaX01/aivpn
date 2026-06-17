@@ -175,6 +175,9 @@ class AivpnService : VpnService() {
         restartJob = serviceScope.launch {
             serviceLifecycleMutex.withLock {
                 AivpnJni.stopTunnel()
+                // Increment before cancelAndJoin so that the old job's finally{}
+                // sees sessionId != mySessionId and does NOT call stopSelf().
+                val capturedSessionId = ++sessionId
                 // AivpnJni.runTunnel() is a blocking native call — Kotlin coroutine
                 // cancellation cannot interrupt it.  Give it 3 s to exit after
                 // stopTunnel() fired the eventfd; proceed regardless so the mutex is
@@ -212,8 +215,6 @@ class AivpnService : VpnService() {
                 if (manualDisconnect) {
                     return@withLock
                 }
-
-                val capturedSessionId = ++sessionId
                 serviceJob = serviceScope.launch {
             val mySessionId = capturedSessionId
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
