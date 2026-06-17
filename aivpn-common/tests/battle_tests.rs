@@ -279,7 +279,10 @@ fn battle_control_payload_keepalive_roundtrip() {
     let payload = ControlPayload::Keepalive { send_ts: 12345 };
     let encoded = payload.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
-    assert!(matches!(decoded, ControlPayload::Keepalive { send_ts: 12345 }));
+    assert!(matches!(
+        decoded,
+        ControlPayload::Keepalive { send_ts: 12345 }
+    ));
 }
 
 #[test]
