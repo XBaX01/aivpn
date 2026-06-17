@@ -23,6 +23,7 @@ pub extern "C" fn aivpn_run_tunnel(
     psk: *const u8,
     cert_bytes: *const u8,
     cert_len: libc::c_int,
+    static_privkey: *const u8,
     on_ready: Option<OnReadyFn>,
     ctx: *mut libc::c_void,
 ) -> libc::c_int {
@@ -57,6 +58,15 @@ pub extern "C" fn aivpn_run_tunnel(
         Some(unsafe { std::slice::from_raw_parts(cert_bytes, 104).to_vec() })
     };
 
+    let static_privkey_opt: Option<[u8; 32]> = if static_privkey.is_null() {
+        None
+    } else {
+        // SAFETY: caller guarantees static_privkey points to 32 bytes.
+        let mut arr = [0u8; 32];
+        unsafe { arr.copy_from_slice(std::slice::from_raw_parts(static_privkey, 32)) };
+        Some(arr)
+    };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -74,7 +84,7 @@ pub extern "C" fn aivpn_run_tunnel(
         mtls_cert,
         on_ready,
         SendCtx(ctx),
-        None, // static_privkey: iOS Keychain integration in future sprint
+        static_privkey_opt,
     )) {
         Ok(()) => 0,
         Err(_) => -1,

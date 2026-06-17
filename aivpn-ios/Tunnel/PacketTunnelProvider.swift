@@ -95,35 +95,31 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return Array(data)
             }
 
+            // Load or generate the device private key for JIT Device Enrollment.
+            let deviceKey = loadOrCreateDeviceKey()
+
             let thread = Thread {
                 sKeyArr.withUnsafeBufferPointer { sKeyPtr in
-                    let certCount = Int32(certBytes?.count ?? 0)
-                    if let pskArr = pskArr {
-                        pskArr.withUnsafeBufferPointer { pskPtr in
-                            if let certBytes = certBytes {
-                                certBytes.withUnsafeBufferPointer { certPtr in
-                                    _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                          sKeyPtr.baseAddress!, pskPtr.baseAddress!,
-                                                          certPtr.baseAddress!, certCount,
-                                                          nil, nil)
-                                }
+                    deviceKey.withUnsafeBufferPointer { dkPtr in
+                        let certCount = Int32(certBytes?.count ?? 0)
+
+                        // Collapse psk/cert optionality into a single call site.
+                        func withOptional(_ arr: [UInt8]?, body: (UnsafePointer<UInt8>?) -> Void) {
+                            if let a = arr {
+                                a.withUnsafeBufferPointer { body($0.baseAddress) }
                             } else {
-                                _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                      sKeyPtr.baseAddress!, pskPtr.baseAddress!,
-                                                      nil, 0, nil, nil)
+                                body(nil)
                             }
                         }
-                    } else {
-                        if let certBytes = certBytes {
-                            certBytes.withUnsafeBufferPointer { certPtr in
+
+                        withOptional(pskArr) { pskPtr in
+                            withOptional(certBytes) { certPtr in
                                 _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                      sKeyPtr.baseAddress!, nil,
-                                                      certPtr.baseAddress!, certCount,
-                                                      nil, nil)
+                                                     sKeyPtr.baseAddress!, pskPtr,
+                                                     certPtr, certCount,
+                                                     dkPtr.baseAddress!,
+                                                     nil, nil)
                             }
-                        } else {
-                            _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                  sKeyPtr.baseAddress!, nil, nil, 0, nil, nil)
                         }
                     }
                 }
@@ -315,6 +311,50 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let b2 = (bits >>  8) & 0xFF
         let b3 =  bits        & 0xFF
         return "\(b0).\(b1).\(b2).\(b3)"
+    }
+
+    // MARK: - Device key (JIT enrollment)
+
+    /// Loads the 32-byte device private key from Keychain, generating and saving it
+    /// if this is the first run. Uses SecRandomCopyBytes for cryptographic randomness.
+    private func loadOrCreateDeviceKey() -> [UInt8] {
+        let account = "aivpn_device_privkey_v1"
+        let service = "com.aivpn.client"
+
+        let query: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrService as String: service,
+            kSecReturnData as String:  true,
+            kSecMatchLimit as String:  kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data, data.count == 32 {
+            return Array(data)
+        }
+
+        var keyBytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &keyBytes)
+        let keyData = Data(keyBytes)
+
+        let deleteQuery: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrService as String: service,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String:            kSecClassGenericPassword,
+            kSecAttrAccount as String:      account,
+            kSecAttrService as String:      service,
+            kSecValueData as String:        keyData,
+            kSecAttrAccessible as String:   kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        SecItemAdd(addQuery as CFDictionary, nil)
+
+        return keyBytes
     }
 
     // MARK: - Helpers
