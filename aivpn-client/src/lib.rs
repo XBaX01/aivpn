@@ -11,6 +11,7 @@ pub mod bench;
 pub mod bootstrap_cache;
 pub mod bootstrap_loader;
 pub mod client;
+pub mod dns_proxy;
 pub mod kill_switch;
 pub mod mimicry;
 pub mod proxy;
