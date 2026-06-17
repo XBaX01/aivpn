@@ -447,7 +447,9 @@ private func readQualityScore() -> String {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/var/run/aivpn/quality.json")),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let q = json["quality"] as? Int else { return "" }
-    return ",quality:\(q)"
+    var result = ",quality:\(q)"
+    if let a = json["adaptive"] as? Int { result += ",adaptive:\(a)" }
+    return result
 }
 
 /// Get traffic statistics

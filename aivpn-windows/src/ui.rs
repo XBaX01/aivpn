@@ -192,8 +192,28 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                 if stats.quality_score > 0 {
                     ui.add_space(32.0);
                     let q = stats.quality_score;
-                    let q_color = if q >= 80 { GREEN } else if q >= 50 { Color32::YELLOW } else { Color32::RED };
-                    ui.label(RichText::new(format!("Q: {}/100", q)).size(13.0).color(q_color));
+                    let q_color = if q >= 80 {
+                        GREEN
+                    } else if q >= 50 {
+                        Color32::YELLOW
+                    } else {
+                        Color32::RED
+                    };
+                    ui.label(
+                        RichText::new(format!("Q: {}/100", q))
+                            .size(13.0)
+                            .color(q_color),
+                    );
+                }
+                if stats.server_adaptive_level > 0 {
+                    ui.add_space(8.0);
+                    let label = match stats.server_adaptive_level {
+                        1 => "A: Light",
+                        2 => "A: Aggressive",
+                        3 => "A: Satellite",
+                        _ => "A: Off",
+                    };
+                    ui.label(RichText::new(label).size(13.0).color(Color32::LIGHT_BLUE));
                 }
             });
         });
@@ -613,7 +633,11 @@ fn draw_dns_proxy(ui: &mut egui::Ui, app: &mut AivpnApp) {
         .corner_radius(CornerRadius::same(8))
         .inner_margin(10.0)
         .show(ui, |ui| {
-            ui.label(RichText::new(t(app.lang, "dns_proxy")).size(11.0).color(DIM));
+            ui.label(
+                RichText::new(t(app.lang, "dns_proxy"))
+                    .size(11.0)
+                    .color(DIM),
+            );
             ui.add_space(2.0);
             egui::TextEdit::singleline(&mut app.dns_proxy)
                 .hint_text("127.0.0.1:5300")
@@ -664,7 +688,11 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             &exclude_routes,
                             kill_switch,
                             app.adaptive_level,
-                            if app.dns_proxy.is_empty() { None } else { Some(app.dns_proxy.as_str()) },
+                            if app.dns_proxy.is_empty() {
+                                None
+                            } else {
+                                Some(app.dns_proxy.as_str())
+                            },
                         ) {
                             app.set_error(e);
                         }
@@ -809,14 +837,16 @@ fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         .color(DIM),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let levels: &[(&str, u8)] = &[
-                        ("Off", 0), ("Light", 1), ("Aggr.", 2), ("Sat.", 3),
-                    ];
+                    let levels: &[(&str, u8)] =
+                        &[("Off", 0), ("Light", 1), ("Aggr.", 2), ("Sat.", 3)];
                     for (label, lvl) in levels.iter().rev() {
                         let selected = app.adaptive_level == *lvl;
                         let btn = egui::Button::new(
-                            RichText::new(*label).size(11.0)
-                                .color(if selected { GREEN } else { DIM })
+                            RichText::new(*label).size(11.0).color(if selected {
+                                GREEN
+                            } else {
+                                DIM
+                            }),
                         );
                         if ui.add(btn).clicked() {
                             app.adaptive_level = *lvl;

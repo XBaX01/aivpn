@@ -74,6 +74,7 @@ class VPNManager: ObservableObject {
     @Published var bytesSent: Int64 = 0
     @Published var bytesReceived: Int64 = 0
     @Published var qualityScore: Int = 0
+    @Published var serverAdaptiveLevel: Int = 0
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
@@ -802,6 +803,8 @@ class VPNManager: ObservableObject {
                         DispatchQueue.main.async { self.bytesReceived = value }
                     } else if key == "quality", let value = Int(valStr) {
                         DispatchQueue.main.async { self.qualityScore = value }
+                    } else if key == "adaptive", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.serverAdaptiveLevel = value }
                     }
                 }
             }

@@ -4,11 +4,11 @@
 //! Wire protocol is byte-for-byte identical to AivpnCrypto.kt so that both can talk to the
 //! same Rust server without any server-side changes.
 
+use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicU8, Ordering};
-use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,8 +25,10 @@ use aivpn_common::client_wire::{
 };
 use aivpn_common::crypto::{derive_session_keys, KeyPair, SessionKeys};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::MaskProfile;
+use aivpn_common::mimicry::{bootstrap_mask_for_psk, MimicryEncryptor};
 use aivpn_common::protocol::{ControlPayload, InnerType};
-use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 // ──────────── Constants ────────────
 
@@ -545,13 +547,16 @@ pub async fn run_tunnel_android(
     }
     let _ctrl_tx_guard = CtrlTxGuard;
 
+    let initial_mask = bootstrap_mask_for_psk(psk.as_ref());
+    let mask_update_slot: Arc<Mutex<Option<MaskProfile>>> = Arc::new(Mutex::new(None));
+    let mask_update_for_enc = Arc::clone(&mask_update_slot);
+
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
     let session_for_upload = session.clone();
     let upload_sender_task = tokio::spawn(async move {
-        // Wrap ZeroMdhEncryptor with UPLOAD_BYTES tracking.
         struct AndroidEncryptor {
-            inner: ZeroMdhEncryptor,
+            inner: MimicryEncryptor,
             session: Arc<SessionRuntime>,
             keepalive_sent_ms: Arc<AtomicU64>,
         }
@@ -582,7 +587,13 @@ pub async fn run_tunnel_android(
         }
 
         let mut enc = AndroidEncryptor {
-            inner: ZeroMdhEncryptor::with_mdh_len(keys_tx, send_counter, send_seq, mdh_len),
+            inner: MimicryEncryptor::new(
+                keys_tx,
+                send_counter,
+                send_seq,
+                initial_mask,
+                mask_update_for_enc,
+            ),
             session: session_for_upload,
             keepalive_sent_ms,
         };
@@ -592,8 +603,14 @@ pub async fn run_tunnel_android(
             ..Default::default()
         };
 
-        if let Err(e) =
-            upload_pipeline::run_upload_loop(&mut tun_rx, Some(&mut ctrl_rx), &udp_tx, &mut enc, &config).await
+        if let Err(e) = upload_pipeline::run_upload_loop(
+            &mut tun_rx,
+            Some(&mut ctrl_rx),
+            &udp_tx,
+            &mut enc,
+            &config,
+        )
+        .await
         {
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
@@ -746,6 +763,14 @@ pub async fn run_tunnel_android(
                                 ControlPayload::AdaptiveHint { level } => {
                                     ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
                                     log::info!("aivpn: AdaptiveHint level={} stored", level);
+                                }
+                                ControlPayload::MaskUpdate { mask_data, .. } => {
+                                    if let Some(mask) = aivpn_common::mimicry::decode_mask_update(&mask_data) {
+                                        *mask_update_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(mask);
+                                        log::info!("aivpn: MaskUpdate received — mask queued for mimicry engine");
+                                    } else {
+                                        log::warn!("aivpn: MaskUpdate decode failed — ignoring");
+                                    }
                                 }
                                 _ => {}
                             }

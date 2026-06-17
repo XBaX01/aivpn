@@ -540,7 +540,10 @@ async fn main() {
     }
 
     // Resolve effective adaptive flag: --adaptive-level N overrides bool --adaptive.
-    let adaptive_on = args.adaptive_level.unwrap_or(if args.adaptive { 1 } else { 0 }) > 0;
+    let adaptive_on = args
+        .adaptive_level
+        .unwrap_or(if args.adaptive { 1 } else { 0 })
+        > 0;
 
     // Adaptive mode monitor
     let adaptive_monitor = AdaptiveMonitor::new(AdaptiveConfig {

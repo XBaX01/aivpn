@@ -32,10 +32,10 @@ use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 use crate::bootstrap_cache;
-use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
 #[cfg(target_os = "linux")]
 use aivpn_common::kernel_accel::{xdp_attach, xdp_default_iface, xdp_detach, KernelAccel};
+use aivpn_common::mimicry::MimicryEngine;
 #[cfg(target_os = "linux")]
 use libc;
 
@@ -1257,7 +1257,12 @@ impl AivpnClient {
                     let rtt_us = now_ms.saturating_sub(sent_ms).saturating_mul(1000);
                     self.quality_tracker.record_rtt(rtt_us);
                     let score = self.quality_tracker.score();
-                    Self::write_quality_file(score, self.quality_tracker.rtt_ms(), self.quality_tracker.jitter_ms());
+                    Self::write_quality_file(
+                        score,
+                        self.quality_tracker.rtt_ms(),
+                        self.quality_tracker.jitter_ms(),
+                        self.adaptive_level as u8,
+                    );
                     let new_level = AdaptiveLevel::suggest(score);
                     if new_level != self.adaptive_level {
                         self.adaptive_level = new_level;
@@ -1379,15 +1384,24 @@ impl AivpnClient {
         self.bytes_received.load(Ordering::Relaxed)
     }
 
-    fn write_quality_file(score: u8, rtt_ms: u16, jitter_ms: u16) {
+    fn write_quality_file(score: u8, rtt_ms: u16, jitter_ms: u16, adaptive_level: u8) {
         #[cfg(windows)]
         let path = std::env::temp_dir().join("aivpn-quality.json");
         #[cfg(not(windows))]
         let path = std::path::PathBuf::from("/var/run/aivpn/quality.json");
-        let _ = std::fs::write(
-            path,
-            format!(r#"{{"quality":{},"rtt_ms":{},"jitter_ms":{}}}"#, score, rtt_ms, jitter_ms),
-        );
+        #[cfg(not(windows))]
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(
+            &path,
+            format!(
+                r#"{{"quality":{},"rtt_ms":{},"jitter_ms":{},"adaptive":{}}}"#,
+                score, rtt_ms, jitter_ms, adaptive_level
+            ),
+        ) {
+            debug!("quality file write failed: {e}");
+        }
     }
 }
 

@@ -20,6 +20,7 @@ pub struct TrafficStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub quality_score: u8,
+    pub server_adaptive_level: u8,
 }
 
 // ── Recording ───────────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ impl VpnManager {
                 bytes_sent: 0,
                 bytes_received: 0,
                 quality_score: 0,
+                server_adaptive_level: 0,
             },
             last_poll: None,
             client_binary: Self::find_client_binary(),
@@ -167,15 +169,16 @@ impl VpnManager {
         }
 
         if adaptive_level > 0 {
-            cmd.arg("--adaptive-level")
-                .arg(adaptive_level.to_string());
+            cmd.arg("--adaptive-level").arg(adaptive_level.to_string());
         }
 
         if let Some(addr) = dns_proxy {
             if !addr.is_empty() {
                 // Validate HOST:PORT — must contain a colon and only safe characters.
                 let valid = addr.contains(':')
-                    && addr.chars().all(|c| c.is_ascii_alphanumeric() || ":.[]−-".contains(c));
+                    && addr
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ":.[]−-".contains(c));
                 if !valid {
                     return Err(format!("Invalid dns-proxy address: {addr}"));
                 }
@@ -478,25 +481,33 @@ impl VpnManager {
                     if recv >= self.stats.bytes_received || self.stats.bytes_received == 0 {
                         self.stats.bytes_received = recv;
                     }
-                    self.stats.quality_score = Self::read_quality_score();
+                    let (qs, sal) = Self::read_quality_json();
+                    self.stats.quality_score = qs;
+                    self.stats.server_adaptive_level = sal;
                     return;
                 }
             }
         }
     }
 
-    fn read_quality_score() -> u8 {
+    fn read_quality_json() -> (u8, u8) {
         let path = std::env::temp_dir().join("aivpn-quality.json");
         let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut quality = 0u8;
+        let mut adaptive = 0u8;
         for part in content.split(',') {
             let kv = part.trim_matches(|c: char| c == '{' || c == '}' || c == ' ');
             if let Some(val) = kv.strip_prefix("\"quality\":") {
                 if let Ok(v) = val.trim().parse::<u8>() {
-                    return v;
+                    quality = v;
+                }
+            } else if let Some(val) = kv.strip_prefix("\"adaptive\":") {
+                if let Ok(v) = val.trim().parse::<u8>() {
+                    adaptive = v;
                 }
             }
         }
-        0
+        (quality, adaptive)
     }
 
     fn parse_stats(content: &str) -> Option<(u64, u64)> {

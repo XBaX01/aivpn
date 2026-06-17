@@ -94,6 +94,13 @@ struct ContentView: View {
                                                  vpn.qualityScore >= 50 ? .orange : .red)
                             Spacer()
                         }
+                        if vpn.serverAdaptiveLevel > 0 {
+                            let label = ["Off", "Light", "Aggressive", "Satellite"][min(vpn.serverAdaptiveLevel, 3)]
+                            Text("A: \(label)")
+                                .font(.caption)
+                                .foregroundColor(.cyan)
+                            Spacer()
+                        }
                         Text("↑ \(formatBytes(vpn.bytesSent))")
                             .font(.caption)
                             .foregroundColor(.secondary)

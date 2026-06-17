@@ -13,12 +13,11 @@ pub mod bootstrap_loader;
 pub mod client;
 pub mod dns_proxy;
 pub mod kill_switch;
-pub mod mimicry;
 pub mod proxy;
 pub mod record_cmd;
 pub mod server_pool;
 pub mod tunnel;
 
+pub use aivpn_common::mimicry::MimicryEngine;
 pub use client::AivpnClient;
-pub use mimicry::MimicryEngine;
 pub use tunnel::Tunnel;

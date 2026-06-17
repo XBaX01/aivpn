@@ -15,6 +15,9 @@ pub mod quality;
 pub mod recording;
 
 #[cfg(feature = "client-upload")]
+pub mod mimicry;
+
+#[cfg(feature = "client-upload")]
 pub mod upload_pipeline;
 
 #[cfg(unix)]
