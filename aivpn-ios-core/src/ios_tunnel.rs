@@ -166,6 +166,7 @@ pub async fn run_tunnel_ios(
     mtls_cert: Option<Vec<u8>>,
     on_ready: Option<OnReadyFn>,
     ctx: SendCtx,
+    static_privkey: Option<[u8; 32]>,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
     let _guard = activate_session(session.clone())?;
@@ -314,6 +315,24 @@ pub async fn run_tunnel_ios(
                         send_seq = send_seq.wrapping_add(1);
                         let _ = udp.send(&pkt).await;
                     }
+                }
+            }
+        }
+    }
+
+    // Device enrollment: send static key proof after ratchet (PFS-protected).
+    if let Some(priv_bytes) = static_privkey {
+        let static_kp = KeyPair::from_private_key(priv_bytes);
+        if let Ok(dh_proof) = static_kp.compute_shared(&server_key) {
+            let enrollment = ControlPayload::DeviceEnrollment {
+                static_pub: static_kp.public_key_bytes(),
+                dh_proof,
+            };
+            if let Ok(encoded) = enrollment.encode() {
+                let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
+                if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                    send_seq = send_seq.wrapping_add(1);
+                    let _ = udp.send(&pkt).await;
                 }
             }
         }

@@ -74,6 +74,7 @@ pub extern "C" fn aivpn_run_tunnel(
         mtls_cert,
         on_ready,
         SendCtx(ctx),
+        None, // static_privkey: iOS Keychain integration in future sprint
     )) {
         Ok(()) => 0,
         Err(_) => -1,

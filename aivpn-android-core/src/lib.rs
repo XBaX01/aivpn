@@ -154,6 +154,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         mtls_cert,
         DEFAULT_MDH_LEN,
         adaptive != 0,
+        None, // static_privkey: Android Keystore integration in future sprint
     ));
 
     match result {
