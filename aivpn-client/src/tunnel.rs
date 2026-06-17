@@ -11,10 +11,9 @@ use crate::kill_switch::KillSwitch;
 use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::{ClientNetworkConfig, VpnNetworkConfig, LEGACY_SERVER_VPN_IP};
 
-// Keep the full encrypted outer datagram within SAFE_OUTER_PACKET_BUDGET=1380.
-// Outer overhead is 34 bytes: TAG(16) + MDH(4) + pad_len(2) + Poly1305(16) -
-// the inner header is part of the plaintext payload, so the TUN MTU must leave
-// room for it as well.
+// Real worst-case outer overhead per packet:
+//   TAG(8) + MDH(varies, default 20) + pad_len(2) + inner_hdr(4) + random_padding(≤24) + Poly1305(16) ≈ 74 bytes.
+// Masks with MDH > ~40 bytes require a lower negotiated client MTU via ServerHello network_config.
 const WAN_SAFE_TUN_MTU: u16 = 1346;
 
 /// Tunnel configuration
@@ -1456,7 +1455,25 @@ impl Tunnel {
             ))
         })?;
 
-        writer.write_all(packet).await?;
+        // macOS utun devices require a 4-byte address-family prefix before every packet
+        // (AF_INET = 2, AF_INET6 = 30, both as big-endian u32). The read path strips this
+        // prefix; we must re-add it symmetrically on the write path.
+        #[cfg(target_os = "macos")]
+        let to_write: std::borrow::Cow<[u8]> = {
+            let af: u32 = if !packet.is_empty() && (packet[0] >> 4) == 6 {
+                30
+            } else {
+                2
+            };
+            let mut framed = Vec::with_capacity(4 + packet.len());
+            framed.extend_from_slice(&af.to_be_bytes());
+            framed.extend_from_slice(packet);
+            std::borrow::Cow::Owned(framed)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let to_write: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(packet);
+
+        writer.write_all(&to_write).await?;
         writer.flush().await?;
 
         debug!("Wrote {} bytes to TUN", packet.len());

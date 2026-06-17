@@ -81,7 +81,9 @@ fn detect_mtu() -> u16 {
         Some(mtu) => {
             // 20 IP + 8 UDP + 8 tag + 1 pad_len + 2 inner_hdr + 16 poly1305 = 55; round to 64
             let overhead: u16 = 64;
-            let effective = mtu.saturating_sub(overhead).clamp(1200, 1420);
+            let effective = mtu
+                .saturating_sub(overhead)
+                .clamp(1200, aivpn_server::nat::DEFAULT_TUN_MTU);
             info!(
                 "MTU auto-detected: physical={} (dev={}) → tun={}",
                 mtu,

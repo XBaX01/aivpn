@@ -533,7 +533,17 @@ async fn main() {
     if args.adaptive {
         info!("Adaptive mode enabled (auto MTU/keepalive tuning)");
     }
-    let _ = adaptive_monitor; // used by client loop when adaptive integration is wired
+    // Lower initial MTU for restrictive mobile networks (MTS, Megafon) when adaptive is on.
+    // The AdaptiveMonitor will step it down further if packet loss is detected.
+    let network_config = if args.adaptive {
+        aivpn_common::network_config::ClientNetworkConfig {
+            mtu: network_config.mtu.min(1200),
+            ..network_config
+        }
+    } else {
+        network_config
+    };
+    let _ = adaptive_monitor;
 
     info!("AIVPN Client v{}", env!("CARGO_PKG_VERSION"));
     info!("Connecting to server: {}", server_addr);

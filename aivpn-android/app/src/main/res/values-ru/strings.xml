@@ -80,4 +80,8 @@
     <string name="mtls_cert">mTLS-сертификат</string>
     <string name="mtls_cert_hint">Вставьте base64 сертификат (пусто — отключить)</string>
     <string name="mtls_cert_invalid">Неверный mTLS-сертификат (декодированный размер должен быть 104 байта)</string>
+    <string name="export_logs">Экспорт логов</string>
+    <string name="export_logs_collecting">Сбор логов…</string>
+    <string name="export_logs_empty">Логи не собраны</string>
+    <string name="export_logs_error">Не удалось собрать логи</string>
 </resources>

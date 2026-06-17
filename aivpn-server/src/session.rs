@@ -14,7 +14,7 @@ use hex;
 use parking_lot::Mutex;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use aivpn_common::crypto::{
     self, KeyPair, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE, X25519_PUBLIC_KEY_SIZE,
@@ -27,7 +27,7 @@ use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 pub const MAX_SESSIONS: usize = 500;
 
 /// Session idle timeout (default)
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Session hard timeout — 0 means unlimited (Issue #33).
 /// Configurable via `session_timeout_secs` in server.json.
@@ -139,6 +139,10 @@ pub struct Session {
     /// carry `ControlPayload::PoolSync` messages — any other session sending
     /// PoolSync is an attempt to inject or overwrite client records.
     pub is_pool_peer: bool,
+
+    /// Number of ServerHello messages sent for this session. Capped at
+    /// MAX_HELLO_RESENDS to prevent unbounded ed25519 signing under asymmetric loss.
+    pub server_hello_sent: u8,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -234,6 +238,7 @@ impl Session {
             mtls_ok: true,
             is_site_peer: false,
             is_pool_peer: false,
+            server_hello_sent: 0,
         }
     }
 
@@ -318,7 +323,10 @@ impl Session {
                     if bool::from(expected.ct_eq(tag)) {
                         // C-S-2: use the dedicated pre-ratchet bitmap to detect
                         // replay of old-key packets during the grace window.
-                        let bit = (*counter).min(255) as usize;
+                        // counter % TAG_WINDOW_SIZE gives a unique bit per counter
+                        // in any 256-entry window; counter.min(255) collapsed all
+                        // counters ≥255 to a single bit, causing false replay drops.
+                        let bit = (*counter % TAG_WINDOW_SIZE as u64) as usize;
                         if self.pre_ratchet_bitmap.get_bit(bit) {
                             return None; // Already received — replay
                         }
@@ -378,7 +386,7 @@ impl Session {
 
     /// Mark a pre-ratchet counter as received so it cannot be replayed (C-S-2).
     pub fn mark_pre_ratchet_received(&mut self, counter: u64) {
-        let bit = counter.min(255) as usize;
+        let bit = (counter % TAG_WINDOW_SIZE as u64) as usize;
         self.pre_ratchet_bitmap.set_bit(bit);
     }
 
@@ -568,6 +576,11 @@ impl SessionManager {
             .filter(|e| e.value().lock().client_addr.ip() == client_addr.ip())
             .count();
         if ip_count >= 5 {
+            warn!(
+                "Per-IP session limit reached for {} ({} active sessions)",
+                client_addr.ip(),
+                ip_count
+            );
             return Err(Error::Session("Per-IP session limit reached".into()));
         }
 
@@ -973,8 +986,9 @@ impl SessionManager {
     ) -> Option<(Arc<Mutex<Session>>, u64, bool)> {
         let current_tw =
             crypto::compute_time_window(crypto::current_timestamp_ms(), DEFAULT_WINDOW_MS);
-        // Search up to 65536 counters ahead from the session's last known counter
-        const RECOVERY_RANGE: u64 = 65536;
+        // Search up to 1024 counters ahead — enough to recover from drift
+        // without becoming a per-packet CPU DoS (65536 × 3 BLAKE3 ops per session).
+        const RECOVERY_RANGE: u64 = 1024;
 
         for entry in self.sessions.iter() {
             let session = entry.value().clone();

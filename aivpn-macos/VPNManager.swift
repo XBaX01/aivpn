@@ -12,6 +12,7 @@ struct HelperRequest: Codable {
     let service: String?
     let mtlsCertPath: String?
     let excludeRoutes: String?
+    let adaptiveMode: Bool?
 }
 
 struct HelperResponse: Codable {
@@ -342,7 +343,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
             if let response = response, response.status == "ok" {
@@ -365,7 +366,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveMode: Bool = false) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -393,7 +394,8 @@ class VPNManager: ObservableObject {
             binaryPath: binaryPath,
             service: nil,
             mtlsCertPath: mtlsCertPath,
-            excludeRoutes: excludeRoutes
+            excludeRoutes: excludeRoutes,
+            adaptiveMode: adaptiveMode
         )
 
         sendToHelper(request) { [weak self] response in
@@ -551,7 +553,7 @@ class VPNManager: ObservableObject {
             return
         }
 
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil)
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil)
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
             self.stopStatusPolling()
@@ -637,7 +639,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
             guard response.status == "ok" else { return }
@@ -769,7 +771,7 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil),                     timeoutSeconds: 1.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,
                   response.status == "ok" else {

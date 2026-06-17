@@ -2062,17 +2062,15 @@ impl Gateway {
         // Record traffic stats for neural resonance (Patent 1)
         if self.config.enable_neural {
             let packet_size = packet_data.len() as u16;
-            // Compute byte-level entropy of the encrypted payload
-            let entropy = Self::compute_entropy(encrypted_payload);
-            // Compute real IAT from session's last_seen timestamp
-            let iat_ms = {
-                let sess = session.lock();
-                let elapsed = sess.last_seen.elapsed();
-                elapsed.as_secs_f64() * 1000.0
-            };
             // Neural model update is expensive under lock. Sampling every 16th packet
             // preserves trends while reducing lock contention in the receive hot path.
+            // compute_entropy and IAT are inside the gate so they only run when needed.
             if counter & 0x0f == 0 {
+                let entropy = Self::compute_entropy(encrypted_payload);
+                let iat_ms = {
+                    let sess = session.lock();
+                    sess.last_seen.elapsed().as_secs_f64() * 1000.0
+                };
                 self.neural_module
                     .lock()
                     // is_rx=true: packet from client → server (uplink direction)
@@ -2228,7 +2226,25 @@ impl Gateway {
                     // The client is still retrying the initial handshake. If the
                     // first ServerHello was lost, replying with a normal pre-ratchet
                     // ControlAck leaves the client stuck forever.
-                    self.send_server_hello(session, client_addr).await?;
+                    // Cap resends to avoid unbounded ed25519 signing under asymmetric loss.
+                    const MAX_HELLO_RESENDS: u8 = 5;
+                    let should_resend = {
+                        let mut sess = session.lock();
+                        if sess.server_hello_sent < MAX_HELLO_RESENDS {
+                            sess.server_hello_sent += 1;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if should_resend {
+                        self.send_server_hello(session, client_addr).await?;
+                    } else {
+                        warn!(
+                            "ServerHello resend limit reached for {}",
+                            hash_addr(&client_addr)
+                        );
+                    }
                     return Ok(());
                 }
                 // Send ACK

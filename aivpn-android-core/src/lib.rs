@@ -11,11 +11,12 @@ mod android_tunnel;
 
 use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 use android_tunnel::{
-    get_active_download_bytes, get_active_upload_bytes, run_tunnel_android, stop_active_tunnel,
+    clear_pending_stop, get_active_download_bytes, get_active_upload_bytes, run_tunnel_android,
+    stop_active_tunnel,
 };
 
 use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::JNIEnv;
 
 // ──────────────────────────────────────────────────────────
@@ -46,7 +47,18 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_key_arr: JByteArray<'local>,
     psk_obj: JObject<'local>,       // nullable JByteArray
     mtls_cert_obj: JObject<'local>, // nullable JByteArray
+    adaptive: jboolean,
 ) -> jstring {
+    // ── Initialize Android logcat logger once per process lifetime ──
+    static LOG_INIT: std::sync::Once = std::sync::Once::new();
+    LOG_INIT.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Debug)
+                .with_tag("aivpn"),
+        );
+    });
+
     // ── Unpack arguments ──
     let host = match env.get_string(&server_host) {
         Ok(s) => String::from(s),
@@ -141,6 +153,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         psk,
         mtls_cert,
         DEFAULT_MDH_LEN,
+        adaptive != 0,
     ));
 
     match result {
@@ -157,6 +170,17 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
 #[no_mangle]
 pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopTunnel(_env: JNIEnv, _class: JClass) {
     stop_active_tunnel();
+}
+
+// clearPendingStop — called by the Kotlin restartJob right before launching a
+// new intentional connection so the STOP_PENDING flag from the cleanup-phase
+// stopTunnel() call does not propagate into the new session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_clearPendingStop(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    clear_pending_stop();
 }
 
 // ──────────────────────────────────────────────────────────

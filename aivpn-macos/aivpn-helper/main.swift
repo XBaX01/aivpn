@@ -36,6 +36,7 @@ struct HelperRequest: Codable {
     let service: String?     // service name (for record_start)
     let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
     let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
+    let adaptiveMode: Bool?   // true = lower MTU (1200) for restrictive mobile networks
 }
 
 struct HelperResponse: Codable {
@@ -154,7 +155,7 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveMode: Bool = false) -> HelperResponse {
     killExistingClient()
 
     // Resolve the requested path; fall back to default
@@ -206,6 +207,9 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         }
         args.append("--mtls-cert")
         args.append(certPath)
+    }
+    if adaptiveMode {
+        args.append("--adaptive")
     }
     if let routes = excludeRoutes {
         // Validate: each token must look like a CIDR (digits, dots, colons, slash).
@@ -606,7 +610,8 @@ func handleConnection(_ clientFD: Int32) {
                                fullTunnel: request.fullTunnel ?? false,
                                binaryPath: request.binaryPath,
                                mtlsCertPath: request.mtlsCertPath,
-                               excludeRoutes: request.excludeRoutes)
+                               excludeRoutes: request.excludeRoutes,
+                               adaptiveMode: request.adaptiveMode ?? false)
 
     case "disconnect":
         response = stopClient()

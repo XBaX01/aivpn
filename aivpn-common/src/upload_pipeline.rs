@@ -148,9 +148,8 @@ pub async fn run_upload_loop(
     enc: &mut impl PacketEncryptor,
     config: &UploadConfig,
 ) -> Result<()> {
-    let mut ka_interval = time::interval(config.keepalive_interval);
+    let mut ka_interval = time::interval_at(tokio::time::Instant::now(), config.keepalive_interval);
     let mut data_packet_count: u64 = 0;
-    ka_interval.tick().await; // skip the immediate first tick
 
     loop {
         tokio::select! {
@@ -183,6 +182,10 @@ pub async fn run_upload_loop(
                         }
                     }
                 }
+                // Suppress the next keepalive tick: a keepalive immediately after
+                // real data wastes bandwidth and the server's ACK resets the peer's
+                // rx-silence timer anyway.
+                ka_interval.reset();
             }
 
             // ── Keepalive (fires only when data path is idle) ──

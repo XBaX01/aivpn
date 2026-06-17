@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.8.3] - 2026-06-16
+
+### Fixed
+
+- **Android jitter on initial connect** — `onLost` network callback was triggering a tunnel restart during the handshake phase, causing rapid reconnect loops ("connecting → reconnecting × 3 → connected" within 2 s); fixed by guarding the abort path with `sessionEstablished`
+- **Android disconnect button broken after 2nd connection** — race window between `clearPendingStop()` and the new `serviceJob` launch allowed `stopVpn()` to fire into a null reference; a second `manualDisconnect` check inside the lifecycle mutex closes the window
+- **Android buffer size too small** — `BUF_SIZE` raised from 1500 to 2048 bytes in the JNI tunnel to prevent silent packet truncation when MDH headers push total frame size past 1500 bytes
+- **Android ghost sessions on CGNAT** — handshake retry logic rotated the X25519 keypair on every 750 ms retry, creating up to 13 server-side sessions per timeout and triggering the per-IP session cap (5) on CGNAT networks (MTS, Megafon); keypair is now rotated only once, at the 2nd retry, limiting ghost sessions to 2 maximum
+- **Android poisoned mutex silent no-op** — `ACTIVE_SESSION.lock()` used `.ok()` in the stop and cleanup paths; if the mutex was poisoned the stop signal was silently discarded; changed to `unwrap_or_else(|e| e.into_inner())` so the stop always propagates
+- **Android JNI exception not cleared after `protect()` failure** — a pending JNI exception from `VpnService.protect()` was left on the thread, potentially causing unpredictable JVM behavior on subsequent JNI calls; `exception_clear()` is now called before returning an error
+- **Android network transport change ignored during post-connect cooldown** — the 15 s cooldown that suppresses network-ID reshuffles also blocked detection of real WiFi→cellular switches, leaving the tunnel bound to the dead interface until the 20 s RX watchdog fired; `isTransportChange()` helper now distinguishes ID reshuffle from transport change and triggers immediate reconnect on the latter
+- **Android `START_STICKY` null intent creates zombie service** — when the OS restarts the service after a kill with a null intent, the service now calls `stopSelf()` if no active session was in progress, preventing a foreground service with no tunnel
+- **Android traffic callbacks fire after disconnect** — `statsJob` was launched on `serviceScope`, surviving a tunnel exit; changed to use `coroutineScope {}` inside `runTunnel()` so the poll loop is cancelled as soon as the tunnel returns
+- **Server counter-drift recovery CPU DoS** — `recover_session_by_tag` searched up to 65536 counter values per session per unrecognised packet (196k BLAKE3 ops per session under 3 time windows); reduced to 1024, sufficient for real drift recovery while eliminating the DoS amplification
+- **Server pre-ratchet anti-replay bitmap collision** — `mark_pre_ratchet_received` and the replay check used `counter.min(255)` as the bitmap index, collapsing all counters ≥255 into bit 255; fixed to `counter % TAG_WINDOW_SIZE` which gives each counter in a 256-entry window a unique bit, eliminating both false replay drops and replay acceptance for high counters
+- **Server iptables FORWARD rule leaked on restart** — the `Drop` impl deleted the `RELATED,ESTABLISHED` FORWARD rule using `-m state --state` while it was added with `-m conntrack --ctstate`; the mismatched specifier meant `iptables -D` never matched the live rule, accumulating duplicate rules across restarts; both paths now use `-m conntrack --ctstate`
+- **Server entropy computed for every packet** — `compute_entropy` (O(payload)) and an `Instant::elapsed()` call ran on every inbound packet even though the neural model only samples every 16th packet; both are now inside the `counter & 0x0f == 0` gate, reducing CPU overhead by 15/16
+
+### Removed
+
+- **Android dead code** — `bindSocketToNetwork()` (JNI method never called from Rust after network binding approach was dropped) and `isVpnNetwork()` (local helper with no remaining callers) removed from `AivpnService`
+
+### Changed
+
+- **Android port validation** — `parseServerAddr()` now validates the parsed port is in range 1–65535 before accepting it; out-of-range values fall back to the default port 443
+- Version bumped 0.8.2 → 0.8.3 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, iOS/macOS version strings
+
+---
+
+## [0.8.3] — 2026-06-16
+
+### Исправлено
+
+- **Дёргание соединения Android при первом подключении** — колбэк `onLost` запускал перезапуск тоннеля в фазе рукопожатия, вызывая быстрые циклы переподключения («подключение → переподключение × 3 → есть связь» за 2 секунды); исправлено добавлением проверки `sessionEstablished` в ветку прерывания
+- **Кнопка отключения Android не работала после 2-го подключения** — гонка между `clearPendingStop()` и запуском нового `serviceJob` позволяла `stopVpn()` отработать по нулевой ссылке; вторая проверка `manualDisconnect` внутри мьютекса жизненного цикла закрывает это окно
+- **Маленький буфер Android** — `BUF_SIZE` увеличен с 1500 до 2048 байт в JNI-тоннеле во избежание тихого обрезания пакетов, когда MDH-заголовки увеличивают кадр свыше 1500 байт
+- **Фантомные сессии Android на CGNAT** — логика повтора рукопожатия ротировала X25519-ключи при каждой попытке через 750 мс, создавая до 13 серверных сессий за таймаут и срабатывая по лимиту сессий на IP (5) в сетях CGNAT (МТС, Мегафон); ключи теперь ротируются один раз — при 2-й попытке, что ограничивает число фантомных сессий двумя
+- **Тихое игнорирование заблокированного мьютекса Android** — `ACTIVE_SESSION.lock()` использовал `.ok()` в путях остановки и очистки; при захваченном мьютексе сигнал остановки молча терялся; изменено на `unwrap_or_else(|e| e.into_inner())`, чтобы остановка всегда проходила
+- **Необработанное JNI-исключение после ошибки `protect()`** — необработанное JNI-исключение от `VpnService.protect()` оставалось в потоке, вызывая непредсказуемое поведение JVM при последующих JNI-вызовах; теперь перед возвратом ошибки вызывается `exception_clear()`
+- **Игнорирование смены типа транспорта Android в период cooldown** — 15-секундный cooldown, подавляющий переназначение сетевых ID, блокировал и обнаружение реальных переключений WiFi→LTE, оставляя тоннель привязанным к мёртвому интерфейсу до срабатывания 20-секундного сторожа RX; хелпер `isTransportChange()` теперь отличает смену ID от смены транспорта и инициирует немедленное переподключение при второй
+- **Зомби-сервис Android при `START_STICKY` + нулевой интент** — когда ОС перезапускает сервис после принудительного завершения с нулевым интентом, сервис теперь вызывает `stopSelf()`, если активной сессии не было, предотвращая форегрунд-сервис без тоннеля
+- **Колбэки трафика Android срабатывали после отключения** — `statsJob` запускался на `serviceScope` и переживал выход тоннеля; заменено на `coroutineScope {}` внутри `runTunnel()`, чтобы цикл опроса отменялся вместе с тоннелем
+- **DoS через восстановление счётчика на сервере** — `recover_session_by_tag` перебирал до 65536 значений счётчика на сессию для каждого нераспознанного пакета (196k операций BLAKE3 на сессию в трёх временных окнах); сокращено до 1024, достаточного для реального дрейфа без DoS-усиления
+- **Коллизия в bitmap анти-реплея pre-ratchet на сервере** — `mark_pre_ratchet_received` и проверка реплея использовали `counter.min(255)` как индекс бита, сваливая все счётчики ≥255 в бит 255; исправлено на `counter % TAG_WINDOW_SIZE`, дающее уникальный бит для каждого счётчика в окне из 256 значений — устранены и ложные блокировки реплея, и пропуск реальных реплеев для больших счётчиков
+- **Утечка iptables-правила FORWARD на сервере** — реализация `Drop` удаляла правило FORWARD `RELATED,ESTABLISHED` с флагом `-m state --state`, тогда как оно добавлялось с `-m conntrack --ctstate`; несоответствие спецификаторов означало, что `iptables -D` никогда не находило правило, и при каждом перезапуске накапливались дубли; оба пути теперь используют `-m conntrack --ctstate`
+- **Энтропия пакетов вычислялась для каждого пакета на сервере** — `compute_entropy` (O(payload)) и вызов `Instant::elapsed()` выполнялись для каждого входящего пакета, хотя нейронная модель сэмплирует только каждый 16-й; оба перенесены внутрь ворот `counter & 0x0f == 0`, что снижает нагрузку CPU на hot-path в 16 раз
+
+### Удалено
+
+- **Мёртвый код Android** — `bindSocketToNetwork()` (JNI-метод, не вызываемый из Rust после смены подхода к привязке сокетов) и `isVpnNetwork()` (локальный хелпер без оставшихся вызывателей) удалены из `AivpnService`
+
+### Изменено
+
+- **Валидация порта Android** — `parseServerAddr()` теперь проверяет, что распарсенный порт находится в диапазоне 1–65535; значения вне диапазона откатываются к дефолтному порту 443
+- Версия поднята с 0.8.2 до 0.8.3 во всём workspace: `Cargo.toml`, все crate-файлы, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строки версий iOS/macOS
+
+---
+
+## [0.8.2] - 2026-06-16
+
+### Fixed
+
+- **Adaptive mode was a UI-only no-op on all platforms** — the adaptive toggle saved a preference but nothing read it; adaptive mode now fully changes connection behaviour end-to-end
+- **Android adaptive mode**: TUN MTU is lowered to 1200 (from 1346) when adaptive is enabled, reducing fragmentation on restrictive mobile networks (MTS, Megafon); keepalive interval is shortened to 4 s (from 8 s) to prevent silent NAT timeouts on CGNAT cellular with short UDP state windows
+- **iOS adaptive mode**: `PacketTunnelProvider` now reads `adaptiveMode` from `providerConfiguration` and sets `NEPacketTunnelNetworkSettings.mtu = 1200` when enabled (was hardcoded 1400 regardless)
+- **macOS compile error**: `VPNManager.connect()` was missing the `adaptiveMode: Bool` parameter that `ContentView` already passed, causing a build failure; parameter added
+- **macOS helper adaptive passthrough**: `aivpn-helper` now appends `--adaptive` to the `aivpn-client` subprocess arguments when `adaptiveMode` is true; `HelperRequest` struct updated in both the app and the helper daemon
+- **CLI adaptive MTU**: `aivpn-client --adaptive` now caps the initial `ClientNetworkConfig.mtu` at 1200, overriding higher values from the connection key; `AdaptiveMonitor` is active and continues step-down under packet loss
+
+### Changed
+
+- **Android adaptive UI**: the adaptive toggle in the options popup is now a checkable menu item with a system checkmark indicator instead of text that switched between "Adaptive: ON" and "Adaptive: OFF"
+- Version bumped 0.8.1 → 0.8.2 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, macOS/iOS version strings, Android `version_footer`
+
+---
+
+## [0.8.2] — 2026-06-16
+
+### Исправлено
+
+- **Адаптивный режим был заглушкой UI на всех платформах** — переключатель сохранял настройку, но нигде она не использовалась; теперь адаптив реально меняет поведение соединения на всех уровнях
+- **Android адаптивный режим**: MTU TUN-интерфейса снижается до 1200 (с 1346) при включённом адаптиве — уменьшает фрагментацию в ограничивающих сетях (МТС, Мегафон); keepalive сокращается до 4 с (с 8 с) для предотвращения незаметных тайм-аутов NAT в сотовых CGNAT-сетях с коротким окном UDP-состояния
+- **iOS адаптивный режим**: `PacketTunnelProvider` теперь читает `adaptiveMode` из `providerConfiguration` и устанавливает `NEPacketTunnelNetworkSettings.mtu = 1200` при включённом адаптиве (ранее всегда 1400 независимо от настройки)
+- **Ошибка компиляции macOS**: `VPNManager.connect()` не принимал параметр `adaptiveMode: Bool`, который `ContentView` уже передавал — добавлен недостающий параметр
+- **Передача адаптива в macOS helper**: `aivpn-helper` теперь добавляет `--adaptive` в аргументы subprocess `aivpn-client` при `adaptiveMode = true`; структура `HelperRequest` обновлена в обоих компонентах
+- **CLI MTU в адаптивном режиме**: `aivpn-client --adaptive` теперь ограничивает начальный `ClientNetworkConfig.mtu` значением 1200, переопределяя бо́льшие значения из ключа подключения; `AdaptiveMonitor` активен и продолжает снижать MTU при потере пакетов
+
+### Изменено
+
+- **Android UI адаптива**: переключатель адаптивного режима в меню опций теперь является чекбоксом с системной галочкой вместо текста «Adaptive: ON» / «Adaptive: OFF»
+- Версия поднята с 0.8.1 до 0.8.2 во всём workspace: `Cargo.toml`, все crate-файлы, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строки версий Swift, Android `version_footer`
+
+---
+
 ## [0.8.1] - 2026-06-16
 
 ### Added

@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,10 +29,11 @@ use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdh
 
 // ──────────── Constants ────────────
 
-const BUF_SIZE: usize = 1500;
+const BUF_SIZE: usize = 2048;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8); // below typical provider NAT UDP timeout (~10-15s)
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // below typical provider NAT UDP timeout (~10-15s)
+const ADAPTIVE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2); // aggressive keepalive for restrictive mobile NAT (MTS/Megafon)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
@@ -50,6 +51,9 @@ pub struct SessionRuntime {
     stop_event_fd: AtomicI32,
     upload_bytes: AtomicU64,
     download_bytes: AtomicU64,
+    // Set by stop_active_tunnel() before eventfd/socket are ready so that early
+    // init phases (DNS, socket creation) can check and bail out immediately.
+    stop_requested: AtomicBool,
 }
 
 impl SessionRuntime {
@@ -59,11 +63,20 @@ impl SessionRuntime {
             stop_event_fd: AtomicI32::new(-1),
             upload_bytes: AtomicU64::new(0),
             download_bytes: AtomicU64::new(0),
+            stop_requested: AtomicBool::new(false),
         }
     }
 }
 
 static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
+
+// Set by stop_active_tunnel() when called while no session is active (the gap
+// between the old session's ActiveSessionGuard drop and the new session's
+// activate_session() call).  activate_session() propagates this to the new
+// session so it stops immediately.  clear_pending_stop() resets the flag
+// when a new intentional connection is about to start (called from the
+// restartJob in Kotlin after cancelAndJoin()).
+static STOP_PENDING: AtomicBool = AtomicBool::new(false);
 
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
@@ -81,11 +94,10 @@ impl Drop for ActiveSessionGuard {
             unsafe { libc::close(stop_fd) };
         }
 
-        if let Ok(mut guard) = ACTIVE_SESSION.lock() {
-            if let Some(current) = guard.as_ref() {
-                if Arc::ptr_eq(current, &self.session) {
-                    *guard = None;
-                }
+        let mut guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = guard.as_ref() {
+            if Arc::ptr_eq(current, &self.session) {
+                *guard = None;
             }
         }
     }
@@ -96,10 +108,21 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
         .lock()
         .map_err(|_| Error::Session("Active session lock poisoned".into()))?;
 
-    if guard.is_some() {
-        return Err(Error::Session(
-            "Another Android tunnel session is already active".into(),
-        ));
+    if let Some(existing) = guard.as_ref() {
+        if !existing.stop_requested.load(Ordering::SeqCst) {
+            return Err(Error::Session(
+                "Another Android tunnel session is already active".into(),
+            ));
+        }
+        // Previous session was told to stop but the Rust task has not yet
+        // exited (service destroyed before JNI returned).  Evict it so the
+        // new connection can proceed; the old ActiveSessionGuard will clear
+        // ACTIVE_SESSION only if ptr_eq matches — it won't touch ours.
+    }
+
+    // Propagate any stop that arrived while no session was active.
+    if STOP_PENDING.swap(false, Ordering::SeqCst) {
+        session.stop_requested.store(true, Ordering::SeqCst);
     }
 
     *guard = Some(session.clone());
@@ -107,18 +130,27 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
 }
 
 pub fn stop_active_tunnel() {
-    let (udp_fd, stop_fd) = ACTIVE_SESSION
-        .lock()
-        .ok()
-        .and_then(|guard| {
-            guard.as_ref().map(|s| {
+    let (udp_fd, stop_fd) = {
+        let guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|s| {
+                // Set the flag FIRST so early init phases (DNS lookup, socket
+                // creation) see it before the eventfd/UDP fd are available.
+                s.stop_requested.store(true, Ordering::SeqCst);
                 (
                     s.udp_control_fd.swap(-1, Ordering::SeqCst),
                     s.stop_event_fd.load(Ordering::SeqCst),
                 )
             })
-        })
-        .unwrap_or((-1, -1));
+            .unwrap_or_else(|| {
+                // No active session in the window between the old session's
+                // guard drop and the new session's activate_session() call.
+                // Mark the flag so the next session inherits the stop.
+                STOP_PENDING.store(true, Ordering::SeqCst);
+                (-1, -1)
+            })
+    };
 
     if stop_fd >= 0 {
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -147,6 +179,13 @@ pub fn stop_active_tunnel() {
             libc::close(udp_fd);
         };
     }
+}
+
+/// Called by the Kotlin restartJob after cancelAndJoin() — clears any pending
+/// stop that was set during the cleanup phase so the intentional new connection
+/// is not immediately stopped by a stale flag.
+pub fn clear_pending_stop() {
+    STOP_PENDING.store(false, Ordering::SeqCst);
 }
 
 pub fn get_active_upload_bytes() -> u64 {
@@ -188,6 +227,7 @@ pub async fn run_tunnel_android(
     psk: Option<[u8; 32]>,
     mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
+    adaptive: bool,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
     let _active_session_guard = activate_session(session.clone())?;
@@ -197,17 +237,39 @@ pub async fn run_tunnel_android(
     let mut dh = keypair.compute_shared(&server_key)?;
     let mut keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
 
-    // ── 2. Create and protect UDP socket ──
-    // Resolve host (async DNS so we don't block the tokio thread).
+    // ── 2. Create stop signal immediately — before DNS — so a disconnect press
+    //    during a slow/hung cellular DNS is handled instantly, not after a 5 s wait.
+    let stop_signal = create_stop_signal(&session)?;
+
+    // Resolve host; race against stop signal so disconnect is always responsive.
     let dest_str = format!("{}:{}", server_host, server_port);
-    let dest: SocketAddr = tokio::net::lookup_host(&dest_str)
-        .await
-        .map_err(|e| Error::Io(e))?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
+    let dest: SocketAddr = tokio::select! {
+        biased;
+        _ = wait_for_stop_signal(&stop_signal) => {
+            return Err(Error::Session("Stop requested".into()));
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host(&dest_str),
+        ) => {
+            result
+                .map_err(|_| Error::Session("DNS lookup timeout (5 s)".into()))?
+                .map_err(Error::Io)?
+                .find(|a| a.is_ipv4())
+                .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?
+        }
+    };
+
+    if session.stop_requested.load(Ordering::SeqCst) {
+        return Err(Error::Session("Stop requested".into()));
+    }
 
     let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest, &session)?;
-    let stop_signal = create_stop_signal(&session)?;
+
+    if session.stop_requested.load(Ordering::SeqCst) {
+        unsafe { libc::close(raw_udp_fd) };
+        return Err(Error::Session("Stop requested".into()));
+    }
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──
     let owned_tun_fd = unsafe { libc::dup(tun_fd_int) };
@@ -241,6 +303,7 @@ pub async fn run_tunnel_android(
     // ── 5. Wait for ServerHello with timeout ──
     let mut recv_buf = vec![0u8; BUF_SIZE];
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut retry_count: u32 = 0;
     let n = loop {
         let now = Instant::now();
         if now >= handshake_deadline {
@@ -266,17 +329,23 @@ pub async fn run_tunnel_android(
                 }
             }
             _ = &mut retry => {
-                // Fresh keypair on every retry: if the server already has a session
-                // from a prior attempt (ServerHello sent but never received by the
-                // client), reusing the same keypair causes retry packets to match the
-                // existing session's tag window and be treated as keepalives — the
-                // server never sends a new ServerHello. A new keypair produces new
-                // tags, forcing the server to treat it as a fresh handshake.
-                keypair = KeyPair::generate();
-                dh = keypair.compute_shared(&server_key)?;
-                keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
-                send_counter = 0;
-                send_seq = 0;
+                if session.stop_requested.load(Ordering::SeqCst) {
+                    return Err(Error::Session("Tunnel stop requested".into()));
+                }
+                retry_count += 1;
+                // Rotate keypair only once, on the 2nd retry (~1.5 s after first send).
+                // Rotating on every retry created a new server session per 750 ms (~13
+                // ghost sessions per 10 s timeout), which caused CGNAT per-IP cap (5)
+                // to be hit on the 2nd handshake attempt.  A single rotation at retry 2
+                // limits server ghost sessions to 2 max while still forcing a fresh
+                // handshake if the server lost the original one.
+                if retry_count == 2 {
+                    keypair = KeyPair::generate();
+                    dh = keypair.compute_shared(&server_key)?;
+                    keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                    send_counter = 0;
+                    send_seq = 0;
+                }
                 let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
                 let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
                 let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
@@ -295,11 +364,17 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         mdh_len,
     )?;
-    let keepalive_interval = server_network_cfg
+    let base_keepalive = server_network_cfg
+        .as_ref()
         .and_then(|c| c.keepalive_secs)
         .filter(|&s| s > 0)
         .map(|s| Duration::from_secs(s as u64))
         .unwrap_or(KEEPALIVE_INTERVAL);
+    let keepalive_interval = if adaptive {
+        base_keepalive.min(ADAPTIVE_KEEPALIVE_INTERVAL)
+    } else {
+        base_keepalive
+    };
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
         psk.as_ref(),
@@ -315,6 +390,18 @@ pub async fn run_tunnel_android(
         send_seq = send_seq.wrapping_add(1);
         udp.send(&pkt).await?;
         log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
+    }
+    // Immediately send a keepalive to prevent CGNAT outbound mapping expiry.
+    // Megafon/MTS CGNAT can expire the outbound UDP binding in the gap between the
+    // last handshake packet and the upload pipeline's first keepalive tick (which is
+    // intentionally skipped). One early packet keeps the NAT entry alive.
+    {
+        let ka = ControlPayload::Keepalive.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+            send_seq = send_seq.wrapping_add(1);
+            let _ = udp.send(&pkt).await;
+        }
     }
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
@@ -435,6 +522,7 @@ pub async fn run_tunnel_android(
             // ── UDP → TUN (inbound from server) ──
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
+                log::debug!("aivpn: udp.recv() → {} bytes", n);
                 last_rx = Instant::now();
                 upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
                 if transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -451,14 +539,19 @@ pub async fn run_tunnel_android(
                     Ok(decoded) => {
                         Some(decoded)
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!("aivpn: decode failed (primary keys): {}", e);
                         if let Some(fallback_keys) = transition_recv_keys.as_ref() {
-                            decode_packet_with_mdh_len(
+                            let r = decode_packet_with_mdh_len(
                                 &udp_buf[..n],
                                 fallback_keys,
                                 &mut transition_recv_win,
                                 mdh_len,
-                            ).ok()
+                            );
+                            if r.is_err() {
+                                log::debug!("aivpn: decode failed (fallback keys) — packet dropped");
+                            }
+                            r.ok()
                         } else {
                             None
                         }
@@ -466,11 +559,16 @@ pub async fn run_tunnel_android(
                 };
 
                 if let Some(decoded) = decoded {
+                    log::debug!("aivpn: decoded inner_type={:?} payload={} bytes",
+                        decoded.header.inner_type, decoded.payload.len());
                     if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
                         tun_async_write(&tun, &decoded.payload).await?;
                         session
                             .download_bytes
                             .fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
+                        log::debug!("aivpn: wrote {} bytes to TUN (rx total={})",
+                            decoded.payload.len(),
+                            session.download_bytes.load(Ordering::Relaxed));
                     }
                     // Any successfully decoded packet (including keepalive responses)
                     // proves the link is alive.
@@ -588,6 +686,9 @@ fn create_protected_udp_socket(
         .unwrap_or(false);
 
     if !protected {
+        // Clear any pending JNI exception from protect() before returning
+        // to avoid confusing subsequent JNI calls in the same thread.
+        let _ = guard.exception_clear();
         unsafe { libc::close(fd) };
         return Err(Error::Session("VpnService.protect() returned false".into()));
     }
@@ -609,6 +710,18 @@ fn create_protected_udp_socket(
             libc::SO_RCVBUF,
             &sock_buf as *const _ as *const libc::c_void,
             std::mem::size_of_val(&sock_buf) as libc::socklen_t,
+        );
+    }
+
+    // Bind to INADDR_ANY:0 before connect() — matches Linux client behaviour.
+    unsafe {
+        let mut any: libc::sockaddr_in = std::mem::zeroed();
+        any.sin_family = libc::AF_INET as libc::sa_family_t;
+        // port 0 and addr 0 — kernel assigns ephemeral port
+        let _ = libc::bind(
+            fd,
+            &any as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         );
     }
 
@@ -657,6 +770,21 @@ fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>>
     }
 
     session.stop_event_fd.store(control_fd, Ordering::SeqCst);
+
+    // If stop_active_tunnel() fired in the race window between the last
+    // stop_requested check and this function, the eventfd was never written
+    // to (stop_event_fd was -1 at that point). Arm it now so the main loop
+    // exits on its first poll instead of hanging forever.
+    if session.stop_requested.load(Ordering::SeqCst) {
+        let v: u64 = 1;
+        unsafe {
+            let _ = libc::write(
+                stop_fd,
+                &v as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
 
     let owned_stop_fd = unsafe { OwnedFd::from_raw_fd(stop_fd) };
     Ok(AsyncFd::new(owned_stop_fd)?)
