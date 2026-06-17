@@ -12,8 +12,9 @@ mod android_tunnel;
 use aivpn_common::client_wire::DEFAULT_MDH_LEN;
 use android_tunnel::{
     clear_pending_stop, get_active_download_bytes, get_active_upload_bytes, run_tunnel_android,
-    stop_active_tunnel, ACTIVE_QUALITY_SCORE,
+    send_control_payload, stop_active_tunnel, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE,
 };
+use aivpn_common::protocol::ControlPayload;
 
 use std::sync::atomic::Ordering;
 
@@ -240,6 +241,39 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_getDownloadBytes(
     _class: JClass,
 ) -> jlong {
     get_active_download_bytes() as jlong
+}
+
+/// Returns the last adaptive level hint received from the server via AdaptiveHint (0–3).
+/// 0 means no hint has been received yet this session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_getAdaptiveLevelHint(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    ACTIVE_ADAPTIVE_LEVEL.load(Ordering::Relaxed) as jint
+}
+
+/// Send a RecordingStart control message to the server. Returns 1 if queued, 0 if no session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_startRecording<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    service_name: JString<'local>,
+) -> jint {
+    let service = match env.get_string(&service_name) {
+        Ok(s) => String::from(s),
+        Err(_) => return 0,
+    };
+    send_control_payload(ControlPayload::RecordingStart { service }) as jint
+}
+
+/// Send a RecordingStop control message to the server.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopRecording(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    send_control_payload(ControlPayload::RecordingStop { session_id: [0u8; 16] });
 }
 
 // ──────────────────────────────────────────────────────────

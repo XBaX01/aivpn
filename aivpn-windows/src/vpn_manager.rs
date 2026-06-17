@@ -117,6 +117,7 @@ impl VpnManager {
         exclude_routes: &[String],
         kill_switch: bool,
         adaptive_level: u8,
+        dns_proxy: Option<&str>,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
@@ -165,6 +166,12 @@ impl VpnManager {
 
         if adaptive_level > 0 {
             cmd.arg("--adaptive");
+        }
+
+        if let Some(addr) = dns_proxy {
+            if !addr.is_empty() {
+                cmd.arg("--dns-proxy").arg(addr);
+            }
         }
 
         // Hide console window on Windows

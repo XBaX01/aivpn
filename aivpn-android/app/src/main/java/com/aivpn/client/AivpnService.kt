@@ -335,6 +335,12 @@ class AivpnService : VpnService() {
                 while (isActive) {
                     delay(1_000L)
                     val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
+                    // Apply server-suggested adaptive level silently (takes effect on next reconnect).
+                    val hint = AivpnJni.getAdaptiveLevelHint()
+                    if (hint > 0 && hint != adaptiveLevel()) {
+                        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                            .edit().putInt("adaptive_level", hint).apply()
+                    }
                 }
             }
             try {

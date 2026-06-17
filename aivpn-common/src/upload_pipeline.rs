@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::client_wire::{build_inner_packet, build_random_mdh_packet, DEFAULT_MDH_LEN};
+use crate::fec::FecEncoder;
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
 use crate::protocol::{ControlPayload, InnerType};
@@ -74,6 +75,8 @@ pub struct ZeroMdhEncryptor {
     counter: u64,
     seq: u16,
     mdh_len: usize,
+    fec_encoder: Option<FecEncoder>,
+    pending_fec: Option<Vec<u8>>,
 }
 
 impl ZeroMdhEncryptor {
@@ -83,6 +86,8 @@ impl ZeroMdhEncryptor {
             counter,
             seq,
             mdh_len: DEFAULT_MDH_LEN,
+            fec_encoder: None,
+            pending_fec: None,
         }
     }
 
@@ -92,7 +97,18 @@ impl ZeroMdhEncryptor {
             counter,
             seq,
             mdh_len,
+            fec_encoder: None,
+            pending_fec: None,
         }
+    }
+
+    /// Enable XOR FEC with the given group size. group_size=0 disables FEC.
+    pub fn set_fec_group(&mut self, group_size: u8) {
+        self.fec_encoder = if group_size > 0 {
+            Some(FecEncoder::new(group_size, 1500))
+        } else {
+            None
+        };
     }
 }
 
@@ -100,7 +116,20 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let inner = build_inner_packet(InnerType::Data, self.seq, payload);
         self.seq = self.seq.wrapping_add(1);
-        build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
+        let pkt = build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)?;
+        if let Some(fec) = self.fec_encoder.as_mut() {
+            if let Some(repair) = fec.feed(payload) {
+                let repair_inner =
+                    build_inner_packet(InnerType::FecRepair, self.seq, &repair.encode());
+                self.seq = self.seq.wrapping_add(1);
+                if let Ok(enc) = build_random_mdh_packet(
+                    &self.keys, &mut self.counter, &repair_inner, None, self.mdh_len,
+                ) {
+                    self.pending_fec = Some(enc);
+                }
+            }
+        }
+        Ok(pkt)
     }
 
     fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
@@ -122,6 +151,10 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     }
 
     fn on_data_sent(&mut self, _payload_len: usize) {}
+
+    fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+        self.pending_fec.take()
+    }
 }
 
 // ──────────── The upload loop ────────────

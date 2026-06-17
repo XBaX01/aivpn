@@ -251,6 +251,14 @@ class LocalizationManager: ObservableObject {
             "en": "Path to client certificate file for mutual TLS authentication. Leave empty to disable.",
             "ru": "Путь к файлу клиентского сертификата для взаимной TLS-аутентификации. Оставьте пустым для отключения."
         ],
+        "dns_proxy_placeholder": [
+            "en": "DNS proxy (e.g. 127.0.0.1:5300)",
+            "ru": "DNS-прокси (например 127.0.0.1:5300)"
+        ],
+        "dns_proxy_help": [
+            "en": "Local address for DNS leak prevention proxy. Leave empty to disable. Point your resolver here after connecting.",
+            "ru": "Локальный адрес DNS-прокси для предотвращения утечек. Оставьте пустым для отключения. После подключения укажите эот адрес в настройках резолвера."
+        ],
         "exclude_routes_label": [
             "en": "Exclude routes (split tunnel)",
             "ru": "Исключить маршруты (split tunnel)"

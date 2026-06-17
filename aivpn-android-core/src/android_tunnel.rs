@@ -87,6 +87,26 @@ static STOP_PENDING: AtomicBool = AtomicBool::new(false);
 /// Polled by JNI via getQualityScore().
 pub static ACTIVE_QUALITY_SCORE: AtomicU8 = AtomicU8::new(0);
 
+/// Suggested adaptive level from the last server AdaptiveHint (0–3). 0 = no hint yet.
+/// Polled by JNI via getAdaptiveLevelHint(); takes effect on next reconnect.
+pub static ACTIVE_ADAPTIVE_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+/// Sender half of the control-payload channel to the active upload loop.
+/// JNI uses this to inject RecordingStart / RecordingStop without a reconnect.
+static ACTIVE_CONTROL_TX: Mutex<Option<mpsc::Sender<ControlPayload>>> = Mutex::new(None);
+
+/// Queue a control payload to the active upload loop.
+/// Returns true if the payload was accepted, false if there is no active session
+/// or the channel is full.
+pub fn send_control_payload(payload: ControlPayload) -> bool {
+    let guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        tx.try_send(payload).is_ok()
+    } else {
+        false
+    }
+}
+
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
 }
@@ -506,6 +526,23 @@ pub async fn run_tunnel_android(
     let keepalive_sent_ms_rx = keepalive_sent_ms.clone();
     let mut quality_tracker = QualityTracker::new();
 
+    // Control-payload channel: lets JNI send RecordingStart/Stop without reconnecting.
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlPayload>(8);
+    {
+        let mut guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ctrl_tx);
+    }
+    // RAII guard: clears ACTIVE_CONTROL_TX when run_tunnel_android returns (any path).
+    struct CtrlTxGuard;
+    impl Drop for CtrlTxGuard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = ACTIVE_CONTROL_TX.lock() {
+                *g = None;
+            }
+        }
+    }
+    let _ctrl_tx_guard = CtrlTxGuard;
+
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
     let session_for_upload = session.clone();
@@ -537,6 +574,9 @@ pub async fn run_tunnel_android(
                     .upload_bytes
                     .fetch_add(payload_len as u64, Ordering::Relaxed);
             }
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.inner.take_fec_repair()
+            }
         }
 
         let mut enc = AndroidEncryptor {
@@ -544,13 +584,14 @@ pub async fn run_tunnel_android(
             session: session_for_upload,
             keepalive_sent_ms,
         };
+        enc.inner.set_fec_group(level.fec_n());
         let config = UploadConfig {
             keepalive_interval,
             ..Default::default()
         };
 
         if let Err(e) =
-            upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &config).await
+            upload_pipeline::run_upload_loop(&mut tun_rx, Some(&mut ctrl_rx), &udp_tx, &mut enc, &config).await
         {
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
@@ -701,10 +742,8 @@ pub async fn run_tunnel_android(
                                     let _ = keepalive_sent_ms_rx.load(Ordering::Relaxed);
                                 }
                                 ControlPayload::AdaptiveHint { level } => {
-                                    log::info!(
-                                        "aivpn: AdaptiveHint level={} (reconnect will apply)",
-                                        level
-                                    );
+                                    ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
+                                    log::info!("aivpn: AdaptiveHint level={} stored", level);
                                 }
                                 _ => {}
                             }

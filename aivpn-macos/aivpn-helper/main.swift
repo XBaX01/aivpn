@@ -37,6 +37,7 @@ struct HelperRequest: Codable {
     let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
     let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
     let adaptiveLevel: Int?   // 0=Off, 1=Light, 2=Aggressive, 3=Satellite; nil treated as 0
+    let dnsProxy: String?      // local bind address for DNS proxy (e.g. "127.0.0.1:5300")
 }
 
 struct HelperResponse: Codable {
@@ -155,7 +156,7 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil) -> HelperResponse {
     killExistingClient()
 
     // Resolve the requested path; fall back to default
@@ -210,6 +211,16 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
     }
     if adaptiveLevel > 0 {
         args.append("--adaptive")
+    }
+    if let proxy = dnsProxy, !proxy.isEmpty {
+        // Validate: must be HOST:PORT with no shell-special characters.
+        let proxyCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:.[]-")
+        guard proxy.unicodeScalars.allSatisfy({ proxyCharset.contains($0) }) else {
+            log("ERROR: invalid dnsProxy '\(proxy)' — rejected")
+            return HelperResponse(status: "error", message: "Invalid dns-proxy value")
+        }
+        args.append("--dns-proxy")
+        args.append(proxy)
     }
     if let routes = excludeRoutes {
         // Validate: each token must look like a CIDR (digits, dots, colons, slash).
@@ -611,7 +622,8 @@ func handleConnection(_ clientFD: Int32) {
                                binaryPath: request.binaryPath,
                                mtlsCertPath: request.mtlsCertPath,
                                excludeRoutes: request.excludeRoutes,
-                               adaptiveLevel: request.adaptiveLevel ?? 0)
+                               adaptiveLevel: request.adaptiveLevel ?? 0,
+                               dnsProxy: request.dnsProxy)
 
     case "disconnect":
         response = stopClient()

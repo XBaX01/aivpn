@@ -90,4 +90,11 @@
     <string name="export_logs_collecting">Сбор логов…</string>
     <string name="export_logs_empty">Логи не собраны</string>
     <string name="export_logs_error">Не удалось собрать логи</string>
+    <string name="recording">Запись трафика</string>
+    <string name="recording_service_hint">Имя сервиса (например: zoom, https)</string>
+    <string name="recording_start">Начать запись</string>
+    <string name="recording_stop">Остановить запись</string>
+    <string name="recording_started">Запись начата</string>
+    <string name="recording_stopped">Запись остановлена</string>
+    <string name="recording_no_session">Нет активного сеанса</string>
 </resources>

@@ -13,6 +13,7 @@ struct ContentView: View {
     @AppStorage("proxyMode") private var proxyMode: Bool = false
     @AppStorage("proxyPort") private var proxyPort: String = "1080"
     @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
+    @AppStorage("dnsProxyAddr") private var dnsProxyAddr: String = ""
     @State private var showDiagnostics: Bool = false
     @State private var benchRunning: Bool = false
     @State private var benchResult: BenchDisplayResult? = nil
@@ -290,6 +291,11 @@ struct ContentView: View {
                         .font(.system(size: 11))
                         .help(loc.t("mtls_cert_path_help"))
 
+                    TextField(loc.t("dns_proxy_placeholder"), text: $dnsProxyAddr)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .help(loc.t("dns_proxy_help"))
+
                     HStack(spacing: 8) {
                         Button(loc.t("cancel")) {
                             withAnimation {
@@ -517,7 +523,8 @@ struct ContentView: View {
                             vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel,
                                         mtlsCertPath: selectedKey.mtlsCertPath,
                                         excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes,
-                                        adaptiveLevel: adaptiveLevel)
+                                        adaptiveLevel: adaptiveLevel,
+                                        dnsProxy: dnsProxyAddr.isEmpty ? nil : dnsProxyAddr)
                         }
                     }
                 }

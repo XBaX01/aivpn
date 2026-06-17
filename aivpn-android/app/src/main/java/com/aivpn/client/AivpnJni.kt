@@ -63,4 +63,13 @@ object AivpnJni {
 
     /** Connection quality score 0–100 from last KeepaliveAck RTT. 0 = no data yet. */
     external fun getQualityScore(): Int
+
+    /** Adaptive level hint from server (0–3). 0 = no hint received. Takes effect on next reconnect. */
+    external fun getAdaptiveLevelHint(): Int
+
+    /** Send RecordingStart to the server. Returns 1 if queued, 0 if no active session. */
+    external fun startRecording(serviceName: String): Int
+
+    /** Send RecordingStop to the server. No-op if no active session. */
+    external fun stopRecording()
 }

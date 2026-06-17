@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var isConnected = false
     private var currentQualityScore: Int = 0
+    private var currentRecordingService: String = ""
 
     private var profiles = mutableListOf<SecureStorage.ConnectionProfile>()
     private var activeProfileId: String? = null
@@ -609,7 +610,8 @@ class MainActivity : AppCompatActivity() {
         val adaptiveLabel = getString(R.string.adaptive_mode) + ": " + levelNames[currentLevel]
         popup.menu.add(0, MENU_ADAPTIVE, 0, adaptiveLabel)
         popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
-        popup.menu.add(0, MENU_EXPORT_LOGS, 2, getString(R.string.export_logs))
+        popup.menu.add(0, MENU_RECORDING, 2, getString(R.string.recording))
+        popup.menu.add(0, MENU_EXPORT_LOGS, 3, getString(R.string.export_logs))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_ADAPTIVE -> {
@@ -631,6 +633,7 @@ class MainActivity : AppCompatActivity() {
                     true
                 }
                 MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
+                MENU_RECORDING -> { showRecordingDialog(); true }
                 MENU_EXPORT_LOGS -> { exportLogs(); true }
                 else -> false
             }
@@ -786,9 +789,39 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun showRecordingDialog() {
+        if (!isConnected) {
+            Toast.makeText(this, getString(R.string.recording_no_session), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val input = android.widget.EditText(this).apply {
+            hint = getString(R.string.recording_service_hint)
+            setText(currentRecordingService)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.recording))
+            .setView(input)
+            .setPositiveButton(getString(R.string.recording_start)) { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "unknown" }
+                currentRecordingService = name
+                if (AivpnJni.startRecording(name) == 1) {
+                    Toast.makeText(this, getString(R.string.recording_started), Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, getString(R.string.recording_no_session), Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton(getString(R.string.recording_stop)) { _, _ ->
+                AivpnJni.stopRecording()
+                Toast.makeText(this, getString(R.string.recording_stopped), Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
     companion object {
         private const val MENU_ADAPTIVE = 1001
         private const val MENU_DIAGNOSTICS = 1002
         private const val MENU_EXPORT_LOGS = 1003
+        private const val MENU_RECORDING = 1004
     }
 }

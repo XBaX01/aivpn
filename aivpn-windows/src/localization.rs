@@ -157,6 +157,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "kill_switch") => "Kill Switch (block traffic if VPN drops)",
         (Lang::Ru, "kill_switch") => "Kill Switch (блок трафика при разрыве VPN)",
 
+        // DNS proxy
+        (Lang::En, "dns_proxy") => "DNS Proxy (leave empty to disable)",
+        (Lang::Ru, "dns_proxy") => "DNS-прокси (пусто — отключено)",
+
         // Adaptive / diagnostics
         (Lang::En, "adaptive_mode") => "Adaptive Mode",
         (Lang::Ru, "adaptive_mode") => "Адаптивный режим",
