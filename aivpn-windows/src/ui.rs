@@ -638,6 +638,7 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             mtls_cert_path.as_deref(),
                             &exclude_routes,
                             kill_switch,
+                            app.adaptive_level,
                         ) {
                             app.set_error(e);
                         }
@@ -782,13 +783,18 @@ fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         .color(DIM),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if app.adaptive_enabled {
-                        RichText::new("ON").size(12.0).color(GREEN).strong()
-                    } else {
-                        RichText::new("OFF").size(12.0).color(DIM)
-                    };
-                    if ui.button(label).clicked() {
-                        app.adaptive_enabled = !app.adaptive_enabled;
+                    let levels: &[(&str, u8)] = &[
+                        ("Off", 0), ("Light", 1), ("Aggr.", 2), ("Sat.", 3),
+                    ];
+                    for (label, lvl) in levels.iter().rev() {
+                        let selected = app.adaptive_level == *lvl;
+                        let btn = egui::Button::new(
+                            RichText::new(*label).size(11.0)
+                                .color(if selected { GREEN } else { DIM })
+                        );
+                        if ui.add(btn).clicked() {
+                            app.adaptive_level = *lvl;
+                        }
                     }
                     if app.vpn.is_connected() {
                         ui.add_space(8.0);

@@ -207,6 +207,22 @@ class LocalizationManager: ObservableObject {
             "en": "Adaptive Mode",
             "ru": "Адаптивный режим"
         ],
+        "adaptive_off": [
+            "en": "Off",
+            "ru": "Выкл"
+        ],
+        "adaptive_light": [
+            "en": "Light (6s)",
+            "ru": "Лёгкий (6с)"
+        ],
+        "adaptive_aggressive": [
+            "en": "Aggressive (4s)",
+            "ru": "Агрессивный (4с)"
+        ],
+        "adaptive_satellite": [
+            "en": "Satellite (15s)",
+            "ru": "Спутник (15с)"
+        ],
         "adaptive_mode_help": [
             "en": "Automatically adjusts MTU and keepalive on unstable connections",
             "ru": "Автоматически адаптирует MTU и keepalive при нестабильном соединении"

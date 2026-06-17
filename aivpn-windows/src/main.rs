@@ -219,7 +219,7 @@ pub struct AivpnApp {
     // Kill-switch
     kill_switch: bool,
     // Adaptive / diagnostics
-    adaptive_enabled: bool,
+    adaptive_level: u8,
     show_diagnostics: bool,
     bench_p50: Option<f64>,
     bench_p95: Option<f64>,
@@ -253,7 +253,7 @@ impl AivpnApp {
             error_timer: None,
             recording_service_name: String::new(),
             kill_switch: false,
-            adaptive_enabled: false,
+            adaptive_level: 0,
             show_diagnostics: false,
             bench_p50: None,
             bench_p95: None,

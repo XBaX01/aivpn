@@ -116,6 +116,7 @@ impl VpnManager {
         mtls_cert_path: Option<&str>,
         exclude_routes: &[String],
         kill_switch: bool,
+        adaptive_level: u8,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
@@ -160,6 +161,10 @@ impl VpnManager {
 
         if kill_switch {
             cmd.arg("--kill-switch");
+        }
+
+        if adaptive_level > 0 {
+            cmd.arg("--adaptive");
         }
 
         // Hide console window on Windows

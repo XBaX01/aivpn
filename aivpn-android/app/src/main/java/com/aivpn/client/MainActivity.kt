@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var isConnected = false
+    private var currentQualityScore: Int = 0
 
     private var profiles = mutableListOf<SecureStorage.ConnectionProfile>()
     private var activeProfileId: String? = null
@@ -393,9 +394,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         AivpnService.trafficCallback = { uploadBytes, downloadBytes ->
+            val quality = AivpnJni.getQualityScore()
             runOnUiThread {
                 binding.textUpload.text = formatBytes(uploadBytes)
                 binding.textDownload.text = formatBytes(downloadBytes)
+                currentQualityScore = quality
             }
         }
 
@@ -596,23 +599,35 @@ class MainActivity : AppCompatActivity() {
 
     private fun showOptionsMenu(anchor: View) {
         val popup = PopupMenu(this, anchor)
-        val adaptiveOn = isAdaptiveEnabled()
-        val adaptiveItem = popup.menu.add(0, MENU_ADAPTIVE, 0, getString(R.string.adaptive_mode))
-        adaptiveItem.isCheckable = true
-        adaptiveItem.isChecked = adaptiveOn
+        val levelNames = arrayOf(
+            getString(R.string.adaptive_off),
+            getString(R.string.adaptive_light),
+            getString(R.string.adaptive_aggressive),
+            getString(R.string.adaptive_satellite)
+        )
+        val currentLevel = adaptiveLevel()
+        val adaptiveLabel = getString(R.string.adaptive_mode) + ": " + levelNames[currentLevel]
+        popup.menu.add(0, MENU_ADAPTIVE, 0, adaptiveLabel)
         popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
         popup.menu.add(0, MENU_EXPORT_LOGS, 2, getString(R.string.export_logs))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_ADAPTIVE -> {
-                    val newVal = !isAdaptiveEnabled()
-                    getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
-                        .edit().putBoolean("adaptive_enabled", newVal).apply()
-                    item.isChecked = newVal
-                    Toast.makeText(this,
-                        if (newVal) getString(R.string.adaptive_enabled)
-                        else getString(R.string.adaptive_disabled),
-                        Toast.LENGTH_SHORT).show()
+                    val names = arrayOf(
+                        getString(R.string.adaptive_off),
+                        getString(R.string.adaptive_light),
+                        getString(R.string.adaptive_aggressive),
+                        getString(R.string.adaptive_satellite)
+                    )
+                    AlertDialog.Builder(this)
+                        .setTitle(getString(R.string.adaptive_mode))
+                        .setSingleChoiceItems(names, adaptiveLevel()) { dlg, which ->
+                            getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                                .edit().putInt("adaptive_level", which).apply()
+                            dlg.dismiss()
+                        }
+                        .setNegativeButton(getString(R.string.btn_cancel), null)
+                        .show()
                     true
                 }
                 MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
@@ -623,9 +638,9 @@ class MainActivity : AppCompatActivity() {
         popup.show()
     }
 
-    private fun isAdaptiveEnabled(): Boolean =
+    private fun adaptiveLevel(): Int =
         getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
-            .getBoolean("adaptive_enabled", false)
+            .getInt("adaptive_level", 0)
 
     private fun exportLogs() {
         val toast = Toast.makeText(this, getString(R.string.export_logs_collecting), Toast.LENGTH_SHORT)
@@ -678,10 +693,15 @@ class MainActivity : AppCompatActivity() {
         }
         val serverAddr = profiles.find { it.id == activeProfileId }
             ?.key?.let { parseConnectionKey(it)?.server } ?: ""
+        val liveScore = currentQualityScore
+        val qualityLine = if (liveScore > 0)
+            getString(R.string.quality_score_live, liveScore)
+        else
+            getString(R.string.quality_score_no_data)
 
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.diagnostics))
-            .setMessage(getString(R.string.run_benchmark))
+            .setMessage(qualityLine + "\n\n" + getString(R.string.run_benchmark))
             .setPositiveButton(getString(R.string.run_benchmark)) { _, _ ->
                 val runningToast = Toast.makeText(this, getString(R.string.bench_running), Toast.LENGTH_LONG)
                 runningToast.show()

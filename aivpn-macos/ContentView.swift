@@ -12,7 +12,7 @@ struct ContentView: View {
     @AppStorage("excludeRoutes") private var excludeRoutes: String = ""
     @AppStorage("proxyMode") private var proxyMode: Bool = false
     @AppStorage("proxyPort") private var proxyPort: String = "1080"
-    @AppStorage("adaptiveMode") private var adaptiveMode: Bool = false
+    @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
     @State private var showDiagnostics: Bool = false
     @State private var benchRunning: Bool = false
     @State private var benchResult: BenchDisplayResult? = nil
@@ -270,11 +270,19 @@ struct ContentView: View {
                     }
                     
                     HStack {
-                        Toggle(loc.t("adaptive_mode"), isOn: $adaptiveMode)
-                            .toggleStyle(.checkbox)
+                        Text(loc.t("adaptive_mode"))
                             .font(.caption)
                             .help(loc.t("adaptive_mode_help"))
                         Spacer()
+                        Picker("", selection: $adaptiveLevel) {
+                            Text(loc.t("adaptive_off")).tag(0)
+                            Text(loc.t("adaptive_light")).tag(1)
+                            Text(loc.t("adaptive_aggressive")).tag(2)
+                            Text(loc.t("adaptive_satellite")).tag(3)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 160)
+                        .font(.caption)
                     }
 
                     TextField(loc.t("mtls_cert_path"), text: $mtlsCertPath)
@@ -508,7 +516,8 @@ struct ContentView: View {
                         } else {
                             vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel,
                                         mtlsCertPath: selectedKey.mtlsCertPath,
-                                        excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes)
+                                        excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes,
+                                        adaptiveLevel: adaptiveLevel)
                         }
                     }
                 }

@@ -56,6 +56,12 @@ pub trait PacketEncryptor: Send {
     fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
         None
     }
+    /// Encrypt a keepalive stamped with `send_ts` (milliseconds since UNIX epoch).
+    /// The server echoes `send_ts` in `KeepaliveAck` so the client can measure RTT.
+    /// Default delegates to `encrypt_keepalive()` with `send_ts = 0` (no RTT tracking).
+    fn encrypt_keepalive_ts(&mut self, _send_ts: u64) -> Result<Vec<u8>> {
+        self.encrypt_keepalive()
+    }
 }
 
 // ──────────── Ready-made encryptor: zero MDH ────────────
@@ -105,7 +111,11 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     }
 
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
-        let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
+        self.encrypt_keepalive_ts(0)
+    }
+
+    fn encrypt_keepalive_ts(&mut self, send_ts: u64) -> Result<Vec<u8>> {
+        let keepalive = ControlPayload::Keepalive { send_ts }.encode()?;
         let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
         self.seq = self.seq.wrapping_add(1);
         build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)

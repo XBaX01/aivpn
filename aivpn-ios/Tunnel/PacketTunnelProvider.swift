@@ -32,7 +32,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let fullTunnel = cfg["fullTunnel"] as? Bool ?? true
-        let adaptiveMode = cfg["adaptiveMode"] as? Bool ?? false
+        let adaptiveLevel = cfg["adaptiveLevel"] as? Int ?? 0
 
         // Split-tunnel lists forwarded by VPNManager from App Group UserDefaults.
         let excludedRoutes = (cfg["excluded_routes"] as? String ?? "")
@@ -74,7 +74,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                      fullTunnel: fullTunnel,
                                      excludedRoutes: excludedRoutes,
                                      excludedDomains: excludedDomains,
-                                     adaptiveMode: adaptiveMode)
+                                     adaptiveLevel: adaptiveLevel)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self = self else { return }
@@ -250,9 +250,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                fullTunnel: Bool,
                                excludedRoutes: [String] = [],
                                excludedDomains: [String] = [],
-                               adaptiveMode: Bool = false) -> NEPacketTunnelNetworkSettings {
+                               adaptiveLevel: Int = 0) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
-        settings.mtu = adaptiveMode ? 1200 : 1400
+        settings.mtu = adaptiveLevel >= 2 ? 1200 : (adaptiveLevel == 1 ? 1300 : 1400)
 
         let ipv4 = NEIPv4Settings(addresses: [vpnIP], subnetMasks: ["255.255.255.0"])
         if fullTunnel {

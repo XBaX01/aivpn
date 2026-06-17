@@ -345,7 +345,7 @@ class AivpnService : VpnService() {
                         SecureStorage.saveDeviceKey(this@AivpnService, bytes)
                     }
                 val error = withContext(Dispatchers.IO) {
-                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled(), deviceKey)
+                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, adaptiveLevel(), deviceKey)
                 }
                 if (error.isNotEmpty()) throw RuntimeException(error)
             } finally {
@@ -490,9 +490,11 @@ class AivpnService : VpnService() {
         }
     }
 
-    private fun isAdaptiveEnabled(): Boolean =
+    fun adaptiveLevel(): Int =
         getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
-            .getBoolean("adaptive_enabled", false)
+            .getInt("adaptive_level", 0)
+
+    private fun isAdaptiveEnabled(): Boolean = adaptiveLevel() > 0
 
     private fun isTransportChange(prev: NetworkCapabilities, next: NetworkCapabilities): Boolean {
         val prevWifi     = prev.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
