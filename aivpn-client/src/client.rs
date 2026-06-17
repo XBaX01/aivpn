@@ -811,14 +811,12 @@ impl AivpnClient {
                 if let Some(fec) = self.fec_encoder.as_mut() {
                     if let Some(repair) = fec.feed(payload) {
                         let repair_payload = repair.encode();
-                        let repair_inner = build_inner_packet(
-                            InnerType::FecRepair,
-                            state.seq,
-                            &repair_payload,
-                        );
+                        let repair_inner =
+                            build_inner_packet(InnerType::FecRepair, state.seq, &repair_payload);
                         state.seq = state.seq.wrapping_add(1);
                         if let Ok(enc_repair) =
-                            self.engine.build_packet(&repair_inner, &keys, &mut state.counter, None)
+                            self.engine
+                                .build_packet(&repair_inner, &keys, &mut state.counter, None)
                         {
                             self.pending_fec = Some(enc_repair);
                         }
@@ -852,7 +850,7 @@ impl AivpnClient {
                     .as_millis() as u64;
                 self.keepalive_sent_ms.store(now_ms, Ordering::Relaxed);
                 let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
-                let keepalive = ControlPayload::Keepalive.encode()?;
+                let keepalive = ControlPayload::Keepalive { send_ts: now_ms }.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
                 state.seq = state.seq.wrapping_add(1);
                 let keys = state.keys.clone();
@@ -1182,7 +1180,9 @@ impl AivpnClient {
                 // that delay updating the entry even after local-port reuse.
                 for _ in 0..4u8 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    let _ = self.send_control(&ControlPayload::Keepalive).await;
+                    let _ = self
+                        .send_control(&ControlPayload::Keepalive { send_ts: 0 })
+                        .await;
                 }
 
                 // Device enrollment: prove static key ownership to server.
@@ -1202,7 +1202,7 @@ impl AivpnClient {
                     }
                 }
             }
-            ControlPayload::Keepalive => {
+            ControlPayload::Keepalive { .. } => {
                 debug!("Keepalive from server");
             }
             ControlPayload::TimeSync { server_ts_ms } => {
@@ -1241,8 +1241,14 @@ impl AivpnClient {
             ControlPayload::CertRejected {} => {
                 warn!("mTLS: server rejected the certificate — re-provision your mTLS cert");
             }
-            ControlPayload::KeepaliveAck { echo_ts: _ } => {
-                let sent_ms = self.keepalive_sent_ms.load(Ordering::Relaxed);
+            ControlPayload::KeepaliveAck { echo_ts } => {
+                // Use echoed client timestamp for RTT when available (server ≥ 0.9.0),
+                // fall back to the stored send-time for older servers.
+                let sent_ms = if echo_ts > 0 {
+                    echo_ts
+                } else {
+                    self.keepalive_sent_ms.load(Ordering::Relaxed)
+                };
                 if sent_ms > 0 {
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1254,8 +1260,7 @@ impl AivpnClient {
                     let new_level = AdaptiveLevel::suggest(score);
                     if new_level != self.adaptive_level {
                         self.adaptive_level = new_level;
-                        self.keepalive_interval =
-                            Duration::from_secs(new_level.keepalive_secs());
+                        self.keepalive_interval = Duration::from_secs(new_level.keepalive_secs());
                         info!(
                             "Adaptive level → {:?} (score={}), keepalive={}s",
                             new_level,
@@ -1277,8 +1282,7 @@ impl AivpnClient {
                 let new_level = AdaptiveLevel::from_u8(level);
                 if new_level != self.adaptive_level {
                     self.adaptive_level = new_level;
-                    self.keepalive_interval =
-                        Duration::from_secs(new_level.keepalive_secs());
+                    self.keepalive_interval = Duration::from_secs(new_level.keepalive_secs());
                     info!("Server adaptive hint → {:?}", new_level);
                 }
             }
@@ -1300,7 +1304,7 @@ impl AivpnClient {
             .ok_or(Error::Session("No mimicry engine".into()))?;
 
         // Build keepalive control as init payload
-        let keepalive = ControlPayload::Keepalive;
+        let keepalive = ControlPayload::Keepalive { send_ts: 0 };
         let encoded = keepalive.encode()?;
         let seq_num = self.send_seq as u16;
         self.send_seq = self.send_seq.wrapping_add(1);

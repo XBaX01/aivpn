@@ -53,7 +53,9 @@ pub trait PacketEncryptor: Send {
     fn on_data_sent(&mut self, payload_len: usize);
     /// Return a pre-encrypted FEC repair datagram if one is ready, else None.
     /// Called after every data send; default is a no-op.
-    fn take_fec_repair(&mut self) -> Option<Vec<u8>> { None }
+    fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 // ──────────── Ready-made encryptor: zero MDH ────────────
@@ -103,7 +105,7 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     }
 
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
-        let keepalive = ControlPayload::Keepalive.encode()?;
+        let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
         let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
         self.seq = self.seq.wrapping_add(1);
         build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)

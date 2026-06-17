@@ -117,7 +117,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                 _ = aivpn_run_tunnel(rustFd, host, Int32(port),
                                                      sKeyPtr.baseAddress!, pskPtr,
                                                      certPtr, certCount,
-                                                     dkPtr.baseAddress!,
+                                                     dkPtr.baseAddress!, Int32(32),
                                                      nil, nil)
                             }
                         }

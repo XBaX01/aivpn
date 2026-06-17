@@ -563,7 +563,7 @@ fn battle_full_pipeline_control_messages() {
 
     // Test each control message type
     let controls = vec![
-        ControlPayload::Keepalive,
+        ControlPayload::Keepalive { send_ts: 0 },
         ControlPayload::Shutdown { reason: 1 },
         ControlPayload::TelemetryRequest { metric_flags: 0xFF },
         ControlPayload::TimeSync {
@@ -605,7 +605,7 @@ fn battle_full_pipeline_control_messages() {
         let ctrl = ControlPayload::decode(&data[4..]).unwrap();
         // Verify type matches
         match (control, &ctrl) {
-            (ControlPayload::Keepalive, ControlPayload::Keepalive) => {}
+            (ControlPayload::Keepalive { .. }, ControlPayload::Keepalive { .. }) => {}
             (ControlPayload::Shutdown { reason: r1 }, ControlPayload::Shutdown { reason: r2 }) => {
                 assert_eq!(r1, r2);
             }

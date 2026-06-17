@@ -27,9 +27,7 @@ use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
 };
 use aivpn_common::network_config::VpnNetworkConfig;
-use aivpn_common::protocol::{
-    ControlPayload, InnerHeader, InnerType, MAX_PACKET_SIZE,
-};
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType, MAX_PACKET_SIZE};
 use libc;
 
 use crate::audit_log::{AuditActor, AuditLogger};
@@ -2238,16 +2236,22 @@ impl Gateway {
                 }
 
                 // Anti-spoof + peer routing gate (authoritative, at ingress).
-                // Check inner IPv4 header: src must match the session's assigned VPN IP
-                // to prevent clients from masquerading as other sessions or the server.
-                // Also enforce allow_peer_routing before the packet reaches TUN.
-                if payload.len() >= 20 && (payload[0] >> 4) == 4 {
-                    let inner_src = std::net::Ipv4Addr::new(
-                        payload[12], payload[13], payload[14], payload[15],
+                // Only IPv4 is routed through the VPN; reject everything else to
+                // prevent clients from injecting arbitrary layer-3 traffic that
+                // bypasses the source-address check.
+                if payload.len() < 20 || (payload[0] >> 4) != 4 {
+                    debug!(
+                        "Anti-spoof: dropping non-IPv4 payload (len={} ver={})",
+                        payload.len(),
+                        payload.first().map(|b| b >> 4).unwrap_or(0)
                     );
-                    let inner_dst = std::net::Ipv4Addr::new(
-                        payload[16], payload[17], payload[18], payload[19],
-                    );
+                    return Ok(());
+                }
+                {
+                    let inner_src =
+                        std::net::Ipv4Addr::new(payload[12], payload[13], payload[14], payload[15]);
+                    let inner_dst =
+                        std::net::Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
                     let session_vpn_ip = session.lock().vpn_ip;
                     if let Some(svpn) = session_vpn_ip {
                         if inner_src != svpn {
@@ -2260,7 +2264,10 @@ impl Gateway {
                     }
                     // Block intra-VPN routing at ingress when not opted in.
                     if !self.config.allow_peer_routing
-                        && self.session_manager.get_session_by_vpn_ip(&inner_dst).is_some()
+                        && self
+                            .session_manager
+                            .get_session_by_vpn_ip(&inner_dst)
+                            .is_some()
                     {
                         debug!(
                             "Peer routing disabled — dropping {}->{} at ingress",
@@ -2339,8 +2346,10 @@ impl Gateway {
                         let recovered_opt = {
                             let mut sess = session.lock();
                             let recv = sess.fec_recv_count;
-                            // Recover if exactly one packet from the group was lost.
-                            let result = if recv == repair.group_size.saturating_sub(1) {
+                            let seq_ok = repair.group_seq == sess.fec_pending_seq;
+                            // Recover only when group_seq matches (XOR buffer is for this
+                            // exact group) and exactly one packet is missing.
+                            let result = if seq_ok && recv == repair.group_size.saturating_sub(1) {
                                 let xor_len = sess.fec_xor_len.max(repair.xor_data.len());
                                 let mut out = vec![0u8; xor_len];
                                 for i in 0..xor_len {
@@ -2357,21 +2366,22 @@ impl Gateway {
                                 Some(out)
                             } else {
                                 debug!(
-                                    "FEC: group seq={} size={} recv={} — no recovery needed",
-                                    repair.group_seq, repair.group_size, recv
+                                    "FEC: group seq={} size={} recv={} seq_ok={} — no recovery",
+                                    repair.group_seq, repair.group_size, recv, seq_ok
                                 );
                                 None
                             };
-                            // Reset accumulator for next group regardless of outcome.
+                            // Reset accumulator; advance expected seq to the next group.
                             sess.fec_recv_count = 0;
                             sess.fec_xor_buf.iter_mut().for_each(|b| *b = 0);
                             sess.fec_xor_len = 0;
+                            sess.fec_pending_seq = repair.group_seq.wrapping_add(1);
                             result
                         };
 
                         if let Some(recovered) = recovered_opt {
-                            let use_chain = self.chain_forwarder.is_some()
-                                && !session.lock().is_site_peer;
+                            let use_chain =
+                                self.chain_forwarder.is_some() && !session.lock().is_site_peer;
                             if use_chain {
                                 if let Some(ref cf) = self.chain_forwarder {
                                     cf.forward(recovered).await;
@@ -2423,7 +2433,7 @@ impl Gateway {
             ControlPayload::MaskUpdate { .. } => {
                 warn!("Unexpected MASK_UPDATE from client");
             }
-            ControlPayload::Keepalive => {
+            ControlPayload::Keepalive { send_ts } => {
                 debug!("Keepalive from {}", hash_addr(&client_addr));
                 if !session.lock().is_ratcheted {
                     // The client is still retrying the initial handshake. If the
@@ -2432,13 +2442,10 @@ impl Gateway {
                     self.send_server_hello(session, client_addr).await?;
                     return Ok(());
                 }
-                // Echo timestamp so client can compute RTT (KeepaliveAck, 0.9.0+).
-                let echo_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                // Echo the client's own send_ts so it can measure RTT without
+                // clock-skew between client and server.
                 self.send_control_message(
-                    &ControlPayload::KeepaliveAck { echo_ts },
+                    &ControlPayload::KeepaliveAck { echo_ts: send_ts },
                     session,
                 )
                 .await?;
@@ -2745,21 +2752,32 @@ impl Gateway {
                     hash_addr(&client_addr)
                 );
             }
-            ControlPayload::DeviceEnrollment { static_pub, dh_proof } => {
+            ControlPayload::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
                 let client_id = { session.lock().client_id.clone() };
                 if let (Some(ref db), Some(ref cid)) = (&self.client_db, &client_id) {
                     // Verify DH proof: X25519(static_priv, server_static_pub) == dh_proof
-                    let server_kp = crypto::KeyPair::from_private_key(self.config.server_private_key);
+                    let server_kp =
+                        crypto::KeyPair::from_private_key(self.config.server_private_key);
                     let expected_dh = match server_kp.compute_shared(&static_pub) {
                         Ok(d) => d,
                         Err(e) => {
-                            warn!("DeviceEnrollment from {}: DH error: {}", hash_addr(&client_addr), e);
+                            warn!(
+                                "DeviceEnrollment from {}: DH error: {}",
+                                hash_addr(&client_addr),
+                                e
+                            );
                             return Ok(());
                         }
                     };
                     use subtle::ConstantTimeEq;
                     if expected_dh.ct_eq(&dh_proof).unwrap_u8() == 0 {
-                        warn!("DeviceEnrollment from {}: invalid DH proof — rejecting", hash_addr(&client_addr));
+                        warn!(
+                            "DeviceEnrollment from {}: invalid DH proof — rejecting",
+                            hash_addr(&client_addr)
+                        );
                         self.audit_log.log(
                             AuditActor::System,
                             "device_enrollment_rejected",
@@ -2792,12 +2810,25 @@ impl Gateway {
                 }
             }
             ControlPayload::KeepaliveAck { echo_ts } => {
-                debug!("KeepaliveAck from {} echo_ts={}", hash_addr(&client_addr), echo_ts);
+                debug!(
+                    "KeepaliveAck from {} echo_ts={}",
+                    hash_addr(&client_addr),
+                    echo_ts
+                );
             }
-            ControlPayload::QualityReport { quality, rtt_ms, loss_ppm, jitter_ms } => {
+            ControlPayload::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
                 info!(
                     "QualityReport from {}: quality={} rtt={}ms loss={}ppm jitter={}ms",
-                    hash_addr(&client_addr), quality, rtt_ms, loss_ppm, jitter_ms
+                    hash_addr(&client_addr),
+                    quality,
+                    rtt_ms,
+                    loss_ppm,
+                    jitter_ms
                 );
                 // Persist quality score on the session for monitoring/metrics.
                 session.lock().client_quality = quality;
@@ -2814,7 +2845,10 @@ impl Gateway {
                 }
             }
             ControlPayload::AdaptiveHint { .. } => {
-                debug!("AdaptiveHint from client {} ignored", hash_addr(&client_addr));
+                debug!(
+                    "AdaptiveHint from client {} ignored",
+                    hash_addr(&client_addr)
+                );
             }
         }
 

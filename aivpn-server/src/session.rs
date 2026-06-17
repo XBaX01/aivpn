@@ -162,6 +162,9 @@ pub struct Session {
     pub fec_xor_buf: Vec<u8>,
     /// Max payload length seen in the current FEC group.
     pub fec_xor_len: usize,
+    /// Next expected FEC group_seq. Mismatches indicate a lost FecRepair
+    /// and mean the XOR buffer is stale — recovery must be skipped.
+    pub fec_pending_seq: u16,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -264,6 +267,7 @@ impl Session {
             fec_recv_count: 0,
             fec_xor_buf: Vec::new(),
             fec_xor_len: 0,
+            fec_pending_seq: 0,
         }
     }
 

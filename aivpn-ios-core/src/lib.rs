@@ -24,6 +24,7 @@ pub extern "C" fn aivpn_run_tunnel(
     cert_bytes: *const u8,
     cert_len: libc::c_int,
     static_privkey: *const u8,
+    static_privkey_len: libc::c_int,
     on_ready: Option<OnReadyFn>,
     ctx: *mut libc::c_void,
 ) -> libc::c_int {
@@ -58,14 +59,15 @@ pub extern "C" fn aivpn_run_tunnel(
         Some(unsafe { std::slice::from_raw_parts(cert_bytes, 104).to_vec() })
     };
 
-    let static_privkey_opt: Option<[u8; 32]> = if static_privkey.is_null() {
-        None
-    } else {
-        // SAFETY: caller guarantees static_privkey points to 32 bytes.
-        let mut arr = [0u8; 32];
-        unsafe { arr.copy_from_slice(std::slice::from_raw_parts(static_privkey, 32)) };
-        Some(arr)
-    };
+    let static_privkey_opt: Option<[u8; 32]> =
+        if static_privkey.is_null() || static_privkey_len != 32 {
+            None
+        } else {
+            // SAFETY: static_privkey_len == 32 verified above; pointer is non-null.
+            let mut arr = [0u8; 32];
+            unsafe { arr.copy_from_slice(std::slice::from_raw_parts(static_privkey, 32)) };
+            Some(arr)
+        };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

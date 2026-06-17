@@ -33,6 +33,7 @@ int aivpn_run_tunnel(
     const uint8_t *cert_bytes,
     int cert_len,
     const uint8_t *static_privkey,
+    int static_privkey_len,
     aivpn_ready_callback_t on_ready,
     void *ctx
 );

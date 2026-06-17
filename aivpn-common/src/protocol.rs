@@ -272,7 +272,9 @@ pub enum ControlPayload {
         #[serde(with = "serde_bytes")]
         signature: [u8; 64],
     },
-    Keepalive,
+    Keepalive {
+        send_ts: u64,
+    },
     TelemetryRequest {
         metric_flags: u8,
     },
@@ -399,8 +401,9 @@ impl ControlPayload {
                 buf.extend_from_slice(mask_data);
                 buf.extend_from_slice(signature);
             }
-            Self::Keepalive => {
+            Self::Keepalive { send_ts } => {
                 buf.push(ControlSubtype::Keepalive as u8);
+                buf.extend_from_slice(&send_ts.to_le_bytes());
             }
             Self::TelemetryRequest { metric_flags } => {
                 buf.push(ControlSubtype::TelemetryRequest as u8);
@@ -535,7 +538,10 @@ impl ControlPayload {
             Self::CertRejected {} => {
                 buf.push(ControlSubtype::CertRejected as u8);
             }
-            Self::DeviceEnrollment { static_pub, dh_proof } => {
+            Self::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
                 buf.push(ControlSubtype::DeviceEnrollment as u8);
                 buf.extend_from_slice(static_pub);
                 buf.extend_from_slice(dh_proof);
@@ -544,7 +550,12 @@ impl ControlPayload {
                 buf.push(ControlSubtype::KeepaliveAck as u8);
                 buf.extend_from_slice(&echo_ts.to_le_bytes());
             }
-            Self::QualityReport { quality, rtt_ms, loss_ppm, jitter_ms } => {
+            Self::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
                 buf.push(ControlSubtype::QualityReport as u8);
                 buf.push(*quality);
                 buf.extend_from_slice(&rtt_ms.to_le_bytes());
@@ -597,7 +608,14 @@ impl ControlPayload {
                     signature,
                 })
             }
-            ControlSubtype::Keepalive => Ok(Self::Keepalive),
+            ControlSubtype::Keepalive => {
+                let send_ts = if data.len() >= 9 {
+                    u64::from_le_bytes(data[1..9].try_into().unwrap())
+                } else {
+                    0
+                };
+                Ok(Self::Keepalive { send_ts })
+            }
             ControlSubtype::TelemetryRequest => {
                 if data.len() < 2 {
                     return Err(Error::InvalidPacket("TelemetryRequest too short"));
@@ -834,7 +852,10 @@ impl ControlPayload {
                 let mut dh_proof = [0u8; 32];
                 static_pub.copy_from_slice(&data[1..33]);
                 dh_proof.copy_from_slice(&data[33..65]);
-                Ok(Self::DeviceEnrollment { static_pub, dh_proof })
+                Ok(Self::DeviceEnrollment {
+                    static_pub,
+                    dh_proof,
+                })
             }
             ControlSubtype::KeepaliveAck => {
                 if data.len() < 9 {

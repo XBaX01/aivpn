@@ -35,7 +35,7 @@ impl FecEncoder {
         if len > self.max_len {
             self.max_len = len;
         }
-        self.count += 1;
+        self.count = self.count.wrapping_add(1);
         if self.count >= self.group_size {
             let repair = FecRepair {
                 group_seq: self.group_seq,
@@ -77,7 +77,12 @@ impl FecRepair {
     }
 
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < 3 { return None; }
+        if data.len() < 3 {
+            return None;
+        }
+        if data[2] == 0 {
+            return None;
+        }
         Some(Self {
             group_seq: u16::from_le_bytes([data[0], data[1]]),
             group_size: data[2],
@@ -105,9 +110,14 @@ pub struct FecDecoder {
 }
 
 impl FecDecoder {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn record(&mut self, group_seq: u16, group_size: u8, idx: u8, payload: Vec<u8>) {
+        if group_size == 0 {
+            return;
+        }
         if self.group_seq != group_seq || self.group.len() != group_size as usize {
             self.group = vec![None; group_size as usize];
             self.group_seq = group_seq;
@@ -118,12 +128,19 @@ impl FecDecoder {
 
     /// Attempt recovery when repair arrives. Returns (missing_idx, payload) if successful.
     pub fn recover(&self, repair: &FecRepair) -> Option<(u8, Vec<u8>)> {
-        if self.group_seq != repair.group_seq { return None; }
-        let missing: Vec<u8> = self.group.iter().enumerate()
+        if self.group_seq != repair.group_seq {
+            return None;
+        }
+        let missing: Vec<u8> = self
+            .group
+            .iter()
+            .enumerate()
             .filter(|(_, p)| p.is_none())
             .map(|(i, _)| i as u8)
             .collect();
-        if missing.len() != 1 { return None; }
+        if missing.len() != 1 {
+            return None;
+        }
 
         let mut xor_recv = vec![0u8; repair.xor_data.len()];
         for pkt in self.group.iter().flatten() {
@@ -141,14 +158,12 @@ mod tests {
 
     #[test]
     fn xor_recovery_works() {
-        let pkts: Vec<Vec<u8>> = vec![
-            vec![1, 2, 3, 4],
-            vec![5, 6, 7, 8],
-            vec![9, 10, 11, 12],
-        ];
+        let pkts: Vec<Vec<u8>> = vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8], vec![9, 10, 11, 12]];
         let mut enc = FecEncoder::new(3, 64);
         let mut repair = None;
-        for p in &pkts { repair = enc.feed(p); }
+        for p in &pkts {
+            repair = enc.feed(p);
+        }
         let repair = repair.unwrap();
 
         let mut dec = FecDecoder::new();
