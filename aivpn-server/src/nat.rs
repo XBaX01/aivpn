@@ -110,7 +110,7 @@ pub fn assign_ipv6_to_tun(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn assign_ipv6_to_tun(_tun_name: &str, _addr: &str, _prefix_len: u8) -> Result<(), String> {
+pub fn assign_ipv6_to_tun(_tun_name: &str, _addr: &str, _prefix_len: u8) -> std::result::Result<(), String> {
     Err("assign_ipv6_to_tun is only supported on Linux".to_string())
 }
 
@@ -233,7 +233,7 @@ pub fn setup_nat66(tun_name: &str, prefix: &str) -> std::result::Result<(), Stri
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn setup_nat66(_tun_name: &str, _prefix: &str) -> Result<(), String> {
+pub fn setup_nat66(_tun_name: &str, _prefix: &str) -> std::result::Result<(), String> {
     Err("setup_nat66 is only supported on Linux".to_string())
 }
 
@@ -308,7 +308,7 @@ pub fn teardown_nat66(tun_name: &str, prefix: &str) -> std::result::Result<(), S
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn teardown_nat66(_tun_name: &str, _prefix: &str) -> Result<(), String> {
+pub fn teardown_nat66(_tun_name: &str, _prefix: &str) -> std::result::Result<(), String> {
     Err("teardown_nat66 is only supported on Linux".to_string())
 }
 

@@ -1,8 +1,11 @@
 # Rust
 /target/
 **/target/
+target[ 0-9]*/
+**/target[ 0-9]*/
 *.rs.bk
 Cargo.lock
+
 
 # Python
 __pycache__/

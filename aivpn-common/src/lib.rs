@@ -15,7 +15,7 @@ pub mod recording;
 #[cfg(feature = "client-upload")]
 pub mod upload_pipeline;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod kernel_accel;
 
 pub use client_wire::*;

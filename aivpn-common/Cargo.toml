@@ -37,7 +37,7 @@ tracing.workspace = true
 # Async (optional — needed for upload_pipeline)
 tokio = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [features]
