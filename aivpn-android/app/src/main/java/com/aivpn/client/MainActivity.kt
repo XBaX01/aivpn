@@ -87,6 +87,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        binding.versionFooter.text = "v${BuildConfig.VERSION_NAME} · ${getString(R.string.version_tagline)}"
 
         // Migrate legacy single connection key to profiles
         migrateLegacyKey()
