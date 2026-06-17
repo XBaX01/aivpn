@@ -84,6 +84,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     // Rust .so files produced by build-rust-android.sh
