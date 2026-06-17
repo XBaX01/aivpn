@@ -105,6 +105,11 @@ impl KeyPair {
         self.public_key_bytes
     }
 
+    /// Export private key bytes for secure persistence (e.g., device.key file).
+    pub fn export_private_key(&self) -> [u8; 32] {
+        self.private_key_bytes
+    }
+
     /// Compute shared secret with remote public key
     /// Returns error if the result is all-zero (small subgroup attack)
     pub fn compute_shared(&self, remote_public: &[u8; X25519_PUBLIC_KEY_SIZE]) -> Result<[u8; 32]> {
