@@ -224,7 +224,11 @@ class AivpnService : VpnService() {
                         sessionEstablished = false
                         networkTrigger = false
                         runTunnel()
-                        closeTunnel()
+                        // Only close TUN when this session is still the active one.
+                        // A superseded session must not close the vpnInterface that the
+                        // new serviceJob just created in ensureVpnInterface() — doing so
+                        // passes an invalid fd to Rust and causes 0 RX on the 2nd connect.
+                        if (mySessionId == sessionId) closeTunnel()
                         // runTunnel() returns normally only on Rust rekey trigger — reconnect fast.
                         retryDelayMs = INITIAL_RETRY_DELAY_MS
                     } catch (e: CancellationException) {
@@ -233,7 +237,7 @@ class AivpnService : VpnService() {
                         Log.e(TAG, "Tunnel error: ${e.message}", e)
                         isRunning = false
                         if (manualDisconnect) break
-                        closeTunnel()
+                        if (mySessionId == sessionId) closeTunnel()
 
                         // Network-triggered reconnects and reconnects after an established
                         // session use zero delay so the switch feels instant.
@@ -264,12 +268,17 @@ class AivpnService : VpnService() {
             } catch (e: CancellationException) {
                 Log.d(TAG, "Service job cancelled")
             } finally {
-                isRunning = false
-                serviceJob = null
-                if (!manualDisconnect && mySessionId == sessionId) {
-                    isServiceActive = false
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                // Only update shared service state if this session is still the active one.
+                // A superseded session (cancelAndJoin timeout) must not clobber serviceJob,
+                // isRunning, or isServiceActive that the new session has already set up.
+                if (mySessionId == sessionId) {
+                    isRunning = false
+                    serviceJob = null
+                    if (!manualDisconnect) {
+                        isServiceActive = false
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
             }
                 }
