@@ -51,6 +51,17 @@ pub struct ServerArgs {
     #[arg(long, value_name = "ID")]
     pub show_client: Option<String>,
 
+    /// Add a new one-time enrollment client (0.9.0+).
+    /// The first device to connect will have its static X25519 key bound automatically.
+    /// Subsequent connects require the same device key.
+    #[arg(long, value_name = "NAME")]
+    pub add_client_one_time: Option<String>,
+
+    /// Reset device binding for a client by name or ID (0.9.0+).
+    /// Clears the bound device key and re-enables one-time enrollment.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub reset_device: Option<String>,
+
     /// Public IP of this server (embedded into connection keys).
     /// Required when using --add-client or --show-client to generate connection keys.
     #[arg(long, env = "AIVPN_SERVER_IP")]
@@ -147,6 +158,12 @@ pub struct ServerArgs {
     /// Certificate validity in days (default: 365). Used with --issue-cert.
     #[arg(long, default_value_t = 365)]
     pub days: u64,
+
+    /// Allow direct routing between VPN clients (client-to-client relay, 0.9.0+).
+    /// When enabled, packets from one VPN client destined for another VPN IP are
+    /// forwarded directly without leaving the server. Disabled by default.
+    #[arg(long, env = "AIVPN_ALLOW_PEER_ROUTING")]
+    pub allow_peer_routing: bool,
 }
 
 /// AIVPN Server instance

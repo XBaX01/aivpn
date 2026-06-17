@@ -94,6 +94,9 @@ pub struct GatewayConfig {
     /// Append-only audit log (H-S-8). Records security-relevant session events.
     /// Defaults to `AuditLogger::disabled()` (writes to /dev/null).
     pub audit_log: AuditLogger,
+    /// Allow direct client-to-client packet routing inside the VPN subnet (0.9.0+).
+    /// When false (default), VPN-to-VPN traffic is silently dropped at the TUN level.
+    pub allow_peer_routing: bool,
 }
 
 impl Default for GatewayConfig {
@@ -125,6 +128,7 @@ impl Default for GatewayConfig {
             mtls: None,
             exit_node_enabled: false,
             audit_log: AuditLogger::disabled(),
+            allow_peer_routing: false,
         }
     }
 }
@@ -811,6 +815,7 @@ impl Gateway {
 
                 let client_db = self.client_db.clone();
                 let qos_enforcer = self.qos_enforcer.clone();
+                let allow_peer_routing = self.config.allow_peer_routing;
                 tokio::spawn(async move {
                     Self::tun_read_loop(
                         tun_reader,
@@ -822,6 +827,7 @@ impl Gateway {
                         recorder,
                         client_db,
                         qos_enforcer,
+                        allow_peer_routing,
                     )
                     .await;
                 });
@@ -1148,6 +1154,7 @@ impl Gateway {
         recorder: Option<Arc<RecordingManager>>,
         client_db: Option<Arc<ClientDatabase>>,
         qos_enforcer: Arc<crate::qos::QosEnforcer>,
+        allow_peer_routing: bool,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -1171,6 +1178,21 @@ impl Gateway {
                             let _ = tun_writer.send(reply).await;
                         }
                         continue;
+                    }
+
+                    // Guard client-to-client relay (0.9.0+).
+                    // If the packet's source IP belongs to a VPN client session,
+                    // this is intra-VPN (peer-to-peer) traffic — only forward when
+                    // allow_peer_routing is enabled.
+                    if !allow_peer_routing {
+                        let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+                        if sessions.get_session_by_vpn_ip(&src_ip).is_some() {
+                            debug!(
+                                "TUN: dropping peer packet {}->{} (allow_peer_routing=false)",
+                                src_ip, dst_ip
+                            );
+                            continue;
+                        }
                     }
 
                     // Find session by VPN IP
@@ -2260,6 +2282,9 @@ impl Gateway {
                 // Handle ACK
                 debug!("ACK packet received");
             }
+            InnerType::FecRepair => {
+                debug!("FEC repair packet received (not yet processed)");
+            }
         }
 
         Ok(())
@@ -2615,6 +2640,64 @@ impl Gateway {
                     "Unexpected CertRejected from client {}",
                     hash_addr(&client_addr)
                 );
+            }
+            ControlPayload::DeviceEnrollment { static_pub, dh_proof } => {
+                let client_id = { session.lock().client_id.clone() };
+                if let (Some(ref db), Some(ref cid)) = (&self.client_db, &client_id) {
+                    // Verify DH proof: X25519(static_priv, server_static_pub) == dh_proof
+                    let server_kp = crypto::KeyPair::from_private_key(self.config.server_private_key);
+                    let expected_dh = match server_kp.compute_shared(&static_pub) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!("DeviceEnrollment from {}: DH error: {}", hash_addr(&client_addr), e);
+                            return Ok(());
+                        }
+                    };
+                    use subtle::ConstantTimeEq;
+                    if expected_dh.ct_eq(&dh_proof).unwrap_u8() == 0 {
+                        warn!("DeviceEnrollment from {}: invalid DH proof — rejecting", hash_addr(&client_addr));
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "device_enrollment_rejected",
+                            cid,
+                            "denied",
+                        );
+                        let shutdown = ControlPayload::Shutdown { reason: 3 };
+                        let _ = self.send_control_message(&shutdown, session).await;
+                        let session_id = session.lock().session_id;
+                        self.session_manager.remove_session(&session_id);
+                        return Ok(());
+                    }
+                    match db.enroll_device(cid, &static_pub) {
+                        Ok(true) => info!("Device enrolled and bound for client {}", cid),
+                        Ok(false) => debug!("Device binding verified for client {}", cid),
+                        Err(e) => {
+                            warn!("Device binding mismatch for {}: {}", cid, e);
+                            self.audit_log.log(
+                                AuditActor::System,
+                                "device_binding_mismatch",
+                                cid,
+                                "denied",
+                            );
+                            let shutdown = ControlPayload::Shutdown { reason: 4 };
+                            let _ = self.send_control_message(&shutdown, session).await;
+                            let session_id = session.lock().session_id;
+                            self.session_manager.remove_session(&session_id);
+                        }
+                    }
+                }
+            }
+            ControlPayload::KeepaliveAck { echo_ts } => {
+                debug!("KeepaliveAck from {} echo_ts={}", hash_addr(&client_addr), echo_ts);
+            }
+            ControlPayload::QualityReport { quality, rtt_ms, loss_ppm, jitter_ms } => {
+                debug!(
+                    "QualityReport from {}: quality={} rtt={}ms loss={}ppm jitter={}ms",
+                    hash_addr(&client_addr), quality, rtt_ms, loss_ppm, jitter_ms
+                );
+            }
+            ControlPayload::AdaptiveHint { .. } => {
+                debug!("AdaptiveHint from client {} ignored", hash_addr(&client_addr));
             }
         }
 
