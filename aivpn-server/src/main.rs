@@ -1387,6 +1387,9 @@ mod tests {
             issue_cert: None,
             ca_key: None,
             days: 365,
+            add_client_one_time: None,
+            reset_device: None,
+            allow_peer_routing: false,
         }
     }
 
