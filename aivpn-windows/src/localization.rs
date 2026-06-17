@@ -78,6 +78,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         // Keys
         (Lang::En, "keys") => "Connection Keys",
         (Lang::Ru, "keys") => "Ключи подключения",
+        (Lang::En, "device_key") => "Device Public Key",
+        (Lang::Ru, "device_key") => "Публичный ключ устройства",
+        (Lang::En, "copy") => "Copy",
+        (Lang::Ru, "copy") => "Копировать",
         (Lang::En, "add_key") => "Add Key",
         (Lang::Ru, "add_key") => "Добавить ключ",
         (Lang::En, "key_name") => "Name",

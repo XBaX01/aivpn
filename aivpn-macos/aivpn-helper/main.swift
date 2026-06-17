@@ -668,6 +668,9 @@ func handleConnection(_ clientFD: Int32) {
     case "record_stop":
         response = runClientCommand(args: ["record", "stop"], binaryPath: request.binaryPath)
 
+    case "device_key":
+        response = runClientCommand(args: ["--show-device-key"], binaryPath: request.binaryPath)
+
     case "record_info":
         response = getRecordingInfo()
 

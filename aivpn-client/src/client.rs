@@ -1416,8 +1416,8 @@ impl Drop for AivpnClient {
 /// Returns None when HOME is unset or on unrecoverable I/O errors — device binding is optional.
 fn load_or_generate_static_keypair() -> Option<KeyPair> {
     use std::fs;
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     let home = dirs_home()?; // skip persistence when HOME is unset
     let dir = home.join(".config").join("aivpn");
@@ -1449,20 +1449,27 @@ fn load_or_generate_static_keypair() -> Option<KeyPair> {
         return Some(kp); // proceed without persistence
     }
     // Tighten directory to owner-only (700) so siblings are not enumerable.
+    #[cfg(unix)]
     let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
 
-    // Write to a temp sibling with mode 0o600 atomically, then rename.
+    // Write to a temp sibling atomically, then rename.
     let tmp_path = path.with_extension("tmp");
     let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
-        f.write_all(&priv_bytes)?;
-        f.sync_all()?;
-        fs::rename(&tmp_path, &path)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.write_all(&priv_bytes)?;
+            f.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        fs::write(&tmp_path, &priv_bytes)?;
+        fs::rename(&tmp_path, &path)
     })();
 
     match write_result {
@@ -1476,5 +1483,15 @@ fn load_or_generate_static_keypair() -> Option<KeyPair> {
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    return std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Load or generate the static device keypair and return the base64-encoded public key.
+pub fn device_public_key_b64() -> Option<String> {
+    use base64::Engine;
+    let kp = load_or_generate_static_keypair()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(kp.public_key_bytes()))
 }

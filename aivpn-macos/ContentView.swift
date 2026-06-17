@@ -373,6 +373,34 @@ struct ContentView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
+            // Device public key
+            if !vpn.devicePublicKey.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Device Key:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    let truncated = vpn.devicePublicKey.count > 20
+                        ? String(vpn.devicePublicKey.prefix(8)) + "…" + String(vpn.devicePublicKey.suffix(8))
+                        : vpn.devicePublicKey
+                    Text(truncated)
+                        .font(.caption2)
+                        .monospaced()
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(vpn.devicePublicKey, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+            }
+
             Divider()
 
             if let result = vpn.lastRecordingResult {

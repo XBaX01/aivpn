@@ -75,6 +75,7 @@ class VPNManager: ObservableObject {
     @Published var bytesReceived: Int64 = 0
     @Published var qualityScore: Int = 0
     @Published var serverAdaptiveLevel: Int = 0
+    @Published var devicePublicKey: String = ""
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
@@ -123,15 +124,24 @@ class VPNManager: ObservableObject {
             savedKey = keyValue
         }
 
-        // Check helper availability after a short delay
+        // Check helper availability and load device key after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.checkHelperAvailable()
+            self?.loadDeviceKey()
         }
     }
 
     private func helperClientBinaryPath() -> String? {
         let bundledBinary = Bundle.main.bundlePath + "/Contents/Resources/aivpn-client"
         return FileManager.default.isExecutableFile(atPath: bundledBinary) ? bundledBinary : nil
+    }
+
+    func loadDeviceKey() {
+        runBundledClientCommand(["--show-device-key"]) { [weak self] success, output in
+            if success && !output.isEmpty {
+                self?.devicePublicKey = output
+            }
+        }
     }
 
     private func runBundledClientCommand(_ args: [String], completion: ((Bool, String) -> Void)? = nil) {

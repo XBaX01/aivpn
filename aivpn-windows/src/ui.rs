@@ -51,6 +51,11 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
 
     ui.add_space(4.0);
 
+    // Device public key
+    draw_device_key_section(ui, app);
+
+    ui.add_space(4.0);
+
     // Adaptive mode toggle
     draw_adaptive_section(ui, app);
 
@@ -437,6 +442,47 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     None => {}
                 }
             }
+        });
+}
+
+fn draw_device_key_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    ui.label(
+        RichText::new(t(app.lang, "device_key"))
+            .size(13.0)
+            .color(DIM),
+    );
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| match &app.device_public_key {
+                Some(key) => {
+                    let short = if key.len() > 20 {
+                        format!("{}…{}", &key[..8], &key[key.len() - 8..])
+                    } else {
+                        key.clone()
+                    };
+                    ui.label(
+                        RichText::new(&short)
+                            .size(11.0)
+                            .color(Color32::LIGHT_GRAY)
+                            .monospace(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let full = key.clone();
+                        if ui
+                            .button(RichText::new(t(app.lang, "copy")).size(11.0))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(full);
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new("—").size(11.0).color(DIM));
+                }
+            });
         });
 }
 

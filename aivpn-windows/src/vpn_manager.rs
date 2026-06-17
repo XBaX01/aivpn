@@ -249,6 +249,22 @@ impl VpnManager {
         serde_json::from_slice(&out.stdout).ok()
     }
 
+    /// Run `aivpn-client --show-device-key` and return the base64-encoded device public key.
+    pub fn get_device_public_key(&self) -> Option<String> {
+        let out = Command::new(&self.client_binary)
+            .arg("--show-device-key")
+            .output()
+            .ok()?;
+        if out.status.success() {
+            String::from_utf8(out.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    }
+
     /// Return the current server address (set when connect() was called).
     pub fn server_addr(&self) -> Option<&str> {
         self.server_addr.as_deref()

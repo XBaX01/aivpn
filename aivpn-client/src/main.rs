@@ -82,6 +82,10 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub no_fallback: bool,
 
+    /// Print this device's X25519 public key (base64) and exit. Used by GUI clients.
+    #[arg(long, default_value_t = false)]
+    pub show_device_key: bool,
+
     /// Run as SOCKS5 proxy on this address instead of a TUN device (no root required).
     /// Example: --proxy-listen 127.0.0.1:1080
     #[arg(long, value_name = "HOST:PORT")]
@@ -258,6 +262,20 @@ async fn main() {
 
     // Parse arguments
     let args = ClientArgs::parse();
+
+    // Device key query — must run before anything else (no root, no network needed)
+    if args.show_device_key {
+        match aivpn_client::client::device_public_key_b64() {
+            Some(key) => {
+                println!("{}", key);
+            }
+            None => {
+                error!("Failed to load or generate device key");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     // Handle subcommands
     if let Some(command) = args.command {
