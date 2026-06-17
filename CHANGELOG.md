@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.4] - 2026-06-17
+
+### Fixed
+
+- **Android/iOS disconnect leaves ghost session on server** — the Android and iOS native cores closed the UDP socket without sending `ControlPayload::Shutdown` to the server; the server kept the session alive for 30 s (idle timeout), creating a ghost session window during reconnect where incoming packets could match the stale session's tag and fail decryption — causing the VPN to appear hung and the disconnect button to appear broken on the second connection; both cores now send `Shutdown { reason: 0 }` before closing the socket, matching the behaviour already present in the CLI/macOS/Windows client
+
+### Changed
+
+- Version bumped 0.8.3 → 0.8.4 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, iOS/macOS version strings
+
+---
+
+## [0.8.4] — 2026-06-17
+
+### Исправлено
+
+- **Android/iOS: фантомная сессия на сервере после отключения** — нативные ядра Android и iOS закрывали UDP-сокет без отправки `ControlPayload::Shutdown` серверу; сервер удерживал сессию ещё 30 с (idle timeout), создавая окно, в котором при повторном подключении входящие пакеты могли попасть в устаревшую сессию с ошибкой расшифровки — VPN зависал, а кнопка отключения переставала работать со второго раза; оба ядра теперь отправляют `Shutdown { reason: 0 }` перед закрытием сокета, как это уже делают CLI/macOS/Windows-клиенты
+
+### Изменено
+
+- Версия поднята с 0.8.3 до 0.8.4 во всём workspace: `Cargo.toml`, все crate-файлы, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строки версий iOS/macOS
+
+---
+
 ## [0.8.3] - 2026-06-16
 
 ### Fixed
