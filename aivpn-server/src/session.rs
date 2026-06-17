@@ -27,7 +27,7 @@ use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType};
 pub const MAX_SESSIONS: usize = 500;
 
 /// Session idle timeout (default)
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Session hard timeout — 0 means unlimited (Issue #33).
 /// Configurable via `session_timeout_secs` in server.json.
