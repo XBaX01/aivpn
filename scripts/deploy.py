@@ -12,7 +12,7 @@ import paramiko
 DEFAULT_REMOTE_DIR = "/root/aivpn"
 UPLOAD_FILES = [
     "docker-compose.yml",
-    "Dockerfile.prebuilt",
+    "docker/Dockerfile.prebuilt",
     "deploy-server-release.sh",
     "config/server.json",
     "releases/aivpn-server-linux-x86_64",

@@ -160,7 +160,7 @@ fi
 
 echo "Starting server from prebuilt release binary"
 cd "$SCRIPT_DIR"
-AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt "${DOCKER_COMPOSE_CMD[@]}" up -d --build --force-recreate aivpn-server
+AIVPN_SERVER_DOCKERFILE=docker/Dockerfile.prebuilt "${DOCKER_COMPOSE_CMD[@]}" up -d --build --force-recreate aivpn-server
 
 echo ""
 echo "Server deployed."

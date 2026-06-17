@@ -45,7 +45,7 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/aivpn-server /usr/local/bin/aivpn-server
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Create config directory and TUN device node
 RUN mkdir -p /etc/aivpn /dev/net /var/lib/aivpn/bootstrap /var/lib/aivpn/masks && \
