@@ -261,7 +261,7 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_startRecording<'local>(
     service_name: JString<'local>,
 ) -> jint {
     let service = match env.get_string(&service_name) {
-        Ok(s) => String::from(s),
+        Ok(s) => String::from(s).chars().take(128).collect::<String>(),
         Err(_) => return 0,
     };
     send_control_payload(ControlPayload::RecordingStart { service }) as jint

@@ -213,9 +213,12 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         args.append("--adaptive")
     }
     if let proxy = dnsProxy, !proxy.isEmpty {
-        // Validate: must be HOST:PORT with no shell-special characters.
+        // Validate HOST:PORT — character whitelist + port range 1–65535.
         let proxyCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:.[]-")
-        guard proxy.unicodeScalars.allSatisfy({ proxyCharset.contains($0) }) else {
+        guard proxy.unicodeScalars.allSatisfy({ proxyCharset.contains($0) }),
+              let colonIdx = proxy.lastIndex(of: ":"),
+              let port = Int(proxy[proxy.index(after: colonIdx)...]),
+              (1...65535).contains(port) else {
             log("ERROR: invalid dnsProxy '\(proxy)' — rejected")
             return HelperResponse(status: "error", message: "Invalid dns-proxy value")
         }

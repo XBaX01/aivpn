@@ -170,6 +170,12 @@ impl VpnManager {
 
         if let Some(addr) = dns_proxy {
             if !addr.is_empty() {
+                // Validate HOST:PORT — must contain a colon and only safe characters.
+                let valid = addr.contains(':')
+                    && addr.chars().all(|c| c.is_ascii_alphanumeric() || ":.[]−-".contains(c));
+                if !valid {
+                    return Err(format!("Invalid dns-proxy address: {addr}"));
+                }
                 cmd.arg("--dns-proxy").arg(addr);
             }
         }

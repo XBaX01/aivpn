@@ -526,6 +526,9 @@ pub async fn run_tunnel_android(
     let keepalive_sent_ms_rx = keepalive_sent_ms.clone();
     let mut quality_tracker = QualityTracker::new();
 
+    // Reset per-session hint so getAdaptiveLevelHint() returns 0 ("no hint yet") for this session.
+    ACTIVE_ADAPTIVE_LEVEL.store(0, Ordering::Relaxed);
+
     // Control-payload channel: lets JNI send RecordingStart/Stop without reconnecting.
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlPayload>(8);
     {
@@ -536,9 +539,8 @@ pub async fn run_tunnel_android(
     struct CtrlTxGuard;
     impl Drop for CtrlTxGuard {
         fn drop(&mut self) {
-            if let Ok(mut g) = ACTIVE_CONTROL_TX.lock() {
-                *g = None;
-            }
+            let mut g = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+            *g = None;
         }
     }
     let _ctrl_tx_guard = CtrlTxGuard;
