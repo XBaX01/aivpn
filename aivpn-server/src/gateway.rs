@@ -2236,6 +2236,39 @@ impl Gateway {
                     return Ok(());
                 }
 
+                // Anti-spoof + peer routing gate (authoritative, at ingress).
+                // Check inner IPv4 header: src must match the session's assigned VPN IP
+                // to prevent clients from masquerading as other sessions or the server.
+                // Also enforce allow_peer_routing before the packet reaches TUN.
+                if payload.len() >= 20 && (payload[0] >> 4) == 4 {
+                    let inner_src = std::net::Ipv4Addr::new(
+                        payload[12], payload[13], payload[14], payload[15],
+                    );
+                    let inner_dst = std::net::Ipv4Addr::new(
+                        payload[16], payload[17], payload[18], payload[19],
+                    );
+                    let session_vpn_ip = session.lock().vpn_ip;
+                    if let Some(svpn) = session_vpn_ip {
+                        if inner_src != svpn {
+                            warn!(
+                                "Anti-spoof: dropping packet src={} from session owning vpn_ip={}",
+                                inner_src, svpn
+                            );
+                            return Ok(());
+                        }
+                    }
+                    // Block intra-VPN routing at ingress when not opted in.
+                    if !self.config.allow_peer_routing
+                        && self.session_manager.get_session_by_vpn_ip(&inner_dst).is_some()
+                    {
+                        debug!(
+                            "Peer routing disabled — dropping {}->{} at ingress",
+                            inner_src, inner_dst
+                        );
+                        return Ok(());
+                    }
+                }
+
                 // Forward to NAT/internet via TUN write channel (lock-free)
                 debug!(
                     "DATA packet from {} ({} bytes)",

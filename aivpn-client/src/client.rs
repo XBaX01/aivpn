@@ -1350,12 +1350,14 @@ impl Drop for AivpnClient {
 }
 
 /// Load static X25519 keypair from `~/.config/aivpn/device.key` or generate and save a new one.
-/// Returns None on any I/O error so that device binding is optional and non-blocking.
+/// Returns None when HOME is unset or on unrecoverable I/O errors — device binding is optional.
 fn load_or_generate_static_keypair() -> Option<KeyPair> {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let dir = dirs_home().join(".config").join("aivpn");
+    let home = dirs_home()?; // skip persistence when HOME is unset
+    let dir = home.join(".config").join("aivpn");
     let path = dir.join("device.key");
 
     if path.exists() {
@@ -1375,25 +1377,41 @@ fn load_or_generate_static_keypair() -> Option<KeyPair> {
         }
     }
 
-    // Generate new keypair and persist
+    // Generate new keypair and persist atomically with correct permissions from the start.
     let kp = KeyPair::generate();
     let priv_bytes = kp.export_private_key();
+
     if let Err(e) = fs::create_dir_all(&dir) {
         warn!("Cannot create ~/.config/aivpn: {}", e);
-        return Some(kp);
+        return Some(kp); // proceed without persistence
     }
-    if let Err(e) = fs::write(&path, priv_bytes) {
-        warn!("Cannot write device.key: {}", e);
-        return Some(kp);
+    // Tighten directory to owner-only (700) so siblings are not enumerable.
+    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+
+    // Write to a temp sibling with mode 0o600 atomically, then rename.
+    let tmp_path = path.with_extension("tmp");
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        f.write_all(&priv_bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp_path, &path)?;
+        Ok(())
+    })();
+
+    match write_result {
+        Ok(()) => info!("New device keypair generated and saved to {:?}", path),
+        Err(e) => {
+            warn!("Cannot write device.key: {}", e);
+            let _ = fs::remove_file(&tmp_path);
+        }
     }
-    // Restrict to owner read/write only
-    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    info!("New device keypair generated and saved to {:?}", path);
     Some(kp)
 }
 
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
