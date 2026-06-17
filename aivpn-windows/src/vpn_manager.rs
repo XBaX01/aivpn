@@ -165,7 +165,8 @@ impl VpnManager {
         }
 
         if adaptive_level > 0 {
-            cmd.arg("--adaptive");
+            cmd.arg("--adaptive-level")
+                .arg(adaptive_level.to_string());
         }
 
         if let Some(addr) = dns_proxy {

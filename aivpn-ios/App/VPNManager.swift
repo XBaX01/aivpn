@@ -138,7 +138,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: ConnectionKey, fullTunnel: Bool, adaptiveLevel: Int = 0) {
+    func connect(key: ConnectionKey, fullTunnel: Bool, adaptiveLevel: Int = 0, killSwitch: Bool = false) {
         guard let manager = manager else { return }
         guard !isConnecting else { return }
 
@@ -161,6 +161,9 @@ class VPNManager: ObservableObject {
         ]
         if adaptiveLevel > 0 {
             providerConfig["adaptiveLevel"] = adaptiveLevel
+        }
+        if killSwitch {
+            providerConfig["killSwitch"] = true
         }
         if let cert = key.mtlsCert, !cert.isEmpty {
             providerConfig["mtlsCert"] = cert

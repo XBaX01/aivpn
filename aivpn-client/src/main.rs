@@ -121,6 +121,11 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub adaptive: bool,
 
+    /// Adaptive mode level: 0=Off, 1=Light (6s), 2=Aggressive (4s), 3=Satellite (15s).
+    /// Overrides --adaptive when set. Passed by GUI clients.
+    #[arg(long, value_name = "N")]
+    pub adaptive_level: Option<u8>,
+
     /// Start a local DNS proxy on this address to prevent DNS leaks (e.g. 127.0.0.1:5300).
     /// Point /etc/resolv.conf at this address after connecting.
     #[arg(long, value_name = "HOST:PORT")]
@@ -534,17 +539,20 @@ async fn main() {
         info!("Server pool active: {} node(s)", pool.node_count());
     }
 
+    // Resolve effective adaptive flag: --adaptive-level N overrides bool --adaptive.
+    let adaptive_on = args.adaptive_level.unwrap_or(if args.adaptive { 1 } else { 0 }) > 0;
+
     // Adaptive mode monitor
     let adaptive_monitor = AdaptiveMonitor::new(AdaptiveConfig {
-        enabled: args.adaptive,
+        enabled: adaptive_on,
         ..AdaptiveConfig::default()
     });
-    if args.adaptive {
+    if adaptive_on {
         info!("Adaptive mode enabled (auto MTU/keepalive tuning)");
     }
     // Lower initial MTU for restrictive mobile networks (MTS, Megafon) when adaptive is on.
     // The AdaptiveMonitor will step it down further if packet loss is detected.
-    let network_config = if args.adaptive {
+    let network_config = if adaptive_on {
         aivpn_common::network_config::ClientNetworkConfig {
             mtu: network_config.mtu.min(1200),
             ..network_config

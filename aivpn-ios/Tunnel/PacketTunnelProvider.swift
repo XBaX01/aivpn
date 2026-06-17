@@ -17,8 +17,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var outboundTask: Task<Void, Never>?
     private var isStopped = false
     private let appGroup = "group.com.aivpn.client"
-    // Recording requires full Rust control-plane wiring — not yet implemented
-    private let canRecord: Bool = false
+    private let canRecord: Bool = true
 
     // MARK: - Start
 
@@ -33,6 +32,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let fullTunnel = cfg["fullTunnel"] as? Bool ?? true
         let adaptiveLevel = cfg["adaptiveLevel"] as? Int ?? 0
+        let killSwitch = cfg["killSwitch"] as? Bool ?? false
 
         // Split-tunnel lists forwarded by VPNManager from App Group UserDefaults.
         let excludedRoutes = (cfg["excluded_routes"] as? String ?? "")
@@ -74,7 +74,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                      fullTunnel: fullTunnel,
                                      excludedRoutes: excludedRoutes,
                                      excludedDomains: excludedDomains,
-                                     adaptiveLevel: adaptiveLevel)
+                                     adaptiveLevel: adaptiveLevel,
+                                     killSwitch: killSwitch)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self = self else { return }
@@ -118,6 +119,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                                      sKeyPtr.baseAddress!, pskPtr,
                                                      certPtr, certCount,
                                                      dkPtr.baseAddress!, Int32(32),
+                                                     Int32(adaptiveLevel),
                                                      nil, nil)
                             }
                         }
@@ -171,24 +173,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch type {
         case "get_traffic":
-            let up   = (NSNumber(value: aivpn_get_upload_bytes())).int64Value
-            let down = (NSNumber(value: aivpn_get_download_bytes())).int64Value
+            let up      = (NSNumber(value: aivpn_get_upload_bytes())).int64Value
+            let down    = (NSNumber(value: aivpn_get_download_bytes())).int64Value
+            let quality = Int(aivpn_get_quality_score())
             let resp: [String: Any] = [
                 "upload":          up,
                 "download":        down,
                 "can_record":      canRecord,
                 "recording_state": "idle",
+                "quality_score":   quality,
             ]
             completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
 
-        case "record_start", "record_stop", "record_status":
-            // Recording requires full Rust control-plane wiring not yet implemented
-            // in the tunnel extension. Return a well-formed error response so the
-            // UI does not get stuck in .starting state waiting for a nil reply.
-            let resp: [String: Any] = [
-                "canRecord": false,
-                "error":     "not supported in tunnel extension",
-            ]
+        case "record_start":
+            let service = json["service"] as? String ?? ""
+            let ok: Bool
+            if service.isEmpty {
+                ok = false
+            } else {
+                ok = service.withCString { ptr in
+                    aivpn_start_recording(ptr) != 0
+                }
+            }
+            let resp: [String: Any] = ["started": ok]
+            completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
+
+        case "record_stop":
+            aivpn_stop_recording()
+            completionHandler?(try? JSONSerialization.data(withJSONObject: ["stopped": true]))
+
+        case "record_status":
+            let resp: [String: Any] = ["can_record": canRecord]
             completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
 
         default:
@@ -250,9 +265,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                fullTunnel: Bool,
                                excludedRoutes: [String] = [],
                                excludedDomains: [String] = [],
-                               adaptiveLevel: Int = 0) -> NEPacketTunnelNetworkSettings {
+                               adaptiveLevel: Int = 0,
+                               killSwitch: Bool = false) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
         settings.mtu = adaptiveLevel >= 2 ? 1200 : (adaptiveLevel == 1 ? 1300 : 1400)
+        settings.includeAllNetworks = killSwitch
 
         let ipv4 = NEIPv4Settings(addresses: [vpnIP], subnetMasks: ["255.255.255.0"])
         if fullTunnel {

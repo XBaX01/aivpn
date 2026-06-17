@@ -275,6 +275,14 @@ class LocalizationManager: ObservableObject {
             "en": "mTLS certificate is not used in SOCKS5 proxy mode",
             "ru": "mTLS-сертификат не применяется в режиме SOCKS5-прокси"
         ],
+        "kill_switch": [
+            "en": "Kill Switch (block traffic if VPN drops)",
+            "ru": "Kill Switch (блок трафика при разрыве VPN)"
+        ],
+        "kill_switch_help": [
+            "en": "Block all non-VPN traffic while connected. Rules persist after unexpected process death.",
+            "ru": "Блокировать весь трафик вне VPN. Правила сохраняются после аварийного завершения."
+        ],
     ]
 
     init() {

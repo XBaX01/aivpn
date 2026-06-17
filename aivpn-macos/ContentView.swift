@@ -14,6 +14,7 @@ struct ContentView: View {
     @AppStorage("proxyPort") private var proxyPort: String = "1080"
     @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
     @AppStorage("dnsProxyAddr") private var dnsProxyAddr: String = ""
+    @AppStorage("killSwitch") private var killSwitch: Bool = false
     @State private var showDiagnostics: Bool = false
     @State private var benchRunning: Bool = false
     @State private var benchResult: BenchDisplayResult? = nil
@@ -296,6 +297,15 @@ struct ContentView: View {
                         .font(.system(size: 11))
                         .help(loc.t("dns_proxy_help"))
 
+                    HStack {
+                        Toggle(loc.t("kill_switch"), isOn: $killSwitch)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help(loc.t("kill_switch_help"))
+                            .disabled(proxyMode)
+                        Spacer()
+                    }
+
                     HStack(spacing: 8) {
                         Button(loc.t("cancel")) {
                             withAnimation {
@@ -524,7 +534,8 @@ struct ContentView: View {
                                         mtlsCertPath: selectedKey.mtlsCertPath,
                                         excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes,
                                         adaptiveLevel: adaptiveLevel,
-                                        dnsProxy: dnsProxyAddr.isEmpty ? nil : dnsProxyAddr)
+                                        dnsProxy: dnsProxyAddr.isEmpty ? nil : dnsProxyAddr,
+                                        killSwitch: killSwitch)
                         }
                     }
                 }

@@ -38,6 +38,7 @@ struct HelperRequest: Codable {
     let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
     let adaptiveLevel: Int?   // 0=Off, 1=Light, 2=Aggressive, 3=Satellite; nil treated as 0
     let dnsProxy: String?      // local bind address for DNS proxy (e.g. "127.0.0.1:5300")
+    let killSwitch: Bool?      // block all non-VPN traffic when true
 }
 
 struct HelperResponse: Codable {
@@ -156,7 +157,7 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil, killSwitch: Bool = false) -> HelperResponse {
     killExistingClient()
 
     // Resolve the requested path; fall back to default
@@ -210,7 +211,11 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         args.append(certPath)
     }
     if adaptiveLevel > 0 {
-        args.append("--adaptive")
+        args.append("--adaptive-level")
+        args.append("\(adaptiveLevel)")
+    }
+    if killSwitch {
+        args.append("--kill-switch")
     }
     if let proxy = dnsProxy, !proxy.isEmpty {
         // Validate HOST:PORT — character whitelist + port range 1–65535.
@@ -626,7 +631,8 @@ func handleConnection(_ clientFD: Int32) {
                                mtlsCertPath: request.mtlsCertPath,
                                excludeRoutes: request.excludeRoutes,
                                adaptiveLevel: request.adaptiveLevel ?? 0,
-                               dnsProxy: request.dnsProxy)
+                               dnsProxy: request.dnsProxy,
+                               killSwitch: request.killSwitch ?? false)
 
     case "disconnect":
         response = stopClient()

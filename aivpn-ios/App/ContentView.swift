@@ -267,6 +267,7 @@ struct ContentView: View {
 
     @State private var fullTunnel: Bool = true
     @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
+    @AppStorage("killSwitch") private var killSwitch: Bool = false
     @State private var showDiagnostics: Bool = false
     @State private var benchRunning: Bool = false
     @State private var benchP50: Int = 0
@@ -461,6 +462,8 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .padding(.horizontal)
                 .help(loc.t("adaptive_mode_help"))
+                Toggle(loc.t("kill_switch"), isOn: $killSwitch)
+                    .padding(.horizontal)
             }
             if vpn.isConnected {
                 Button {
@@ -526,7 +529,7 @@ struct ContentView: View {
                         vpn.disconnect()
                     } else {
                         guard let key = vpn.selectedKey else { return }
-                        vpn.connect(key: key, fullTunnel: fullTunnel, adaptiveLevel: adaptiveLevel)
+                        vpn.connect(key: key, fullTunnel: fullTunnel, adaptiveLevel: adaptiveLevel, killSwitch: killSwitch)
                     }
                 } label: {
                     Label(
