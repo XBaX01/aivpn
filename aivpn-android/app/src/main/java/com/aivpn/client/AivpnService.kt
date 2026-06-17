@@ -68,7 +68,7 @@ class AivpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     // Coroutine lifecycle
-    private var serviceJob: Job? = null
+    @Volatile private var serviceJob: Job? = null
     private var restartJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val serviceLifecycleMutex = Mutex()
@@ -175,6 +175,9 @@ class AivpnService : VpnService() {
         restartJob = serviceScope.launch {
             serviceLifecycleMutex.withLock {
                 AivpnJni.stopTunnel()
+                // Increment before cancelAndJoin so that the old job's finally{}
+                // sees sessionId != mySessionId and does NOT call stopSelf().
+                val capturedSessionId = ++sessionId
                 // AivpnJni.runTunnel() is a blocking native call — Kotlin coroutine
                 // cancellation cannot interrupt it.  Give it 3 s to exit after
                 // stopTunnel() fired the eventfd; proceed regardless so the mutex is
@@ -212,8 +215,8 @@ class AivpnService : VpnService() {
                 if (manualDisconnect) {
                     return@withLock
                 }
-
                 serviceJob = serviceScope.launch {
+            val mySessionId = capturedSessionId
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
             try {
                 while (isActive && !manualDisconnect) {
@@ -221,7 +224,11 @@ class AivpnService : VpnService() {
                         sessionEstablished = false
                         networkTrigger = false
                         runTunnel()
-                        closeTunnel()
+                        // Only close TUN when this session is still the active one.
+                        // A superseded session must not close the vpnInterface that the
+                        // new serviceJob just created in ensureVpnInterface() — doing so
+                        // passes an invalid fd to Rust and causes 0 RX on the 2nd connect.
+                        if (mySessionId == sessionId) closeTunnel()
                         // runTunnel() returns normally only on Rust rekey trigger — reconnect fast.
                         retryDelayMs = INITIAL_RETRY_DELAY_MS
                     } catch (e: CancellationException) {
@@ -230,7 +237,7 @@ class AivpnService : VpnService() {
                         Log.e(TAG, "Tunnel error: ${e.message}", e)
                         isRunning = false
                         if (manualDisconnect) break
-                        closeTunnel()
+                        if (mySessionId == sessionId) closeTunnel()
 
                         // Network-triggered reconnects and reconnects after an established
                         // session use zero delay so the switch feels instant.
@@ -261,12 +268,17 @@ class AivpnService : VpnService() {
             } catch (e: CancellationException) {
                 Log.d(TAG, "Service job cancelled")
             } finally {
-                isRunning = false
-                serviceJob = null
-                if (!manualDisconnect) {
-                    isServiceActive = false
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                // Only update shared service state if this session is still the active one.
+                // A superseded session (cancelAndJoin timeout) must not clobber serviceJob,
+                // isRunning, or isServiceActive that the new session has already set up.
+                if (mySessionId == sessionId) {
+                    isRunning = false
+                    serviceJob = null
+                    if (!manualDisconnect) {
+                        isServiceActive = false
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
             }
                 }
@@ -311,7 +323,6 @@ class AivpnService : VpnService() {
 
         sessionEstablished = false
         isRunning          = true
-        sessionId++     // new session — invalidates any queued upgradePendingJob
         lastStatusText = getString(R.string.status_connecting)
         val cb1 = statusCallback; cb1?.invoke(false, lastStatusText)
         updateNotification(getString(R.string.notification_connecting))
@@ -549,8 +560,6 @@ class AivpnService : VpnService() {
         closeTunnel()
         isRunning = false
         serviceScope.cancel()
-        statusCallback = null
-        trafficCallback = null
         tileCallback = null
         instance = null
         super.onDestroy()

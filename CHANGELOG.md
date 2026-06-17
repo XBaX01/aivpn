@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.8.5] - 2026-06-17
+
+### Fixed
+
+- **Server: ghost session on WiFi → cellular reconnect (0 RX for 5–10 s)** — `cleanup_old_sessions_for_vpn_ip` was called with the new session's VPN IP; when the client reconnects from a different source IP (cellular vs WiFi) the old session still owns the same VPN IP but was never removed, leaving the server routing downlink to the dead WiFi address for up to 300 s; new `cleanup_old_sessions_for_client_id` removes stale sessions by PSK identity immediately on successful re-handshake
+- **Server: tag_map visibility gap in counter recovery** — `recover_session_by_tag` used `DashMap::retain()` to update the tag map, briefly removing ALL tags for a session before re-inserting new ones; concurrent packets during this window saw no matching tag and triggered unnecessary handshakes or were dropped; fixed to targeted per-tag removal that never leaves a gap
+- **Server: redundant tag_map refresh after PFS ratchet and inline rekey** — `complete_session_ratchet()` and `commit_session_rekey()` already update the tag map internally; the extra `refresh_session_tags()` calls after each caused double-writes and extra lock contention; removed
+- **Server: double mutex acquisition in KeyRotate handler** — `session_id` and `has_pending` were fetched in two separate `session.lock()` calls; merged into a single critical section
+- **Android: zombie coroutine kills new session via `stopSelf()`** — when `AivpnJni.runTunnel()` did not exit within the 3 s `cancelAndJoin` timeout the old `serviceJob` continued running; when it eventually exited its `finally{}` block checked `manualDisconnect` (already reset to `false` by the new `startVpn()`) and called `stopSelf()`, killing the freshly started session; `sessionId` is now captured at launch time and compared in `finally{}` — stale jobs skip `stopSelf()`
+- **Android: `serviceJob` not `@Volatile`** — `serviceJob` was written from `restartJob` on `Dispatchers.IO` and read from `stopVpn()` on the main thread without a JVM visibility guarantee; added `@Volatile`
+- **macOS: disconnect callback clobbers new session state** — `VPNManager.disconnect()` fires `sendToHelper` asynchronously; if the user pressed Connect before the callback returned, the callback unconditionally reset `isConnecting` and `isConnected` to `false`, leaving the UI showing Disconnected while the tunnel was actively connecting; a `connectGeneration` counter is now captured before the async call and compared inside the callback — stale callbacks skip the state reset
+- **Android: `++sessionId` placed after `cancelAndJoin` — guard fires on every reconnect** — in the initial 0.8.5 implementation `val capturedSessionId = ++sessionId` was placed *after* `withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }`; when the old `serviceJob`'s `finally{}` block fired during cancellation `sessionId` had not yet been incremented, so `mySessionId == sessionId` was always `true` and `stopSelf()` killed the service on every reconnect trigger (network switch, periodic rekey), causing 0 RX on cellular and a broken disconnect button; `++sessionId` is now incremented *before* `cancelAndJoin()`
+- **Server: ghost session lingers for 5 minutes when Shutdown is lost** — `IDLE_TIMEOUT` was 300 s; if the client's Shutdown UDP packet was dropped by a mobile network (CGNAT, MTS) the server held the stale session for 5 minutes, blocking reconnect downlink until the ghost expired; reduced to 30 s so self-healing is fast enough to be invisible to the user
+- **Android: single Shutdown packet easily lost on CGNAT links** — the Rust core sent `ControlPayload::Shutdown` exactly once before closing; on lossy CGNAT paths (MTS) this single UDP send was frequently dropped, leaving a ghost session on the server; Shutdown is now retransmitted 3× with 50 ms intervals to reduce loss probability
+- **Android/iOS: 0 RX on reconnect with port-preserving CGNAT (MTS)** — on carriers that reuse the same external UDP port for reconnects (MTS CGNAT port preservation), the CGNAT's inbound routing table still pointed to the old (closed) internal port, silently dropping all server downlink until the entry expired (5–30 s); the Rust core now records the local port via `getsockname()` after each successful connect and tries to `bind()` to the same port on the next reconnect — when it succeeds the CGNAT mapping needs no update and downlink works immediately; falls back to OS-assigned ephemeral port if the saved port is unavailable
+- **Android/iOS: CGNAT warmup fallback — 4 keepalives after handshake** — as a second line of defence (for carriers that delay updating the inbound CGNAT entry even after port reuse), the client now sends 4 additional keepalive packets at 100 ms intervals immediately after the handshake; each outbound packet nudges the CGNAT to refresh the inbound routing entry for the new socket
+- **iOS: Shutdown packet not sent on disconnect** — the iOS Rust core closed the UDP socket without sending `ControlPayload::Shutdown`; the server kept the ghost session for up to 30 s, causing 0 RX on reconnect; Shutdown is now sent 3× with 50 ms intervals (matching the Android fix already in 0.8.5)
+- **iOS: handshake retry rotates keypair on every attempt** — the iOS retry loop regenerated the X25519 keypair on every 750 ms retry, creating up to 13 server ghost sessions per 10 s timeout; on reconnect this easily hit the per-IP session limit (5) on CGNAT networks; keypair is now rotated only once (at the 2nd retry, ~1.5 s), limiting ghost sessions to 2 maximum — matching the fix already in 0.8.3 for Android
+- **CLI/Linux/macOS/Windows: 0 RX on reconnect with port-preserving CGNAT** — the same CGNAT port reuse fix applied to Android/iOS is now applied to the desktop client (`AivpnClient`): the local UDP port is saved after each successful connect and reused on the next bind; 4 post-handshake warmup keepalives (100 ms apart) are sent after `ServerHello` as a fallback for carriers that delay inbound mapping updates
+
+---
+
+## [0.8.5] — 2026-06-17
+
+### Исправлено
+
+- **Сервер: фантомная сессия при переключении WiFi→сотовая сеть (0 RX 5–10 с)** — `cleanup_old_sessions_for_vpn_ip` вызывалась с VPN IP новой сессии; при переподключении клиента с другого IP (сотовая vs WiFi) старая сессия со своим VPN IP не удалялась, и сервер продолжал слать даунлинк на мёртвый WiFi-адрес до 300 с; новая функция `cleanup_old_sessions_for_client_id` удаляет устаревшие сессии по PSK-идентификатору сразу после успешного повторного рукопожатия
+- **Сервер: разрыв видимости в tag_map при восстановлении счётчика** — `recover_session_by_tag` использовал `DashMap::retain()` для обновления карты тегов, на мгновение удаляя ВСЕ теги сессии перед вставкой новых; параллельные пакеты в этот момент не находили тег и вызывали лишние рукопожатия или дропались; исправлено точечным удалением конкретных тегов без разрыва видимости
+- **Сервер: избыточное обновление tag_map после PFS-рачета и inline rekey** — `complete_session_ratchet()` и `commit_session_rekey()` уже обновляют tag_map внутри себя; лишние вызовы `refresh_session_tags()` после каждого создавали двойные записи и лишние блокировки; удалены
+- **Сервер: двойной захват мьютекса в обработчике KeyRotate** — `session_id` и `has_pending` считывались в двух отдельных вызовах `session.lock()`; объединено в одну критическую секцию
+- **Android: зомби-корутина убивала новую сессию через `stopSelf()`** — если `AivpnJni.runTunnel()` не завершался в течение 3 с таймаута `cancelAndJoin`, старый `serviceJob` продолжал работу; когда он завершался, его блок `finally{}` проверял `manualDisconnect` (уже сброшен в `false` новым `startVpn()`) и вызывал `stopSelf()`, убивая только что запущенную сессию; `sessionId` теперь фиксируется при запуске и сравнивается в `finally{}` — устаревшие задачи пропускают `stopSelf()`
+- **Android: `serviceJob` без аннотации `@Volatile`** — `serviceJob` записывался в `restartJob` на `Dispatchers.IO` и читался в `stopVpn()` из главного потока без гарантии видимости JVM; добавлено `@Volatile`
+- **macOS: колбэк disconnect затирал состояние новой сессии** — `VPNManager.disconnect()` вызывает `sendToHelper` асинхронно; если пользователь нажимал Connect до возврата колбэка, тот безусловно сбрасывал `isConnecting` и `isConnected` в `false`, показывая UI «Отключено» пока тоннель уже подключался; счётчик `connectGeneration` теперь фиксируется до асинхронного вызова и сравнивается внутри колбэка — устаревшие колбэки пропускают сброс состояния
+- **Android: `++sessionId` стоял после `cancelAndJoin` — guard срабатывал при каждом переподключении** — в исходной реализации 0.8.5 `val capturedSessionId = ++sessionId` располагался *после* `withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }`; когда блок `finally{}` старого `serviceJob` срабатывал во время отмены, `sessionId` ещё не был увеличен, поэтому `mySessionId == sessionId` всегда был истинным и `stopSelf()` убивал сервис при каждом триггере переподключения (смена сети, периодический rekey), вызывая 0 RX на сотовой сети и зависание кнопки отключения; `++sessionId` теперь вызывается *до* `cancelAndJoin()`
+- **Сервер: фантомная сессия живёт 5 минут при потере Shutdown** — `IDLE_TIMEOUT` был равен 300 с; если UDP-пакет Shutdown клиента дропался мобильной сетью (CGNAT, МТС), сервер удерживал устаревшую сессию 5 минут, блокируя даунлинк при переподключении до истечения призрака; уменьшено до 30 с, чтобы самовосстановление было незаметным для пользователя
+- **Android: одиночный Shutdown-пакет легко теряется на CGNAT-линках** — ядро на Rust отправляло `ControlPayload::Shutdown` ровно один раз перед закрытием; на ненадёжных CGNAT-путях (МТС) этот единственный UDP-send часто дропался, оставляя фантомную сессию на сервере; Shutdown теперь ретранслируется 3× с интервалом 50 мс для снижения вероятности потери
+- **Android/iOS: 0 RX при переподключении с port-preserving CGNAT (МТС)** — у операторов с сохранением внешнего UDP-порта при переподключении (CGNAT МТС) таблица маршрутизации входящего трафика CGNAT продолжала указывать на старый (закрытый) внутренний порт и молча дропала весь даунлинк с сервера до истечения записи (5–30 с); ядро Rust теперь сохраняет локальный порт через `getsockname()` после каждого успешного подключения и пытается сделать `bind()` на тот же порт при следующем переподключении — если это удаётся, CGNAT-маппинг не требует обновления и даунлинк работает сразу; при недоступности сохранённого порта откатывается на назначаемый ОС эфемерный порт
+- **Android/iOS: warmup-фоллбэк для CGNAT — 4 keepalive после рукопожатия** — как вторая линия защиты (для операторов, задерживающих обновление входящей записи CGNAT даже после переиспользования порта) клиент теперь отправляет 4 дополнительных keepalive-пакета с интервалом 100 мс сразу после рукопожатия; каждый исходящий пакет побуждает CGNAT обновить маршрутизацию входящего трафика для нового сокета
+- **iOS: пакет Shutdown не отправлялся при отключении** — iOS-ядро Rust закрывало UDP-сокет без отправки `ControlPayload::Shutdown`; сервер удерживал фантомную сессию до 30 с, вызывая 0 RX при переподключении; Shutdown теперь отправляется 3× с интервалом 50 мс (аналогично исправлению Android из 0.8.5)
+- **iOS: retry рукопожатия ротировал ключи при каждой попытке** — цикл повторных попыток iOS регенерировал X25519-ключи при каждом retry через 750 мс, создавая до 13 фантомных сессий за 10 с таймаута; при переподключении это легко достигало лимита сессий на IP (5) в CGNAT-сетях; ключи теперь ротируются только один раз (при 2-й попытке, ~1,5 с), ограничивая число фантомных сессий двумя — аналогично исправлению Android из 0.8.3
+- **CLI/Linux/macOS/Windows: 0 RX при переподключении с port-preserving CGNAT** — тот же фикс переиспользования UDP-порта, что применён к Android/iOS, теперь применён к десктопному клиенту (`AivpnClient`): локальный порт сохраняется после каждого успешного подключения и переиспользуется при следующем bind; 4 warmup keepalive (по 100 мс) отправляются после `ServerHello` как фоллбэк для операторов, задерживающих обновление inbound-маппинга
+
+---
+
+## [0.8.4] - 2026-06-17
+
+### Fixed
+
+- **Android/iOS disconnect leaves ghost session on server** — the Android and iOS native cores closed the UDP socket without sending `ControlPayload::Shutdown` to the server; the server kept the session alive for 30 s (idle timeout), creating a ghost session window during reconnect where incoming packets could match the stale session's tag and fail decryption — causing the VPN to appear hung and the disconnect button to appear broken on the second connection; both cores now send `Shutdown { reason: 0 }` before closing the socket, matching the behaviour already present in the CLI/macOS/Windows client
+
+### Changed
+
+- Version bumped 0.8.3 → 0.8.4 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`, iOS/macOS version strings
+
+---
+
+## [0.8.4] — 2026-06-17
+
+### Исправлено
+
+- **Android/iOS: фантомная сессия на сервере после отключения** — нативные ядра Android и iOS закрывали UDP-сокет без отправки `ControlPayload::Shutdown` серверу; сервер удерживал сессию ещё 30 с (idle timeout), создавая окно, в котором при повторном подключении входящие пакеты могли попасть в устаревшую сессию с ошибкой расшифровки — VPN зависал, а кнопка отключения переставала работать со второго раза; оба ядра теперь отправляют `Shutdown { reason: 0 }` перед закрытием сокета, как это уже делают CLI/macOS/Windows-клиенты
+
+### Изменено
+
+- Версия поднята с 0.8.3 до 0.8.4 во всём workspace: `Cargo.toml`, все crate-файлы, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`, строки версий iOS/macOS
+
+---
+
 ## [0.8.3] - 2026-06-16
 
 ### Fixed

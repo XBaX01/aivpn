@@ -550,7 +550,7 @@ struct ContentView: View {
 
             // Footer
             HStack {
-                Text("AIVPN v0.8.3")
+                Text("AIVPN v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
