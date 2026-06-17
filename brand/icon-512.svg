@@ -1,0 +1,56 @@
+<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-icon" cx="40%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#211060"/>
+      <stop offset="100%" stop-color="#0A0518"/>
+    </radialGradient>
+    <filter id="glow-icon">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="center-f">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect width="512" height="512" rx="110" fill="url(#bg-icon)"/>
+
+  <!-- Outer ring glow halo -->
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#E8FF6B" stroke-width="60" opacity="0.04"/>
+
+  <!-- Ring 3: outermost — lemon accent -->
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#E8FF6B" stroke-width="2" opacity="0.35" filter="url(#glow-icon)"/>
+
+  <!-- Lemon packet dots on ring 3 -->
+  <circle cx="256" cy="60"  r="7" fill="#E8FF6B" opacity="0.85" filter="url(#glow-icon)"/>
+  <circle cx="426" cy="353" r="6" fill="#E8FF6B" opacity="0.7"/>
+  <circle cx="86"  cy="353" r="5" fill="#E8FF6B" opacity="0.5"/>
+
+  <!-- Ring 2: mid — purple -->
+  <circle cx="256" cy="256" r="140" fill="none" stroke="#7B61FF" stroke-width="2.5" opacity="0.6" filter="url(#glow-icon)"/>
+
+  <!-- Purple packet dots on ring 2 -->
+  <circle cx="256" cy="116" r="7" fill="#9B85FF" opacity="0.95" filter="url(#glow-icon)"/>
+  <circle cx="381" cy="326" r="7" fill="#9B85FF" opacity="0.95" filter="url(#glow-icon)"/>
+  <circle cx="131" cy="186" r="7" fill="#9B85FF" opacity="0.95" filter="url(#glow-icon)"/>
+
+  <!-- Ring 1: innermost — bright purple -->
+  <circle cx="256" cy="256" r="82" fill="none" stroke="#A893FF" stroke-width="3" opacity="0.75" filter="url(#glow-icon)"/>
+
+  <!-- Purple packet dots on ring 1 -->
+  <circle cx="256" cy="174" r="8" fill="#B8A8FF" opacity="0.95" filter="url(#glow-icon)"/>
+  <circle cx="325" cy="297" r="7" fill="#B8A8FF" opacity="0.85" filter="url(#glow-icon)"/>
+  <circle cx="187" cy="297" r="7" fill="#B8A8FF" opacity="0.85" filter="url(#glow-icon)"/>
+
+  <!-- Center halo -->
+  <circle cx="256" cy="256" r="36" fill="#7B61FF" opacity="0.12" filter="url(#center-f)"/>
+
+  <!-- Center ring -->
+  <circle cx="256" cy="256" r="24" fill="none" stroke="#A893FF" stroke-width="2.5" opacity="0.85"/>
+
+  <!-- Center dot — lemon -->
+  <circle cx="256" cy="256" r="10" fill="#E8FF6B" filter="url(#center-f)"/>
+  <circle cx="256" cy="256" r="6"  fill="#FAFFB8"/>
+</svg>

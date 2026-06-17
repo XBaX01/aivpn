@@ -1,0 +1,21 @@
+<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="g">
+      <feGaussianBlur stdDeviation="1.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- Transparent bg — icon will render on menu bar -->
+  <!-- Outer ring: lemon -->
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#E8FF6B" stroke-width="1.5" opacity="0.9" filter="url(#g)"/>
+  <!-- Mid ring: purple-white for visibility -->
+  <circle cx="32" cy="32" r="19" fill="none" stroke="#B8A8FF" stroke-width="1.5" opacity="0.95" filter="url(#g)"/>
+  <!-- Inner ring -->
+  <circle cx="32" cy="32" r="10" fill="none" stroke="#D0C8FF" stroke-width="1.5" opacity="0.9"/>
+  <!-- Dots -->
+  <circle cx="32" cy="4"  r="2.5" fill="#E8FF6B" opacity="0.9"/>
+  <circle cx="53" cy="43" r="2"   fill="#B8A8FF" opacity="0.9"/>
+  <circle cx="11" cy="43" r="2"   fill="#B8A8FF" opacity="0.85"/>
+  <!-- Center -->
+  <circle cx="32" cy="32" r="4"  fill="#E8FF6B"/>
+</svg>
