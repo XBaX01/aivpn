@@ -123,6 +123,9 @@ pub struct AivpnClient {
     // Recording tracking
     active_recording_session: Option<[u8; 16]>,
     keepalive_interval: Duration,
+    /// Local UDP port used on last successful connect — reused on reconnect to
+    /// preserve CGNAT inbound mapping (port-preserving carriers like MTS).
+    last_local_port: Option<u16>,
     /// Kernel-module accelerator (Linux only, auto-detected via /dev/aivpn).
     #[cfg(target_os = "linux")]
     kernel_accel: Option<Arc<KernelAccel>>,
@@ -172,6 +175,7 @@ impl AivpnClient {
             proxy_rx_queue: None,
             active_recording_session: None,
             keepalive_interval: Duration::from_secs(DEFAULT_KEEPALIVE_SECS as u64),
+            last_local_port: None,
         })
     }
 
@@ -215,18 +219,36 @@ impl AivpnClient {
         let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
         let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
 
-        // Bind to any ephemeral port
-        let any_addr: SocketAddr = if server_addr.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
+        // Try to reuse the previous local port so port-preserving CGNAT carriers
+        // (MTS, Beeline) don't need to update their inbound routing table on
+        // reconnect — the old mapping already points to the right port.
+        let hint_port = self.last_local_port.unwrap_or(0);
+        let bind_addr: SocketAddr = if server_addr.is_ipv4() {
+            format!("0.0.0.0:{}", hint_port).parse().unwrap()
         } else {
-            "[::]:0".parse().unwrap()
+            format!("[::]:{}", hint_port).parse().unwrap()
         };
-        socket2_sock.bind(&any_addr.into()).map_err(Error::Io)?;
+        if socket2_sock.bind(&bind_addr.into()).is_err() && hint_port != 0 {
+            // Saved port unavailable — fall back to OS-assigned ephemeral.
+            let fallback: SocketAddr = if server_addr.is_ipv4() {
+                "0.0.0.0:0".parse().unwrap()
+            } else {
+                "[::]:0".parse().unwrap()
+            };
+            socket2_sock.bind(&fallback.into()).map_err(Error::Io)?;
+        }
 
         // Connect UDP socket
         socket2_sock
             .connect(&server_addr.into())
             .map_err(Error::Io)?;
+
+        // Persist the local port for the next reconnect.
+        self.last_local_port = socket2_sock
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .map(|a| a.port());
 
         let std_sock: std::net::UdpSocket = socket2_sock.into();
         let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
@@ -1096,6 +1118,14 @@ impl AivpnClient {
                 let _ = self
                     .send_control(&ControlPayload::RecordingStatusRequest)
                     .await;
+
+                // Warmup: 4 keepalives (100 ms apart) to force CGNAT to refresh
+                // its inbound port mapping after reconnect.  Fallback for carriers
+                // that delay updating the entry even after local-port reuse.
+                for _ in 0..4u8 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let _ = self.send_control(&ControlPayload::Keepalive).await;
+                }
             }
             ControlPayload::Keepalive => {
                 debug!("Keepalive from server");

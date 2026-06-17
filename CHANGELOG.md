@@ -18,6 +18,7 @@
 - **Android/iOS: CGNAT warmup fallback — 4 keepalives after handshake** — as a second line of defence (for carriers that delay updating the inbound CGNAT entry even after port reuse), the client now sends 4 additional keepalive packets at 100 ms intervals immediately after the handshake; each outbound packet nudges the CGNAT to refresh the inbound routing entry for the new socket
 - **iOS: Shutdown packet not sent on disconnect** — the iOS Rust core closed the UDP socket without sending `ControlPayload::Shutdown`; the server kept the ghost session for up to 30 s, causing 0 RX on reconnect; Shutdown is now sent 3× with 50 ms intervals (matching the Android fix already in 0.8.5)
 - **iOS: handshake retry rotates keypair on every attempt** — the iOS retry loop regenerated the X25519 keypair on every 750 ms retry, creating up to 13 server ghost sessions per 10 s timeout; on reconnect this easily hit the per-IP session limit (5) on CGNAT networks; keypair is now rotated only once (at the 2nd retry, ~1.5 s), limiting ghost sessions to 2 maximum — matching the fix already in 0.8.3 for Android
+- **CLI/Linux/macOS/Windows: 0 RX on reconnect with port-preserving CGNAT** — the same CGNAT port reuse fix applied to Android/iOS is now applied to the desktop client (`AivpnClient`): the local UDP port is saved after each successful connect and reused on the next bind; 4 post-handshake warmup keepalives (100 ms apart) are sent after `ServerHello` as a fallback for carriers that delay inbound mapping updates
 
 ---
 
@@ -39,6 +40,7 @@
 - **Android/iOS: warmup-фоллбэк для CGNAT — 4 keepalive после рукопожатия** — как вторая линия защиты (для операторов, задерживающих обновление входящей записи CGNAT даже после переиспользования порта) клиент теперь отправляет 4 дополнительных keepalive-пакета с интервалом 100 мс сразу после рукопожатия; каждый исходящий пакет побуждает CGNAT обновить маршрутизацию входящего трафика для нового сокета
 - **iOS: пакет Shutdown не отправлялся при отключении** — iOS-ядро Rust закрывало UDP-сокет без отправки `ControlPayload::Shutdown`; сервер удерживал фантомную сессию до 30 с, вызывая 0 RX при переподключении; Shutdown теперь отправляется 3× с интервалом 50 мс (аналогично исправлению Android из 0.8.5)
 - **iOS: retry рукопожатия ротировал ключи при каждой попытке** — цикл повторных попыток iOS регенерировал X25519-ключи при каждом retry через 750 мс, создавая до 13 фантомных сессий за 10 с таймаута; при переподключении это легко достигало лимита сессий на IP (5) в CGNAT-сетях; ключи теперь ротируются только один раз (при 2-й попытке, ~1,5 с), ограничивая число фантомных сессий двумя — аналогично исправлению Android из 0.8.3
+- **CLI/Linux/macOS/Windows: 0 RX при переподключении с port-preserving CGNAT** — тот же фикс переиспользования UDP-порта, что применён к Android/iOS, теперь применён к десктопному клиенту (`AivpnClient`): локальный порт сохраняется после каждого успешного подключения и переиспользуется при следующем bind; 4 warmup keepalive (по 100 мс) отправляются после `ServerHello` как фоллбэк для операторов, задерживающих обновление inbound-маппинга
 
 ---
 
