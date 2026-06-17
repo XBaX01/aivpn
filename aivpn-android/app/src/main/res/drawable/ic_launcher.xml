@@ -4,16 +4,60 @@
         <color android:color="@color/background" />
     </background>
     <foreground>
-        <inset android:inset="25%">
-            <vector
-                android:width="108dp"
-                android:height="108dp"
-                android:viewportWidth="24"
-                android:viewportHeight="24">
-                <path
-                    android:fillColor="@color/accent"
-                    android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1zM12,11.99h7c-0.53,4.12 -3.28,7.79 -7,8.94V12H5V6.3l7,-3.11V11.99z" />
-            </vector>
-        </inset>
+        <vector
+            xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+
+            <!-- Outer ring (lemon #E8FF6B), r=42, center 54,54 -->
+            <path
+                android:pathData="M54,12 A42,42 0 1,1 53.999,12 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#E8FF6B"
+                android:strokeWidth="1.8"
+                android:strokeAlpha="0.85"/>
+            <path android:pathData="M51,12 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0"
+                android:fillColor="#E8FF6B" android:fillAlpha="0.9"/>
+            <path android:pathData="M87.9,71 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0"
+                android:fillColor="#E8FF6B" android:fillAlpha="0.7"/>
+            <path android:pathData="M15.1,71 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0"
+                android:fillColor="#E8FF6B" android:fillAlpha="0.7"/>
+
+            <!-- Mid ring (purple #7B61FF), r=29 -->
+            <path
+                android:pathData="M54,25 A29,29 0 1,1 53.999,25 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#7B61FF"
+                android:strokeWidth="2.5"
+                android:strokeAlpha="0.9"/>
+            <path android:pathData="M50.5,25 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"
+                android:fillColor="#9B85FF" android:fillAlpha="0.95"/>
+            <path android:pathData="M76.1,67 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0"
+                android:fillColor="#9B85FF" android:fillAlpha="0.9"/>
+            <path android:pathData="M25.9,41 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0"
+                android:fillColor="#9B85FF" android:fillAlpha="0.85"/>
+
+            <!-- Inner ring (soft violet #A893FF), r=17 -->
+            <path
+                android:pathData="M54,37 A17,17 0 1,1 53.999,37 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#A893FF"
+                android:strokeWidth="2.8"
+                android:strokeAlpha="0.9"/>
+            <path android:pathData="M50,37 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+                android:fillColor="#B8A8FF" android:fillAlpha="0.95"/>
+            <path android:pathData="M64.5,60.5 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"
+                android:fillColor="#B8A8FF" android:fillAlpha="0.9"/>
+            <path android:pathData="M36.5,60.5 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"
+                android:fillColor="#B8A8FF" android:fillAlpha="0.9"/>
+
+            <!-- Center node (lemon) -->
+            <path android:pathData="M49.5,54 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0"
+                android:fillColor="#E8FF6B"/>
+            <path android:pathData="M51.5,54 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0"
+                android:fillColor="#FAFFB8"/>
+        </vector>
     </foreground>
 </adaptive-icon>

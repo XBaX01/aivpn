@@ -295,7 +295,7 @@ pub async fn run_tunnel_android(
     // ── 4. Send init handshake (Control/Keepalive + obfuscated eph_pub) ──
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    let keepalive = ControlPayload::Keepalive.encode()?;
+    let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
     {
         let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
         let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
@@ -401,7 +401,7 @@ pub async fn run_tunnel_android(
     // last handshake packet and the upload pipeline's first keepalive tick (which is
     // intentionally skipped). One early packet keeps the NAT entry alive.
     {
-        let ka = ControlPayload::Keepalive.encode()?;
+        let ka = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
         let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
         if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
             send_seq = send_seq.wrapping_add(1);
@@ -424,7 +424,7 @@ pub async fn run_tunnel_android(
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                if let Ok(ka) = (ControlPayload::Keepalive { send_ts: 0 }).encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         send_seq = send_seq.wrapping_add(1);
@@ -445,7 +445,9 @@ pub async fn run_tunnel_android(
             };
             if let Ok(encoded) = enrollment.encode() {
                 let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
-                if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                if let Ok(pkt) =
+                    build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)
+                {
                     send_seq = send_seq.wrapping_add(1);
                     let _ = udp.send(&pkt).await;
                 }
