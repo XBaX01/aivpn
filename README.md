@@ -723,6 +723,140 @@ Automatic MTU and keepalive tuning based on live per-connection packet-loss meas
 aivpn-client -k "aivpn://..." --adaptive
 ```
 
+---
+
+## 0.9.0 Features
+
+### 3Д Device Binding (JIT Device Enrollment)
+
+**One-time configs** let an administrator issue a connection key that auto-binds to the first device that connects. Subsequent connections are rejected unless they present the same X25519 device key — providing hardware-level client identity without manual key distribution.
+
+**How it works:**
+
+1. The server generates a `one_time` client slot with no bound device key.
+2. The first client to connect sends a `DeviceEnrollment` control packet (after PFS ratchet): its static X25519 public key + a DH proof `X25519(static_priv, server_static_pub)`.
+3. The server verifies the DH proof and stores the public key — slot is now bound.
+4. All future connections from a different device key are rejected (Shutdown reason 4).
+5. An admin can reset the binding with `--reset-device "Name"` to re-enroll.
+
+**Server commands:**
+
+```bash
+# Create a one-time enrollment slot
+aivpn-server --add-client-one-time "Alice-Phone" \
+  --key-file /etc/aivpn/server.key \
+  --clients-db /etc/aivpn/clients.json \
+  --server-ip 203.0.113.10:443
+
+# Reset binding (re-enable enrollment for a lost device)
+aivpn-server --reset-device "Alice-Phone" \
+  --clients-db /etc/aivpn/clients.json
+```
+
+**Client static key location:**
+
+| Platform | Path |
+|---|---|
+| Linux / macOS | `~/.config/aivpn/device.key` (600 perms, auto-generated) |
+| Windows | `%APPDATA%\aivpn\device.key` |
+| Android / iOS | Auto-generated per install (future: Keystore/Keychain) |
+
+**Scenario 1: Corporate laptop**
+
+An administrator creates a one-time slot for a new employee. The employee connects from their laptop — the key binds automatically. If the laptop is replaced, the admin resets the binding with `--reset-device`; the new device enrolls on its first connection.
+
+**Scenario 2: Family router**
+
+A QR code with a one-time key is printed and placed on the router. The first user to scan it binds their device. All other devices are rejected — protection against unauthorized sharing of the connection key.
+
+**Scenario 3: Secure key handoff**
+
+A VPN provider distributes a one-time config via a secure channel (Telegram, Signal). The client connects once — the config "burns" and binds to that specific device. Re-sharing the key is useless: the DH proof cannot pass without the original `device.key`.
+
+---
+
+### Connection Quality Score (0.9.0)
+
+AIVPN continuously measures connection health and computes a **0–100 quality score**:
+
+| Component | Weight | Description |
+|---|---|---|
+| RTT | 40 pts | EWMA round-trip time (0 ms = 40 pts, ≥300 ms = 0) |
+| Jitter | 20 pts | EWMA jitter (0 ms = 20 pts, ≥100 ms = 0) |
+| Loss | 30 pts | Packet loss in ppm (0 = 30 pts, ≥5% = 0) |
+| Neural MSE | 10 pts | Mask detection confidence (0 = 10 pts, ≥0.35 = 0) |
+
+The score drives **Adaptive Mode** automatically:
+
+| Score | Adaptive Level | Keepalive | FEC |
+|---|---|---|---|
+| 80–100 | Off | 8 s | disabled |
+| 50–79 | Light | 6 s | 1/16 |
+| 20–49 | Aggressive | 4 s | 1/8 |
+| 0–19 | Satellite | 15 s | 1/4 |
+
+---
+
+### XOR Forward Error Correction (FEC, 0.9.0)
+
+On lossy links (mobile, satellite, congested ISP), AIVPN sends redundant repair packets so individual packet loss is recovered without a retransmit round-trip.
+
+Every **N** data packets, one repair packet is emitted = XOR of those N packets. If exactly one packet from the group is lost, the receiver reconstructs it immediately. N is controlled by Adaptive Mode (see table above).
+
+FEC adds 1/N bandwidth overhead (e.g., 12.5% at `Aggressive` N=8). Disabled on clean links.
+
+---
+
+### Client-to-Client Relay (0.9.0)
+
+By default, VPN clients are isolated — they can only reach the internet via NAT. With `--allow-peer-routing`, the server routes packets directly between VPN clients inside the VPN subnet:
+
+```bash
+aivpn-server --allow-peer-routing ...
+```
+
+Or in `server.json`:
+
+```json
+{
+  "allow_peer_routing": true
+}
+```
+
+**Topology:**
+```
+[Client A: 10.0.0.2] ─── encrypted ──► [Server] ──► [Client B: 10.0.0.3]
+                                    (no internet hop)
+```
+
+**Use cases:**
+- Peer game servers between VPN clients
+- Team file sharing without exposing a public endpoint
+- Mesh-style LAN emulation over disparate internet connections
+
+> ⚠️ Clients must know each other's VPN IP (visible in `--show-client`). Unicast only — no multicast or broadcast.
+
+---
+
+### Local DNS Proxy (0.9.0)
+
+Prevent DNS leaks on Linux desktops without modifying system resolvers. AIVPN can start a local UDP DNS forwarder that sends all queries through the VPN tunnel:
+
+```bash
+aivpn-client -k "aivpn://..." --dns-proxy 127.0.0.1:5300 --dns-upstream 1.1.1.1:53
+```
+
+Then point your system at it:
+
+```bash
+# Temporary (survives until reboot)
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+```
+
+All DNS traffic flows through the VPN interface to the upstream resolver.
+
+---
+
 ### OpenWRT / LuCI
 
 Native OpenWRT package with procd init script, UCI config, and a LuCI web UI. See `aivpn-openwrt/docs/openwrt-setup.md`.
