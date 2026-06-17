@@ -73,6 +73,7 @@ class VPNManager: ObservableObject {
     @Published var lastError: String?
     @Published var bytesSent: Int64 = 0
     @Published var bytesReceived: Int64 = 0
+    @Published var qualityScore: Int = 0
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
@@ -788,21 +789,19 @@ class VPNManager: ObservableObject {
                 return
             }
             
-            // Response message contains "sent:X,received:Y"
+            // Response message contains "sent:X,received:Y,quality:Z"
             let parts = response.message.components(separatedBy: ",")
             for part in parts {
                 let kv = part.components(separatedBy: ":")
                 if kv.count == 2 {
-                    if let value = Int64(kv[1]) {
-                        if kv[0] == "sent" {
-                            DispatchQueue.main.async {
-                                self.bytesSent = value
-                            }
-                        } else if kv[0] == "received" {
-                            DispatchQueue.main.async {
-                                self.bytesReceived = value
-                            }
-                        }
+                    let key = kv[0]
+                    let valStr = kv[1]
+                    if key == "sent", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesSent = value }
+                    } else if key == "received", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesReceived = value }
+                    } else if key == "quality", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.qualityScore = value }
                     }
                 }
             }

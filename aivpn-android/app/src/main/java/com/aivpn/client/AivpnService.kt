@@ -591,6 +591,8 @@ class AivpnService : VpnService() {
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
         // IPv6 is intentionally disabled in this client.
+        // allowBypass() is intentionally NOT called — default VpnService.Builder behaviour
+        // prevents any app from bypassing the VPN tunnel.
         val builder = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, tunPrefixLen)

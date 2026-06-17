@@ -612,6 +612,7 @@ class MainActivity : AppCompatActivity() {
         popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
         popup.menu.add(0, MENU_RECORDING, 2, getString(R.string.recording))
         popup.menu.add(0, MENU_EXPORT_LOGS, 3, getString(R.string.export_logs))
+        popup.menu.add(0, MENU_OS_KILL_SWITCH, 4, getString(R.string.os_kill_switch))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_ADAPTIVE -> {
@@ -635,6 +636,10 @@ class MainActivity : AppCompatActivity() {
                 MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
                 MENU_RECORDING -> { showRecordingDialog(); true }
                 MENU_EXPORT_LOGS -> { exportLogs(); true }
+                MENU_OS_KILL_SWITCH -> {
+                    startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS))
+                    true
+                }
                 else -> false
             }
         }
@@ -823,5 +828,6 @@ class MainActivity : AppCompatActivity() {
         private const val MENU_DIAGNOSTICS = 1002
         private const val MENU_EXPORT_LOGS = 1003
         private const val MENU_RECORDING = 1004
+        private const val MENU_OS_KILL_SWITCH = 1005
     }
 }

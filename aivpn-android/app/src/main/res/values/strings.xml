@@ -97,4 +97,5 @@
     <string name="recording_started">Recording started</string>
     <string name="recording_stopped">Recording stopped</string>
     <string name="recording_no_session">No active session</string>
+    <string name="os_kill_switch">OS Kill Switch Settings</string>
 </resources>

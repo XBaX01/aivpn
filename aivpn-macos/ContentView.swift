@@ -87,6 +87,13 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
+                        if vpn.qualityScore > 0 {
+                            Text("Q: \(vpn.qualityScore)/100")
+                                .font(.caption)
+                                .foregroundColor(vpn.qualityScore >= 80 ? .green :
+                                                 vpn.qualityScore >= 50 ? .orange : .red)
+                            Spacer()
+                        }
                         Text("↑ \(formatBytes(vpn.bytesSent))")
                             .font(.caption)
                             .foregroundColor(.secondary)

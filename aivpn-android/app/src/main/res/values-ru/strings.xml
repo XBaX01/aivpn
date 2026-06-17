@@ -97,4 +97,5 @@
     <string name="recording_started">Запись начата</string>
     <string name="recording_stopped">Запись остановлена</string>
     <string name="recording_no_session">Нет активного сеанса</string>
+    <string name="os_kill_switch">Настройки Kill Switch ОС</string>
 </resources>

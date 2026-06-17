@@ -19,6 +19,7 @@ pub enum ConnectionState {
 pub struct TrafficStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    pub quality_score: u8,
 }
 
 // ── Recording ───────────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ impl VpnManager {
             stats: TrafficStats {
                 bytes_sent: 0,
                 bytes_received: 0,
+                quality_score: 0,
             },
             last_poll: None,
             client_binary: Self::find_client_binary(),
@@ -476,10 +478,25 @@ impl VpnManager {
                     if recv >= self.stats.bytes_received || self.stats.bytes_received == 0 {
                         self.stats.bytes_received = recv;
                     }
+                    self.stats.quality_score = Self::read_quality_score();
                     return;
                 }
             }
         }
+    }
+
+    fn read_quality_score() -> u8 {
+        let path = std::env::temp_dir().join("aivpn-quality.json");
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        for part in content.split(',') {
+            let kv = part.trim_matches(|c: char| c == '{' || c == '}' || c == ' ');
+            if let Some(val) = kv.strip_prefix("\"quality\":") {
+                if let Ok(v) = val.trim().parse::<u8>() {
+                    return v;
+                }
+            }
+        }
+        0
     }
 
     fn parse_stats(content: &str) -> Option<(u64, u64)> {

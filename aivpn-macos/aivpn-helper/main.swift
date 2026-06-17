@@ -443,6 +443,13 @@ func getLog() -> HelperResponse {
                           log: recent)
 }
 
+private func readQualityScore() -> String {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/aivpn-quality.json")),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let q = json["quality"] as? Int else { return "" }
+    return ",quality:\(q)"
+}
+
 /// Get traffic statistics
 func getTrafficStats() -> HelperResponse {
     // Try to read stats file first
@@ -451,7 +458,7 @@ func getTrafficStats() -> HelperResponse {
         // Format: "sent:X,received:Y"
         let trimmed = statsContent.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.contains("sent:") && trimmed.contains("received:") {
-            return HelperResponse(status: "ok", message: trimmed)
+            return HelperResponse(status: "ok", message: trimmed + readQualityScore())
         }
     }
     
@@ -495,7 +502,7 @@ func getTrafficStats() -> HelperResponse {
         try? trimmed.write(toFile: LOG_PATH, atomically: true, encoding: .utf8)
     }
     
-    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)")
+    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)\(readQualityScore())")
 }
 
 func getRecordingInfo() -> HelperResponse {

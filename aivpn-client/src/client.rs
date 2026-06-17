@@ -1257,6 +1257,7 @@ impl AivpnClient {
                     let rtt_us = now_ms.saturating_sub(sent_ms).saturating_mul(1000);
                     self.quality_tracker.record_rtt(rtt_us);
                     let score = self.quality_tracker.score();
+                    Self::write_quality_file(score, self.quality_tracker.rtt_ms(), self.quality_tracker.jitter_ms());
                     let new_level = AdaptiveLevel::suggest(score);
                     if new_level != self.adaptive_level {
                         self.adaptive_level = new_level;
@@ -1376,6 +1377,17 @@ impl AivpnClient {
 
     pub fn bytes_received(&self) -> u64 {
         self.bytes_received.load(Ordering::Relaxed)
+    }
+
+    fn write_quality_file(score: u8, rtt_ms: u16, jitter_ms: u16) {
+        #[cfg(windows)]
+        let path = std::env::temp_dir().join("aivpn-quality.json");
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from("/tmp/aivpn-quality.json");
+        let _ = std::fs::write(
+            path,
+            format!(r#"{{"quality":{},"rtt_ms":{},"jitter_ms":{}}}"#, score, rtt_ms, jitter_ms),
+        );
     }
 }
 

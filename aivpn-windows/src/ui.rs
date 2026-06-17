@@ -188,6 +188,13 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                         .color(Color32::WHITE)
                         .strong(),
                 );
+
+                if stats.quality_score > 0 {
+                    ui.add_space(32.0);
+                    let q = stats.quality_score;
+                    let q_color = if q >= 80 { GREEN } else if q >= 50 { Color32::YELLOW } else { Color32::RED };
+                    ui.label(RichText::new(format!("Q: {}/100", q)).size(13.0).color(q_color));
+                }
             });
         });
 }
