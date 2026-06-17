@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,12 @@ impl SessionRuntime {
 }
 
 static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
+
+// Last local UDP port used by a tunnel session.  On reconnect we try to bind
+// to the same port so CGNAT carriers (MTS et al.) with port-preserving NAT
+// don't need to update their inbound routing table — the old mapping already
+// points to the right port and downlink arrives immediately.
+static LAST_LOCAL_PORT: AtomicU16 = AtomicU16::new(0);
 
 // Set by stop_active_tunnel() when called while no session is active (the gap
 // between the old session's ActiveSessionGuard drop and the new session's
@@ -403,6 +409,30 @@ pub async fn run_tunnel_android(
     }
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
+
+    // Warmup: 4 keepalives spaced 100 ms apart after the handshake.
+    // Primary fix is local-port reuse (see LAST_LOCAL_PORT above); this is
+    // the fallback for carriers that have a brief delay before updating their
+    // inbound CGNAT entry even after the outbound mapping was refreshed.
+    // Each outbound packet nudges the CGNAT to route subsequent downlink to
+    // the current socket rather than the previous (closed) one.
+    for _ in 0..4u8 {
+        tokio::select! {
+            biased;
+            _ = wait_for_stop_signal(&stop_signal) => {
+                return Err(Error::Session("Tunnel stop requested".into()));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                    let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                        send_seq = send_seq.wrapping_add(1);
+                        let _ = udp.send(&pkt).await;
+                    }
+                }
+            }
+        }
+    }
 
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];
@@ -747,16 +777,40 @@ fn create_protected_udp_socket(
         );
     }
 
-    // Bind to INADDR_ANY:0 before connect() — matches Linux client behaviour.
+    // Try to reuse the same local port as the previous session.  When a
+    // port-preserving CGNAT (MTS, Beeline, etc.) is in use, the carrier's
+    // inbound routing table still maps the old external port back to this
+    // phone.  Binding to the same internal port means no CGNAT update is
+    // needed and downlink arrives immediately without a stale-mapping delay.
+    // Falls back to OS-assigned ephemeral port if the saved port is
+    // unavailable (first connect, or port taken by another socket).
+    let port_hint = LAST_LOCAL_PORT.load(Ordering::Relaxed);
     unsafe {
         let mut any: libc::sockaddr_in = std::mem::zeroed();
         any.sin_family = libc::AF_INET as libc::sa_family_t;
-        // port 0 and addr 0 — kernel assigns ephemeral port
-        let _ = libc::bind(
-            fd,
-            &any as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        );
+        if port_hint != 0 {
+            any.sin_port = port_hint.to_be();
+            if libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            ) < 0
+            {
+                // Port unavailable — fall back to OS-assigned ephemeral.
+                any.sin_port = 0;
+                let _ = libc::bind(
+                    fd,
+                    &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                );
+            }
+        } else {
+            let _ = libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            );
+        }
     }
 
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).
@@ -777,6 +831,20 @@ fn create_protected_udp_socket(
     if rc < 0 {
         unsafe { libc::close(fd) };
         return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    // Persist the local port for the next reconnect attempt.
+    unsafe {
+        let mut sa: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::getsockname(
+            fd,
+            &mut sa as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut len,
+        ) == 0
+        {
+            LAST_LOCAL_PORT.store(u16::from_be(sa.sin_port), Ordering::Relaxed);
+        }
     }
 
     let control_fd = unsafe { libc::dup(fd) };

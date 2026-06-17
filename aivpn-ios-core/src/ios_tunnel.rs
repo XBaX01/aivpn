@@ -13,7 +13,7 @@ use std::ffi::CString;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,9 @@ impl SessionRuntime {
 }
 
 static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
+
+// Last local UDP port — reused on reconnect to preserve CGNAT inbound mapping.
+static LAST_LOCAL_PORT: AtomicU16 = AtomicU16::new(0);
 
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
@@ -213,6 +216,7 @@ pub async fn run_tunnel_ios(
     // 5. Wait for ServerHello
     let mut recv_buf = vec![0u8; BUF_SIZE];
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut retry_count: u32 = 0;
     let n = loop {
         let now = Instant::now();
         if now >= deadline {
@@ -230,14 +234,17 @@ pub async fn run_tunnel_ios(
             }
             r = udp.recv(&mut recv_buf) => { break r?; }
             _ = &mut retry => {
-                // Fresh keypair on retry: reusing the same keypair causes retry
-                // packets to match an existing server session and be treated as
-                // keepalives — the server never sends a new ServerHello.
-                keypair = KeyPair::generate();
-                dh = keypair.compute_shared(&server_key)?;
-                keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
-                send_counter = 0;
-                send_seq = 0;
+                retry_count += 1;
+                // Rotate keypair only once (at 2nd retry, ~1.5 s after first send).
+                // Rotating every retry creates a ghost session per 750 ms —
+                // on reconnect the CGNAT per-IP cap (5) is hit within seconds.
+                if retry_count == 2 {
+                    keypair = KeyPair::generate();
+                    dh = keypair.compute_shared(&server_key)?;
+                    keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                    send_counter = 0;
+                    send_seq = 0;
+                }
                 let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
                 let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
                 let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
@@ -274,10 +281,41 @@ pub async fn run_tunnel_ios(
         log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
     }
 
+    // Early keepalive: prevent CGNAT outbound mapping expiry between last
+    // handshake packet and the first upload pipeline tick.
+    {
+        let ka = ControlPayload::Keepalive.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+            send_seq = send_seq.wrapping_add(1);
+            let _ = udp.send(&pkt).await;
+        }
+    }
+
     // Notify tunnel ready via C callback (after ClientCert so app UI opens after auth)
     if let Some(cb) = on_ready {
         if let Ok(c_host) = CString::new(server_host.as_str()) {
             unsafe { cb(c_host.as_ptr(), ctx.0) };
+        }
+    }
+
+    // Warmup: 4 keepalives (100 ms apart) to force CGNAT to refresh the
+    // inbound port mapping — fallback for when port reuse alone isn't enough.
+    for _ in 0..4u8 {
+        tokio::select! {
+            biased;
+            _ = wait_for_stop(&stop_signal) => {
+                return Err(Error::Session("Tunnel stop requested".into()));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                    let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                        send_seq = send_seq.wrapping_add(1);
+                        let _ = udp.send(&pkt).await;
+                    }
+                }
+            }
         }
     }
 
@@ -369,6 +407,16 @@ pub async fn run_tunnel_ios(
             biased;
 
             _ = wait_for_stop(&stop_signal) => {
+                // Send Shutdown 3× (50 ms apart) so server drops session immediately.
+                if let Ok(sd) = (ControlPayload::Shutdown { reason: 0 }).encode() {
+                    let inner = build_inner_packet(InnerType::Control, send_seq, &sd);
+                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                        for _ in 0..3u8 {
+                            let _ = udp.send(&pkt).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+                }
                 tun_reader.abort(); upload_task.abort();
                 return Err(Error::Session("Stop requested".into()));
             }
@@ -477,6 +525,36 @@ fn create_udp_socket(dest: SocketAddr, session: &Arc<SessionRuntime>) -> Result<
             std::mem::size_of_val(&buf) as libc::socklen_t,
         );
     }
+
+    // Try to reuse the previous local port to preserve CGNAT inbound mapping.
+    let port_hint = LAST_LOCAL_PORT.load(Ordering::Relaxed);
+    unsafe {
+        let mut any: libc::sockaddr_in = std::mem::zeroed();
+        any.sin_family = libc::AF_INET as libc::sa_family_t;
+        if port_hint != 0 {
+            any.sin_port = port_hint.to_be();
+            if libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            ) < 0
+            {
+                any.sin_port = 0;
+                let _ = libc::bind(
+                    fd,
+                    &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                );
+            }
+        } else {
+            let _ = libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            );
+        }
+    }
+
     let SocketAddr::V4(v4) = dest else {
         unsafe { libc::close(fd) };
         return Err(Error::Session(
@@ -495,6 +573,21 @@ fn create_udp_socket(dest: SocketAddr, session: &Arc<SessionRuntime>) -> Result<
         unsafe { libc::close(fd) };
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
+
+    // Save local port for next reconnect.
+    unsafe {
+        let mut sa_local: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::getsockname(
+            fd,
+            &mut sa_local as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut len,
+        ) == 0
+        {
+            LAST_LOCAL_PORT.store(u16::from_be(sa_local.sin_port), Ordering::Relaxed);
+        }
+    }
+
     let dup_fd = unsafe { libc::dup(fd) };
     if dup_fd < 0 {
         unsafe { libc::close(fd) };
