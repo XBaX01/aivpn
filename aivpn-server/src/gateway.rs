@@ -21,6 +21,7 @@ use aivpn_common::crypto::{
     self, decrypt_payload, encrypt_payload, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
 };
 use aivpn_common::error::{Error, Result};
+use aivpn_common::fec::FecRepair;
 use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
@@ -2302,6 +2303,23 @@ impl Gateway {
                 } else {
                     debug!("NAT disabled, dropping packet");
                 }
+
+                // Accumulate payload into FEC XOR buffer for server-side recovery.
+                // When FecRepair arrives we can reconstruct exactly one missing packet.
+                {
+                    let mut sess = session.lock();
+                    let len = payload.len().min(1500);
+                    if sess.fec_xor_buf.len() < len {
+                        sess.fec_xor_buf.resize(len, 0);
+                    }
+                    for (a, b) in sess.fec_xor_buf[..len].iter_mut().zip(&payload[..len]) {
+                        *a ^= b;
+                    }
+                    if len > sess.fec_xor_len {
+                        sess.fec_xor_len = len;
+                    }
+                    sess.fec_recv_count = sess.fec_recv_count.saturating_add(1);
+                }
             }
             InnerType::Control => {
                 self.handle_control_message(payload, session, client_addr)
@@ -2316,7 +2334,56 @@ impl Gateway {
                 debug!("ACK packet received");
             }
             InnerType::FecRepair => {
-                debug!("FEC repair packet received (not yet processed)");
+                if let Some(repair) = FecRepair::decode(payload) {
+                    if repair.group_size > 0 {
+                        let recovered_opt = {
+                            let mut sess = session.lock();
+                            let recv = sess.fec_recv_count;
+                            // Recover if exactly one packet from the group was lost.
+                            let result = if recv == repair.group_size.saturating_sub(1) {
+                                let xor_len = sess.fec_xor_len.max(repair.xor_data.len());
+                                let mut out = vec![0u8; xor_len];
+                                for i in 0..xor_len {
+                                    out[i] = repair.xor_data.get(i).copied().unwrap_or(0)
+                                        ^ sess.fec_xor_buf.get(i).copied().unwrap_or(0);
+                                }
+                                debug!(
+                                    "FEC: recovered {} bytes from {} (group seq={} size={})",
+                                    out.len(),
+                                    hash_addr(&client_addr),
+                                    repair.group_seq,
+                                    repair.group_size
+                                );
+                                Some(out)
+                            } else {
+                                debug!(
+                                    "FEC: group seq={} size={} recv={} — no recovery needed",
+                                    repair.group_seq, repair.group_size, recv
+                                );
+                                None
+                            };
+                            // Reset accumulator for next group regardless of outcome.
+                            sess.fec_recv_count = 0;
+                            sess.fec_xor_buf.iter_mut().for_each(|b| *b = 0);
+                            sess.fec_xor_len = 0;
+                            result
+                        };
+
+                        if let Some(recovered) = recovered_opt {
+                            let use_chain = self.chain_forwarder.is_some()
+                                && !session.lock().is_site_peer;
+                            if use_chain {
+                                if let Some(ref cf) = self.chain_forwarder {
+                                    cf.forward(recovered).await;
+                                }
+                            } else if let Some(ref tx) = self.tun_write_tx {
+                                let _ = tx.send(recovered).await;
+                            } else if let Some(ref nat) = self.nat_forwarder {
+                                nat.forward_packet(&recovered).await?;
+                            }
+                        }
+                    }
+                }
             }
         }
 

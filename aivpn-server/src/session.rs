@@ -154,6 +154,14 @@ pub struct Session {
     pub bytes_since_rekey: u64,
     /// Last reported client-side quality score (0–100). Updated via QualityReport (0.9.0+).
     pub client_quality: u8,
+
+    // --- FEC server-side recovery state (0.9.0+) ---
+    /// Data packets received in the current FEC group (reset on each FecRepair).
+    pub fec_recv_count: u8,
+    /// XOR accumulator for in-flight FEC group payloads.
+    pub fec_xor_buf: Vec<u8>,
+    /// Max payload length seen in the current FEC group.
+    pub fec_xor_len: usize,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -253,6 +261,9 @@ impl Session {
             last_rekey_at: now,
             bytes_since_rekey: 0,
             client_quality: 100,
+            fec_recv_count: 0,
+            fec_xor_buf: Vec::new(),
+            fec_xor_len: 0,
         }
     }
 
