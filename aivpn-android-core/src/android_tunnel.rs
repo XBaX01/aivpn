@@ -503,7 +503,7 @@ pub async fn run_tunnel_android(
             _ = wait_for_stop_signal(&stop_signal) => {
                 // Send Shutdown before closing so the server drops the session
                 // immediately instead of waiting for the 30-second ghost timeout.
-                if let Ok(shutdown_bytes) = ControlPayload::Shutdown { reason: 0 }.encode() {
+                if let Ok(shutdown_bytes) = (ControlPayload::Shutdown { reason: 0 }).encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &shutdown_bytes);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         let _ = udp.send(&pkt).await;
@@ -579,9 +579,9 @@ pub async fn run_tunnel_android(
                                         &rekey_kp.public_key_bytes(),
                                     );
                                     // Respond with our new ephemeral pub using OLD keys
-                                    if let Ok(resp) = ControlPayload::KeyRotate {
+                                    if let Ok(resp) = (ControlPayload::KeyRotate {
                                         new_eph_pub: rekey_kp.public_key_bytes()
-                                    }.encode() {
+                                    }).encode() {
                                         let inner = build_inner_packet(
                                             InnerType::Control, send_seq, &resp,
                                         );
