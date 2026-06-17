@@ -1,10 +1,7 @@
 <svg width="32" height="32" xmlns="http://www.w3.org/2000/svg">
   <rect width="32" height="32" rx="6" fill="#160F2F"/>
-  <circle cx="16" cy="16" r="13" fill="none" stroke="#E8FF6B" stroke-width="1" opacity="0.7"/>
-  <circle cx="16" cy="16" r="9"  fill="none" stroke="#7B61FF" stroke-width="1.2" opacity="0.9"/>
-  <circle cx="16" cy="16" r="5"  fill="none" stroke="#A893FF" stroke-width="1.2" opacity="0.9"/>
-  <circle cx="16" cy="16" r="2"  fill="#E8FF6B"/>
-  <circle cx="16" cy="3"  r="1.5" fill="#E8FF6B" opacity="0.8"/>
-  <circle cx="27" cy="21" r="1.2" fill="#7B61FF" opacity="0.9"/>
-  <circle cx="5"  cy="21" r="1.2" fill="#7B61FF" opacity="0.9"/>
+  <circle cx="16" cy="16" r="13" fill="none" stroke="#E8FF6B" stroke-width="1" opacity="0.6"/>
+  <circle cx="16" cy="16" r="9"  fill="none" stroke="#7B61FF" stroke-width="1.5" opacity="0.9"/>
+  <circle cx="16" cy="16" r="5"  fill="none" stroke="#A893FF" stroke-width="1.2" opacity="0.85"/>
+  <circle cx="16" cy="16" r="2"  fill="white" opacity="0.9"/>
 </svg>

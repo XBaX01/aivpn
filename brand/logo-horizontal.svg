@@ -1,78 +1,26 @@
 <svg width="1200" height="500" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <radialGradient id="bg-b" cx="30%" cy="50%">
-      <stop offset="0%" stop-color="#1E1040"/>
-      <stop offset="100%" stop-color="#0A0518"/>
-    </radialGradient>
-    <radialGradient id="center-glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#7B61FF" stop-opacity="0.4"/>
-      <stop offset="100%" stop-color="#7B61FF" stop-opacity="0"/>
-    </radialGradient>
-    <filter id="ring-glow">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="dot-glow">
-      <feGaussianBlur stdDeviation="5" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="center-filter">
-      <feGaussianBlur stdDeviation="15" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
+    <linearGradient id="bg-h" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1A0D3D"/>
+      <stop offset="100%" stop-color="#0D0820"/>
+    </linearGradient>
+    <filter id="g-o"><feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="g-m"><feGaussianBlur stdDeviation="9" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   </defs>
+  <rect width="1200" height="500" fill="url(#bg-h)"/>
 
-  <!-- Background -->
-  <rect width="1200" height="500" fill="url(#bg-b)"/>
-
-  <!-- Glow halo behind rings -->
-  <circle cx="290" cy="250" r="200" fill="url(#center-glow)"/>
-
-  <!-- Ring 3 (outermost) — lemon accent -->
-  <circle cx="290" cy="250" r="195" fill="none" stroke="#E8FF6B" stroke-width="1.5" opacity="0.25" filter="url(#ring-glow)"/>
-
-  <!-- Packet dots on ring 3 -->
-  <circle cx="290" cy="55"  r="5" fill="#E8FF6B" opacity="0.7" filter="url(#dot-glow)"/>
-  <circle cx="477" cy="152" r="5" fill="#E8FF6B" opacity="0.7" filter="url(#dot-glow)"/>
-  <circle cx="103" cy="348" r="4" fill="#E8FF6B" opacity="0.5"/>
-
-  <!-- Ring 2 — mid purple -->
-  <circle cx="290" cy="250" r="140" fill="none" stroke="#7B61FF" stroke-width="2" opacity="0.45" filter="url(#ring-glow)"/>
-
-  <!-- Packet dots on ring 2 -->
-  <circle cx="290" cy="110" r="5" fill="#7B61FF" opacity="0.9" filter="url(#dot-glow)"/>
-  <circle cx="418" cy="321" r="5" fill="#7B61FF" opacity="0.9" filter="url(#dot-glow)"/>
-  <circle cx="162" cy="179" r="5" fill="#7B61FF" opacity="0.9" filter="url(#dot-glow)"/>
-
-  <!-- Ring 1 (innermost) — bright purple -->
-  <circle cx="290" cy="250" r="80" fill="none" stroke="#9B85FF" stroke-width="2.5" opacity="0.7" filter="url(#ring-glow)"/>
-
-  <!-- Packet dots on ring 1 -->
-  <circle cx="290" cy="170" r="6" fill="#A090FF" opacity="0.95" filter="url(#dot-glow)"/>
-  <circle cx="358" cy="294" r="6" fill="#A090FF" opacity="0.95" filter="url(#dot-glow)"/>
-  <circle cx="222" cy="294" r="5" fill="#A090FF" opacity="0.85" filter="url(#dot-glow)"/>
-
-  <!-- Center resonance tag -->
-  <circle cx="290" cy="250" r="28" fill="#7B61FF" opacity="0.2" filter="url(#center-filter)"/>
-  <circle cx="290" cy="250" r="18" fill="none" stroke="#9B85FF" stroke-width="2" opacity="0.8"/>
-  <circle cx="290" cy="250" r="8"  fill="#E8FF6B" filter="url(#dot-glow)"/>
-
-  <!-- Vertical separator -->
-  <line x1="540" y1="60" x2="540" y2="440" stroke="#7B61FF" stroke-width="1" opacity="0.2"/>
+  <!-- Mark centered at 250,250 -->
+  <circle cx="250" cy="250" r="190" fill="none" stroke="#E8FF6B" stroke-width="2" opacity="0.65" filter="url(#g-o)"/>
+  <circle cx="250" cy="250" r="133" fill="none" stroke="#7B61FF" stroke-width="5" opacity="0.9" filter="url(#g-m)"/>
+  <circle cx="250" cy="250" r="76"  fill="none" stroke="#9B85FF" stroke-width="3.5" opacity="0.8"/>
+  <circle cx="250" cy="250" r="16"  fill="#7B61FF" opacity="0.5" filter="url(#g-m)"/>
+  <circle cx="250" cy="250" r="9"   fill="#FFFFFF" opacity="0.95"/>
 
   <!-- Wordmark -->
-  <text x="590" y="295" font-family="'Arial Black', 'Helvetica Neue', sans-serif"
-        font-size="130" font-weight="900" fill="white" letter-spacing="-4" opacity="0.97">AIVPN</text>
-
-  <!-- Tagline -->
-  <text x="592" y="340" font-family="'Arial', 'Helvetica Neue', sans-serif"
-        font-size="19" font-weight="400" fill="#A090FF" letter-spacing="5" opacity="0.9">ADAPTIVE INTELLIGENCE VPN</text>
-
-  <!-- Accent bar under tagline -->
-  <rect x="592" y="357" width="300" height="2" rx="1" fill="url(#center-glow)" opacity="0.6"/>
-  <rect x="592" y="357" width="60"  height="2" rx="1" fill="#E8FF6B" opacity="0.8"/>
-
-  <!-- Patent tag -->
-  <text x="592" y="388" font-family="'Arial', sans-serif"
-        font-size="11" fill="#7B61FF" letter-spacing="3" opacity="0.7">PATENT PENDING · USPTO 19/452,440</text>
+  <text x="530" y="290" font-family="'Arial Black','Helvetica Neue',sans-serif"
+        font-size="168" font-weight="900" fill="white" letter-spacing="-3" text-anchor="start">AIVPN</text>
+  <text x="534" y="338" font-family="'Arial','Helvetica Neue',sans-serif"
+        font-size="19" font-weight="400" fill="#9B85FF" letter-spacing="5.5" text-anchor="start">ADAPTIVE INTELLIGENCE VPN</text>
 </svg>
