@@ -82,11 +82,18 @@ async fn forward_query(
     out: &UdpSocket,
 ) -> std::io::Result<()> {
     if query.len() < 2 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "DNS query too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "DNS query too short",
+        ));
     }
     let query_txid = [query[0], query[1]];
 
-    let bind_addr = if upstream.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let bind_addr = if upstream.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
     let up_sock = UdpSocket::bind(bind_addr).await?;
     // connect() locks the kernel to only accept datagrams from the upstream 4-tuple,
     // preventing off-path response injection (DNS cache poisoning).
@@ -100,7 +107,10 @@ async fn forward_query(
 
     // Verify TXID matches to guard against any residual race on the ephemeral port.
     if n < 2 || resp[0] != query_txid[0] || resp[1] != query_txid[1] {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "DNS TXID mismatch"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "DNS TXID mismatch",
+        ));
     }
 
     out.send_to(&resp[..n], client).await?;

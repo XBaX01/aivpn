@@ -330,7 +330,9 @@ pub async fn run_tunnel_ios(
             };
             if let Ok(encoded) = enrollment.encode() {
                 let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
-                if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                if let Ok(pkt) =
+                    build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)
+                {
                     send_seq = send_seq.wrapping_add(1);
                     let _ = udp.send(&pkt).await;
                 }

@@ -45,8 +45,8 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_host: JString<'local>,
     server_port: jint,
     server_key_arr: JByteArray<'local>,
-    psk_obj: JObject<'local>,            // nullable JByteArray
-    mtls_cert_obj: JObject<'local>,      // nullable JByteArray
+    psk_obj: JObject<'local>,       // nullable JByteArray
+    mtls_cert_obj: JObject<'local>, // nullable JByteArray
     adaptive: jboolean,
     static_privkey_obj: JObject<'local>, // nullable JByteArray — device binding key
 ) -> jstring {
@@ -140,7 +140,12 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
                 out.copy_from_slice(&b);
                 Some(out)
             }
-            Ok(b) => return make_str(&mut env, &format!("static_privkey must be 32 bytes, got {}", b.len())),
+            Ok(b) => {
+                return make_str(
+                    &mut env,
+                    &format!("static_privkey must be 32 bytes, got {}", b.len()),
+                )
+            }
             Err(e) => return make_str(&mut env, &format!("bad static_privkey: {e}")),
         }
     };

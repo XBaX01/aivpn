@@ -40,7 +40,11 @@ pub struct ClientConfig {
     pub qos: Option<crate::qos::ClientQos>,
     /// Static X25519 device public key bound to this client (0.9.0+).
     /// None = any device may connect; Some = only the enrolled device may connect.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_base64_bytes")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_base64_bytes"
+    )]
     pub device_pubkey: Option<[u8; 32]>,
     /// When true, the first connecting device's static key is auto-bound (one-time enrollment).
     #[serde(default)]

@@ -618,7 +618,13 @@ fn handle_add_client_one_time(db: &ClientDatabase, name: &str, args: &ServerArgs
 
             if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
+                let conn_key = build_connection_key(
+                    args,
+                    server_ip,
+                    &pub_b64,
+                    &psk_b64,
+                    client_network_config,
+                );
                 println!("══ Connection Key (single-use — share with one device only) ══");
                 println!();
                 println!("{}", conn_key);

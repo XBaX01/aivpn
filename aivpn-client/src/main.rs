@@ -771,7 +771,10 @@ async fn main() {
             let bind_addr = bind_str.parse::<std::net::SocketAddr>().ok()?;
             let upstream_addr = args.dns_upstream.parse::<std::net::SocketAddr>().ok()?;
             Some(aivpn_client::dns_proxy::spawn_dns_proxy(
-                aivpn_client::dns_proxy::DnsProxyConfig { listen_addr: bind_addr, upstream_addr },
+                aivpn_client::dns_proxy::DnsProxyConfig {
+                    listen_addr: bind_addr,
+                    upstream_addr,
+                },
             ))
         });
 

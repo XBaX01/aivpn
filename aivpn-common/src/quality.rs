@@ -74,19 +74,35 @@ impl QualityTracker {
     pub fn score(&self) -> u8 {
         let rtt_pts = {
             let rtt = self.rtt_ms() as u32;
-            if rtt >= 300 { 0 } else { 40 * (300 - rtt) / 300 }
+            if rtt >= 300 {
+                0
+            } else {
+                40 * (300 - rtt) / 300
+            }
         };
         let jitter_pts = {
             let j = self.jitter_ms() as u32;
-            if j >= 100 { 0 } else { 20 * (100 - j) / 100 }
+            if j >= 100 {
+                0
+            } else {
+                20 * (100 - j) / 100
+            }
         };
         let loss_pts = {
             let l = self.loss_ppm();
-            if l >= 50_000 { 0 } else { 30 * (50_000 - l) / 50_000 }
+            if l >= 50_000 {
+                0
+            } else {
+                30 * (50_000 - l) / 50_000
+            }
         };
         let neural_pts = {
             let mse = self.neural_mse;
-            if mse >= 0.35 { 0 } else { (10.0 * (0.35 - mse) / 0.35) as u32 }
+            if mse >= 0.35 {
+                0
+            } else {
+                (10.0 * (0.35 - mse) / 0.35) as u32
+            }
         };
         (rtt_pts + jitter_pts + loss_pts + neural_pts).min(100) as u8
     }
