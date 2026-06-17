@@ -1383,7 +1383,7 @@ impl AivpnClient {
         #[cfg(windows)]
         let path = std::env::temp_dir().join("aivpn-quality.json");
         #[cfg(not(windows))]
-        let path = std::path::PathBuf::from("/tmp/aivpn-quality.json");
+        let path = std::path::PathBuf::from("/var/run/aivpn/quality.json");
         let _ = std::fs::write(
             path,
             format!(r#"{{"quality":{},"rtt_ms":{},"jitter_ms":{}}}"#, score, rtt_ms, jitter_ms),

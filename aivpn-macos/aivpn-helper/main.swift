@@ -444,7 +444,7 @@ func getLog() -> HelperResponse {
 }
 
 private func readQualityScore() -> String {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/aivpn-quality.json")),
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/var/run/aivpn/quality.json")),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let q = json["quality"] as? Int else { return "" }
     return ",quality:\(q)"
