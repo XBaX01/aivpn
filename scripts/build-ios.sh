@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IOS_DIR="$REPO_ROOT/aivpn-ios"
 CORE_DIR="$REPO_ROOT/aivpn-ios-core"
 RELEASES_DIR="$REPO_ROOT/releases"
