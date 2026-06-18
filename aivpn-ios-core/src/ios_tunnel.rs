@@ -13,7 +13,7 @@ use std::ffi::CString;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,8 +28,11 @@ use aivpn_common::client_wire::{
 };
 use aivpn_common::crypto::{derive_session_keys, KeyPair, SessionKeys};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::MaskProfile;
+use aivpn_common::mimicry::{bootstrap_mask_for_psk, MimicryEncryptor};
 use aivpn_common::protocol::{ControlPayload, InnerType};
-use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
+use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 // ──────────── Constants (identical to android_tunnel.rs) ────────────
 
@@ -67,6 +70,18 @@ static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
 
 // Last local UDP port — reused on reconnect to preserve CGNAT inbound mapping.
 static LAST_LOCAL_PORT: AtomicU16 = AtomicU16::new(0);
+pub static ACTIVE_QUALITY_SCORE: AtomicU8 = AtomicU8::new(0);
+pub static ACTIVE_ADAPTIVE_LEVEL: AtomicU8 = AtomicU8::new(0);
+static ACTIVE_CONTROL_TX: Mutex<Option<mpsc::Sender<ControlPayload>>> = Mutex::new(None);
+
+pub fn send_control_payload(payload: ControlPayload) -> bool {
+    let guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        tx.try_send(payload).is_ok()
+    } else {
+        false
+    }
+}
 
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
@@ -166,9 +181,17 @@ pub async fn run_tunnel_ios(
     mtls_cert: Option<Vec<u8>>,
     on_ready: Option<OnReadyFn>,
     ctx: SendCtx,
+    static_privkey: Option<[u8; 32]>,
+    adaptive_level: u8,
 ) -> Result<()> {
     let session = Arc::new(SessionRuntime::new());
     let _guard = activate_session(session.clone())?;
+    let level = AdaptiveLevel::from_u8(adaptive_level);
+    let keepalive_interval = if level == AdaptiveLevel::Off {
+        KEEPALIVE_INTERVAL
+    } else {
+        KEEPALIVE_INTERVAL.min(Duration::from_secs(level.keepalive_secs()))
+    };
 
     // 1. Ephemeral keypair + Zero-RTT session keys
     let mut keypair = KeyPair::generate();
@@ -203,7 +226,7 @@ pub async fn run_tunnel_ios(
     let mdh_len = DEFAULT_MDH_LEN;
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    let keepalive = ControlPayload::Keepalive.encode()?;
+    let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
     {
         let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
         let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
@@ -284,7 +307,7 @@ pub async fn run_tunnel_ios(
     // Early keepalive: prevent CGNAT outbound mapping expiry between last
     // handshake packet and the first upload pipeline tick.
     {
-        let ka = ControlPayload::Keepalive.encode()?;
+        let ka = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
         let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
         if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
             send_seq = send_seq.wrapping_add(1);
@@ -308,7 +331,7 @@ pub async fn run_tunnel_ios(
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                if let Ok(ka) = ControlPayload::Keepalive { send_ts: 0 }.encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         send_seq = send_seq.wrapping_add(1);
@@ -319,10 +342,47 @@ pub async fn run_tunnel_ios(
         }
     }
 
+    // Device enrollment: send static key proof after ratchet (PFS-protected).
+    if let Some(priv_bytes) = static_privkey {
+        let static_kp = KeyPair::from_private_key(priv_bytes);
+        if let Ok(dh_proof) = static_kp.compute_shared(&server_key) {
+            let enrollment = ControlPayload::DeviceEnrollment {
+                static_pub: static_kp.public_key_bytes(),
+                dh_proof,
+            };
+            if let Ok(encoded) = enrollment.encode() {
+                let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
+                if let Ok(pkt) =
+                    build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)
+                {
+                    send_seq = send_seq.wrapping_add(1);
+                    let _ = udp.send(&pkt).await;
+                }
+            }
+        }
+    }
+
     // 6. Main forwarding loop
     let mut udp_buf = vec![0u8; BUF_SIZE];
     let mut last_rx = Instant::now();
     let mut upload_at_last_rx = 0u64;
+
+    let keepalive_sent_ms = Arc::new(AtomicU64::new(0));
+    let mut quality_tracker = QualityTracker::new();
+    ACTIVE_ADAPTIVE_LEVEL.store(0, Ordering::Relaxed);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlPayload>(8);
+    {
+        let mut guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ctrl_tx);
+    }
+    struct CtrlTxGuard;
+    impl Drop for CtrlTxGuard {
+        fn drop(&mut self) {
+            let mut g = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+            *g = None;
+        }
+    }
+    let _ctrl_tx_guard = CtrlTxGuard;
 
     let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_SIZE);
     let (err_tx, mut err_rx) = mpsc::channel::<String>(16);
@@ -357,13 +417,18 @@ pub async fn run_tunnel_ios(
         }
     });
 
+    let initial_mask = bootstrap_mask_for_psk(psk.as_ref());
+    let mask_update_slot: Arc<Mutex<Option<MaskProfile>>> = Arc::new(Mutex::new(None));
+    let mask_update_for_enc = Arc::clone(&mask_update_slot);
+
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
     let session_up = session.clone();
     let upload_task = tokio::spawn(async move {
         struct IosEncryptor {
-            inner: ZeroMdhEncryptor,
+            inner: MimicryEncryptor,
             session: Arc<SessionRuntime>,
+            keepalive_sent_ms: Arc<AtomicU64>,
         }
         impl PacketEncryptor for IosEncryptor {
             fn encrypt_data(&mut self, p: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
@@ -376,7 +441,12 @@ pub async fn run_tunnel_ios(
                 self.inner.encrypt_control(p)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
-                self.inner.encrypt_keepalive()
+                let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                self.keepalive_sent_ms.store(now_ms, Ordering::Relaxed);
+                self.inner.encrypt_keepalive_ts(now_ms)
+            }
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.inner.take_fec_repair()
             }
             fn on_data_sent(&mut self, len: usize) {
                 self.session
@@ -385,15 +455,29 @@ pub async fn run_tunnel_ios(
             }
         }
         let mut enc = IosEncryptor {
-            inner: ZeroMdhEncryptor::with_mdh_len(keys_tx, send_counter, send_seq, mdh_len),
+            inner: MimicryEncryptor::new(
+                keys_tx,
+                send_counter,
+                send_seq,
+                initial_mask,
+                mask_update_for_enc,
+            ),
             session: session_up,
+            keepalive_sent_ms,
         };
+        enc.inner.set_fec_group(level.fec_n());
         let cfg = UploadConfig {
-            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_interval,
             ..Default::default()
         };
-        if let Err(e) =
-            upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &cfg).await
+        if let Err(e) = upload_pipeline::run_upload_loop(
+            &mut tun_rx,
+            Some(&mut ctrl_rx),
+            &udp_tx,
+            &mut enc,
+            &cfg,
+        )
+        .await
         {
             let _ = sender_err_tx.send(format!("Upload: {e}")).await;
         }
@@ -440,35 +524,64 @@ pub async fn run_tunnel_ios(
                     }
                     if d.header.inner_type == InnerType::Control {
                         if let Ok(ctrl) = aivpn_common::protocol::ControlPayload::decode(&d.payload) {
-                            if let aivpn_common::protocol::ControlPayload::KeyRotate { new_eph_pub } = ctrl {
-                                log::info!("aivpn: inline rekey — KeyRotate received");
-                                let client_rekey_kp = aivpn_common::crypto::KeyPair::generate();
-                                let client_rekey_pub = client_rekey_kp.public_key_bytes();
-                                if let Ok(dh_rekey) = client_rekey_kp.compute_shared(&new_eph_pub) {
-                                    let current_key = keys.session_key;
-                                    let new_keys = aivpn_common::crypto::derive_session_keys(
-                                        &dh_rekey,
-                                        Some(&current_key),
-                                        &client_rekey_pub,
-                                    );
-                                    let response_payload = aivpn_common::protocol::ControlPayload::KeyRotate {
-                                        new_eph_pub: client_rekey_pub,
-                                    };
-                                    if let Ok(resp_bytes) = response_payload.encode() {
-                                        let inner = build_inner_packet(InnerType::Control, send_seq, &resp_bytes);
-                                        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
-                                            send_seq = send_seq.wrapping_add(1);
-                                            let _ = udp.send(&pkt).await;
+                            match ctrl {
+                                aivpn_common::protocol::ControlPayload::KeyRotate { new_eph_pub } => {
+                                    log::info!("aivpn: inline rekey — KeyRotate received");
+                                    let client_rekey_kp = aivpn_common::crypto::KeyPair::generate();
+                                    let client_rekey_pub = client_rekey_kp.public_key_bytes();
+                                    if let Ok(dh_rekey) = client_rekey_kp.compute_shared(&new_eph_pub) {
+                                        let current_key = keys.session_key;
+                                        let new_keys = aivpn_common::crypto::derive_session_keys(
+                                            &dh_rekey,
+                                            Some(&current_key),
+                                            &client_rekey_pub,
+                                        );
+                                        let response_payload = aivpn_common::protocol::ControlPayload::KeyRotate {
+                                            new_eph_pub: client_rekey_pub,
+                                        };
+                                        if let Ok(resp_bytes) = response_payload.encode() {
+                                            let inner = build_inner_packet(InnerType::Control, send_seq, &resp_bytes);
+                                            if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                                                send_seq = send_seq.wrapping_add(1);
+                                                let _ = udp.send(&pkt).await;
+                                            }
+                                        }
+                                        tr_keys = Some(keys.clone());
+                                        tr_deadline = Some(Instant::now() + Duration::from_secs(2));
+                                        tr_win = std::mem::take(&mut recv_win);
+                                        keys = new_keys;
+                                        send_counter = 0;
+                                        recv_win.reset();
+                                        log::info!("aivpn: inline rekey complete");
+                                    }
+                                }
+                                aivpn_common::protocol::ControlPayload::KeepaliveAck { echo_ts } => {
+                                    if echo_ts > 0 {
+                                        let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                                        if now_ms >= echo_ts {
+                                            let rtt_us = (now_ms - echo_ts) * 1_000;
+                                            quality_tracker.record_rtt(rtt_us);
                                         }
                                     }
-                                    tr_keys = Some(keys.clone());
-                                    tr_deadline = Some(Instant::now() + Duration::from_secs(2));
-                                    tr_win = std::mem::take(&mut recv_win);
-                                    keys = new_keys;
-                                    send_counter = 0;
-                                    recv_win.reset();
-                                    log::info!("aivpn: inline rekey complete");
+                                    quality_tracker.record_received();
+                                    let score = quality_tracker.score();
+                                    ACTIVE_QUALITY_SCORE.store(score, Ordering::Relaxed);
+                                    log::debug!("aivpn: KeepaliveAck rtt={}ms quality={}/100",
+                                        quality_tracker.rtt_ms(), score);
                                 }
+                                aivpn_common::protocol::ControlPayload::AdaptiveHint { level } => {
+                                    ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
+                                    log::info!("aivpn: AdaptiveHint level={} stored", level);
+                                }
+                                aivpn_common::protocol::ControlPayload::MaskUpdate { mask_data, .. } => {
+                                    if let Some(mask) = aivpn_common::mimicry::decode_mask_update(&mask_data) {
+                                        *mask_update_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(mask);
+                                        log::info!("aivpn: MaskUpdate received — mask queued for mimicry engine");
+                                    } else {
+                                        log::warn!("aivpn: MaskUpdate decode failed — ignoring");
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

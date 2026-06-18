@@ -152,6 +152,19 @@ pub struct Session {
     pub last_rekey_at: Instant,
     /// Bytes sent+received since last rekey (for data-triggered rotation).
     pub bytes_since_rekey: u64,
+    /// Last reported client-side quality score (0–100). Updated via QualityReport (0.9.0+).
+    pub client_quality: u8,
+
+    // --- FEC server-side recovery state (0.9.0+) ---
+    /// Data packets received in the current FEC group (reset on each FecRepair).
+    pub fec_recv_count: u8,
+    /// XOR accumulator for in-flight FEC group payloads.
+    pub fec_xor_buf: Vec<u8>,
+    /// Max payload length seen in the current FEC group.
+    pub fec_xor_len: usize,
+    /// Next expected FEC group_seq. Mismatches indicate a lost FecRepair
+    /// and mean the XOR buffer is stale — recovery must be skipped.
+    pub fec_pending_seq: u16,
 }
 
 /// 256-bit bitmap for tracking received packets
@@ -250,6 +263,11 @@ impl Session {
             pending_rekey_keypair: None,
             last_rekey_at: now,
             bytes_since_rekey: 0,
+            client_quality: 100,
+            fec_recv_count: 0,
+            fec_xor_buf: Vec::new(),
+            fec_xor_len: 0,
+            fec_pending_seq: 0,
         }
     }
 

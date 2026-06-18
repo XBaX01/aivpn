@@ -7,9 +7,12 @@
 
 mod ios_tunnel;
 
+use std::sync::atomic::Ordering;
+
+use aivpn_common::protocol::ControlPayload;
 use ios_tunnel::{
-    get_active_download_bytes, get_active_upload_bytes, run_tunnel_ios, stop_active_tunnel,
-    OnReadyFn, SendCtx,
+    get_active_download_bytes, get_active_upload_bytes, run_tunnel_ios, send_control_payload,
+    stop_active_tunnel, OnReadyFn, SendCtx, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE,
 };
 
 /// Runs the full VPN tunnel session on the calling thread.
@@ -23,6 +26,9 @@ pub extern "C" fn aivpn_run_tunnel(
     psk: *const u8,
     cert_bytes: *const u8,
     cert_len: libc::c_int,
+    static_privkey: *const u8,
+    static_privkey_len: libc::c_int,
+    adaptive_level: libc::c_int,
     on_ready: Option<OnReadyFn>,
     ctx: *mut libc::c_void,
 ) -> libc::c_int {
@@ -57,6 +63,16 @@ pub extern "C" fn aivpn_run_tunnel(
         Some(unsafe { std::slice::from_raw_parts(cert_bytes, 104).to_vec() })
     };
 
+    let static_privkey_opt: Option<[u8; 32]> =
+        if static_privkey.is_null() || static_privkey_len != 32 {
+            None
+        } else {
+            // SAFETY: static_privkey_len == 32 verified above; pointer is non-null.
+            let mut arr = [0u8; 32];
+            unsafe { arr.copy_from_slice(std::slice::from_raw_parts(static_privkey, 32)) };
+            Some(arr)
+        };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -74,6 +90,8 @@ pub extern "C" fn aivpn_run_tunnel(
         mtls_cert,
         on_ready,
         SendCtx(ctx),
+        static_privkey_opt,
+        adaptive_level.clamp(0, 3) as u8,
     )) {
         Ok(()) => 0,
         Err(_) => -1,
@@ -96,4 +114,39 @@ pub extern "C" fn aivpn_get_upload_bytes() -> i64 {
 #[no_mangle]
 pub extern "C" fn aivpn_get_download_bytes() -> i64 {
     get_active_download_bytes() as i64
+}
+
+/// Current connection quality score (0–100). Returns 0 when no session is active.
+#[no_mangle]
+pub extern "C" fn aivpn_get_quality_score() -> libc::c_int {
+    ACTIVE_QUALITY_SCORE.load(Ordering::Relaxed) as libc::c_int
+}
+
+/// Most recent AdaptiveHint level received from the server (0–3).
+#[no_mangle]
+pub extern "C" fn aivpn_get_adaptive_level_hint() -> libc::c_int {
+    ACTIVE_ADAPTIVE_LEVEL.load(Ordering::Relaxed) as libc::c_int
+}
+
+/// Send a RecordingStart control payload to the active tunnel.
+/// Returns 1 on success, 0 if no tunnel is active or `service` is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn aivpn_start_recording(service: *const libc::c_char) -> libc::c_int {
+    if service.is_null() {
+        return 0;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(service) }
+        .to_string_lossy()
+        .chars()
+        .take(128)
+        .collect::<String>();
+    send_control_payload(ControlPayload::RecordingStart { service: s }) as libc::c_int
+}
+
+/// Send a RecordingStop control payload to the active tunnel.
+#[no_mangle]
+pub extern "C" fn aivpn_stop_recording() {
+    send_control_payload(ControlPayload::RecordingStop {
+        session_id: [0u8; 16],
+    });
 }

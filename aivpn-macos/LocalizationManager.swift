@@ -207,6 +207,22 @@ class LocalizationManager: ObservableObject {
             "en": "Adaptive Mode",
             "ru": "Адаптивный режим"
         ],
+        "adaptive_off": [
+            "en": "Off",
+            "ru": "Выкл"
+        ],
+        "adaptive_light": [
+            "en": "Light (6s)",
+            "ru": "Лёгкий (6с)"
+        ],
+        "adaptive_aggressive": [
+            "en": "Aggressive (4s)",
+            "ru": "Агрессивный (4с)"
+        ],
+        "adaptive_satellite": [
+            "en": "Satellite (15s)",
+            "ru": "Спутник (15с)"
+        ],
         "adaptive_mode_help": [
             "en": "Automatically adjusts MTU and keepalive on unstable connections",
             "ru": "Автоматически адаптирует MTU и keepalive при нестабильном соединении"
@@ -235,6 +251,14 @@ class LocalizationManager: ObservableObject {
             "en": "Path to client certificate file for mutual TLS authentication. Leave empty to disable.",
             "ru": "Путь к файлу клиентского сертификата для взаимной TLS-аутентификации. Оставьте пустым для отключения."
         ],
+        "dns_proxy_placeholder": [
+            "en": "DNS proxy (e.g. 127.0.0.1:5300)",
+            "ru": "DNS-прокси (например 127.0.0.1:5300)"
+        ],
+        "dns_proxy_help": [
+            "en": "Local address for DNS leak prevention proxy. Leave empty to disable. Point your resolver here after connecting.",
+            "ru": "Локальный адрес DNS-прокси для предотвращения утечек. Оставьте пустым для отключения. После подключения укажите эот адрес в настройках резолвера."
+        ],
         "exclude_routes_label": [
             "en": "Exclude routes (split tunnel)",
             "ru": "Исключить маршруты (split tunnel)"
@@ -250,6 +274,14 @@ class LocalizationManager: ObservableObject {
         "mtls_ignored_in_proxy_mode": [
             "en": "mTLS certificate is not used in SOCKS5 proxy mode",
             "ru": "mTLS-сертификат не применяется в режиме SOCKS5-прокси"
+        ],
+        "kill_switch": [
+            "en": "Kill Switch (block traffic if VPN drops)",
+            "ru": "Kill Switch (блок трафика при разрыве VPN)"
+        ],
+        "kill_switch_help": [
+            "en": "Block all non-VPN traffic while connected. Rules persist after unexpected process death.",
+            "ru": "Блокировать весь трафик вне VPN. Правила сохраняются после аварийного завершения."
         ],
     ]
 

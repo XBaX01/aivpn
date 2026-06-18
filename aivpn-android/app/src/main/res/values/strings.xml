@@ -48,13 +48,19 @@
 
     <!-- Adaptive mode / diagnostics -->
     <string name="adaptive_mode">Adaptive Mode</string>
-    <string name="adaptive_mode_desc">Auto-adjusts MTU and keepalive on unstable connections</string>
+    <string name="adaptive_mode_desc">Auto-adjusts keepalive and FEC on unstable connections</string>
     <string name="adaptive_enabled">Adaptive: ON</string>
     <string name="adaptive_disabled">Adaptive: OFF</string>
+    <string name="adaptive_off">Off</string>
+    <string name="adaptive_light">Light (6s keepalive)</string>
+    <string name="adaptive_aggressive">Aggressive (4s keepalive)</string>
+    <string name="adaptive_satellite">Satellite (15s keepalive)</string>
     <string name="diagnostics">Diagnostics</string>
     <string name="run_benchmark">Run Benchmark</string>
     <string name="bench_running">Benchmark running…</string>
     <string name="bench_result">P50: %1$dms  P95: %2$dms  Loss: %3$.1f%%  Quality: %4$d/100</string>
+    <string name="quality_score_live">Live quality: %1$d/100</string>
+    <string name="quality_score_no_data">Quality: no data yet (waiting for keepalive)</string>
 
     <!-- Split tunneling -->
     <string name="btn_split_tunnel">Split Tunneling</string>
@@ -84,4 +90,12 @@
     <string name="export_logs_collecting">Collecting logs…</string>
     <string name="export_logs_empty">No logs collected</string>
     <string name="export_logs_error">Failed to collect logs</string>
+    <string name="recording">Recording</string>
+    <string name="recording_service_hint">Service name (e.g. zoom, https)</string>
+    <string name="recording_start">Start Recording</string>
+    <string name="recording_stop">Stop Recording</string>
+    <string name="recording_started">Recording started</string>
+    <string name="recording_stopped">Recording stopped</string>
+    <string name="recording_no_session">No active session</string>
+    <string name="os_kill_switch">OS Kill Switch Settings</string>
 </resources>

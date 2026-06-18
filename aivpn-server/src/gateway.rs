@@ -21,14 +21,13 @@ use aivpn_common::crypto::{
     self, decrypt_payload, encrypt_payload, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
 };
 use aivpn_common::error::{Error, Result};
+use aivpn_common::fec::FecRepair;
 use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
 };
 use aivpn_common::network_config::VpnNetworkConfig;
-use aivpn_common::protocol::{
-    ControlPayload, ControlSubtype, InnerHeader, InnerType, MAX_PACKET_SIZE,
-};
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType, MAX_PACKET_SIZE};
 use libc;
 
 use crate::audit_log::{AuditActor, AuditLogger};
@@ -94,6 +93,9 @@ pub struct GatewayConfig {
     /// Append-only audit log (H-S-8). Records security-relevant session events.
     /// Defaults to `AuditLogger::disabled()` (writes to /dev/null).
     pub audit_log: AuditLogger,
+    /// Allow direct client-to-client packet routing inside the VPN subnet (0.9.0+).
+    /// When false (default), VPN-to-VPN traffic is silently dropped at the TUN level.
+    pub allow_peer_routing: bool,
 }
 
 impl Default for GatewayConfig {
@@ -125,6 +127,7 @@ impl Default for GatewayConfig {
             mtls: None,
             exit_node_enabled: false,
             audit_log: AuditLogger::disabled(),
+            allow_peer_routing: false,
         }
     }
 }
@@ -811,6 +814,7 @@ impl Gateway {
 
                 let client_db = self.client_db.clone();
                 let qos_enforcer = self.qos_enforcer.clone();
+                let allow_peer_routing = self.config.allow_peer_routing;
                 tokio::spawn(async move {
                     Self::tun_read_loop(
                         tun_reader,
@@ -822,6 +826,7 @@ impl Gateway {
                         recorder,
                         client_db,
                         qos_enforcer,
+                        allow_peer_routing,
                     )
                     .await;
                 });
@@ -1148,6 +1153,7 @@ impl Gateway {
         recorder: Option<Arc<RecordingManager>>,
         client_db: Option<Arc<ClientDatabase>>,
         qos_enforcer: Arc<crate::qos::QosEnforcer>,
+        allow_peer_routing: bool,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -1171,6 +1177,21 @@ impl Gateway {
                             let _ = tun_writer.send(reply).await;
                         }
                         continue;
+                    }
+
+                    // Guard client-to-client relay (0.9.0+).
+                    // If the packet's source IP belongs to a VPN client session,
+                    // this is intra-VPN (peer-to-peer) traffic — only forward when
+                    // allow_peer_routing is enabled.
+                    if !allow_peer_routing {
+                        let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+                        if sessions.get_session_by_vpn_ip(&src_ip).is_some() {
+                            debug!(
+                                "TUN: dropping peer packet {}->{} (allow_peer_routing=false)",
+                                src_ip, dst_ip
+                            );
+                            continue;
+                        }
                     }
 
                     // Find session by VPN IP
@@ -2214,6 +2235,48 @@ impl Gateway {
                     return Ok(());
                 }
 
+                // Anti-spoof + peer routing gate (authoritative, at ingress).
+                // Only IPv4 is routed through the VPN; reject everything else to
+                // prevent clients from injecting arbitrary layer-3 traffic that
+                // bypasses the source-address check.
+                if payload.len() < 20 || (payload[0] >> 4) != 4 {
+                    debug!(
+                        "Anti-spoof: dropping non-IPv4 payload (len={} ver={})",
+                        payload.len(),
+                        payload.first().map(|b| b >> 4).unwrap_or(0)
+                    );
+                    return Ok(());
+                }
+                {
+                    let inner_src =
+                        std::net::Ipv4Addr::new(payload[12], payload[13], payload[14], payload[15]);
+                    let inner_dst =
+                        std::net::Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
+                    let session_vpn_ip = session.lock().vpn_ip;
+                    if let Some(svpn) = session_vpn_ip {
+                        if inner_src != svpn {
+                            warn!(
+                                "Anti-spoof: dropping packet src={} from session owning vpn_ip={}",
+                                inner_src, svpn
+                            );
+                            return Ok(());
+                        }
+                    }
+                    // Block intra-VPN routing at ingress when not opted in.
+                    if !self.config.allow_peer_routing
+                        && self
+                            .session_manager
+                            .get_session_by_vpn_ip(&inner_dst)
+                            .is_some()
+                    {
+                        debug!(
+                            "Peer routing disabled — dropping {}->{} at ingress",
+                            inner_src, inner_dst
+                        );
+                        return Ok(());
+                    }
+                }
+
                 // Forward to NAT/internet via TUN write channel (lock-free)
                 debug!(
                     "DATA packet from {} ({} bytes)",
@@ -2247,6 +2310,23 @@ impl Gateway {
                 } else {
                     debug!("NAT disabled, dropping packet");
                 }
+
+                // Accumulate payload into FEC XOR buffer for server-side recovery.
+                // When FecRepair arrives we can reconstruct exactly one missing packet.
+                {
+                    let mut sess = session.lock();
+                    let len = payload.len().min(1500);
+                    if sess.fec_xor_buf.len() < len {
+                        sess.fec_xor_buf.resize(len, 0);
+                    }
+                    for (a, b) in sess.fec_xor_buf[..len].iter_mut().zip(&payload[..len]) {
+                        *a ^= b;
+                    }
+                    if len > sess.fec_xor_len {
+                        sess.fec_xor_len = len;
+                    }
+                    sess.fec_recv_count = sess.fec_recv_count.saturating_add(1);
+                }
             }
             InnerType::Control => {
                 self.handle_control_message(payload, session, client_addr)
@@ -2259,6 +2339,61 @@ impl Gateway {
             InnerType::Ack => {
                 // Handle ACK
                 debug!("ACK packet received");
+            }
+            InnerType::FecRepair => {
+                if let Some(repair) = FecRepair::decode(payload) {
+                    if repair.group_size > 0 {
+                        let recovered_opt = {
+                            let mut sess = session.lock();
+                            let recv = sess.fec_recv_count;
+                            let seq_ok = repair.group_seq == sess.fec_pending_seq;
+                            // Recover only when group_seq matches (XOR buffer is for this
+                            // exact group) and exactly one packet is missing.
+                            let result = if seq_ok && recv == repair.group_size.saturating_sub(1) {
+                                let xor_len = sess.fec_xor_len.max(repair.xor_data.len());
+                                let mut out = vec![0u8; xor_len];
+                                for i in 0..xor_len {
+                                    out[i] = repair.xor_data.get(i).copied().unwrap_or(0)
+                                        ^ sess.fec_xor_buf.get(i).copied().unwrap_or(0);
+                                }
+                                debug!(
+                                    "FEC: recovered {} bytes from {} (group seq={} size={})",
+                                    out.len(),
+                                    hash_addr(&client_addr),
+                                    repair.group_seq,
+                                    repair.group_size
+                                );
+                                Some(out)
+                            } else {
+                                debug!(
+                                    "FEC: group seq={} size={} recv={} seq_ok={} — no recovery",
+                                    repair.group_seq, repair.group_size, recv, seq_ok
+                                );
+                                None
+                            };
+                            // Reset accumulator; advance expected seq to the next group.
+                            sess.fec_recv_count = 0;
+                            sess.fec_xor_buf.iter_mut().for_each(|b| *b = 0);
+                            sess.fec_xor_len = 0;
+                            sess.fec_pending_seq = repair.group_seq.wrapping_add(1);
+                            result
+                        };
+
+                        if let Some(recovered) = recovered_opt {
+                            let use_chain =
+                                self.chain_forwarder.is_some() && !session.lock().is_site_peer;
+                            if use_chain {
+                                if let Some(ref cf) = self.chain_forwarder {
+                                    cf.forward(recovered).await;
+                                }
+                            } else if let Some(ref tx) = self.tun_write_tx {
+                                let _ = tx.send(recovered).await;
+                            } else if let Some(ref nat) = self.nat_forwarder {
+                                nat.forward_packet(&recovered).await?;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2298,7 +2433,7 @@ impl Gateway {
             ControlPayload::MaskUpdate { .. } => {
                 warn!("Unexpected MASK_UPDATE from client");
             }
-            ControlPayload::Keepalive => {
+            ControlPayload::Keepalive { send_ts } => {
                 debug!("Keepalive from {}", hash_addr(&client_addr));
                 if !session.lock().is_ratcheted {
                     // The client is still retrying the initial handshake. If the
@@ -2307,12 +2442,13 @@ impl Gateway {
                     self.send_server_hello(session, client_addr).await?;
                     return Ok(());
                 }
-                // Send ACK
-                let ack = ControlPayload::ControlAck {
-                    ack_seq: 0,
-                    ack_for_subtype: ControlSubtype::Keepalive as u8,
-                };
-                self.send_control_message(&ack, session).await?;
+                // Echo the client's own send_ts so it can measure RTT without
+                // clock-skew between client and server.
+                self.send_control_message(
+                    &ControlPayload::KeepaliveAck { echo_ts: send_ts },
+                    session,
+                )
+                .await?;
             }
             ControlPayload::TelemetryRequest { metric_flags: _ } => {
                 debug!("Telemetry request from {}", hash_addr(&client_addr));
@@ -2613,6 +2749,104 @@ impl Gateway {
                 // Server-to-client only; the server never receives this from clients.
                 debug!(
                     "Unexpected CertRejected from client {}",
+                    hash_addr(&client_addr)
+                );
+            }
+            ControlPayload::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
+                let client_id = { session.lock().client_id.clone() };
+                if let (Some(ref db), Some(ref cid)) = (&self.client_db, &client_id) {
+                    // Verify DH proof: X25519(static_priv, server_static_pub) == dh_proof
+                    let server_kp =
+                        crypto::KeyPair::from_private_key(self.config.server_private_key);
+                    let expected_dh = match server_kp.compute_shared(&static_pub) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!(
+                                "DeviceEnrollment from {}: DH error: {}",
+                                hash_addr(&client_addr),
+                                e
+                            );
+                            return Ok(());
+                        }
+                    };
+                    use subtle::ConstantTimeEq;
+                    if expected_dh.ct_eq(&dh_proof).unwrap_u8() == 0 {
+                        warn!(
+                            "DeviceEnrollment from {}: invalid DH proof — rejecting",
+                            hash_addr(&client_addr)
+                        );
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "device_enrollment_rejected",
+                            cid,
+                            "denied",
+                        );
+                        let shutdown = ControlPayload::Shutdown { reason: 3 };
+                        let _ = self.send_control_message(&shutdown, session).await;
+                        let session_id = session.lock().session_id;
+                        self.session_manager.remove_session(&session_id);
+                        return Ok(());
+                    }
+                    match db.enroll_device(cid, &static_pub) {
+                        Ok(true) => info!("Device enrolled and bound for client {}", cid),
+                        Ok(false) => debug!("Device binding verified for client {}", cid),
+                        Err(e) => {
+                            warn!("Device binding mismatch for {}: {}", cid, e);
+                            self.audit_log.log(
+                                AuditActor::System,
+                                "device_binding_mismatch",
+                                cid,
+                                "denied",
+                            );
+                            let shutdown = ControlPayload::Shutdown { reason: 4 };
+                            let _ = self.send_control_message(&shutdown, session).await;
+                            let session_id = session.lock().session_id;
+                            self.session_manager.remove_session(&session_id);
+                        }
+                    }
+                }
+            }
+            ControlPayload::KeepaliveAck { echo_ts } => {
+                debug!(
+                    "KeepaliveAck from {} echo_ts={}",
+                    hash_addr(&client_addr),
+                    echo_ts
+                );
+            }
+            ControlPayload::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
+                info!(
+                    "QualityReport from {}: quality={} rtt={}ms loss={}ppm jitter={}ms",
+                    hash_addr(&client_addr),
+                    quality,
+                    rtt_ms,
+                    loss_ppm,
+                    jitter_ms
+                );
+                // Persist quality score on the session for monitoring/metrics.
+                session.lock().client_quality = quality;
+                // Push adaptive hint back so client adjusts keepalive + FEC immediately.
+                let level = aivpn_common::quality::AdaptiveLevel::suggest(quality);
+                if let Err(e) = self
+                    .send_control_message(
+                        &ControlPayload::AdaptiveHint { level: level as u8 },
+                        session,
+                    )
+                    .await
+                {
+                    debug!("AdaptiveHint send failed: {}", e);
+                }
+            }
+            ControlPayload::AdaptiveHint { .. } => {
+                debug!(
+                    "AdaptiveHint from client {} ignored",
                     hash_addr(&client_addr)
                 );
             }

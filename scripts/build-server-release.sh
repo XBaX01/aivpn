@@ -30,4 +30,4 @@ ls -lh "$ARTIFACT_PATH"
 file "$ARTIFACT_PATH" || true
 echo ""
 echo "Fast Docker install command:"
-echo "  AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt docker compose up -d aivpn-server"
+echo "  AIVPN_SERVER_DOCKERFILE=docker/Dockerfile.prebuilt docker compose up -d aivpn-server"

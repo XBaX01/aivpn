@@ -7,10 +7,15 @@ pub mod client_wire;
 pub mod crypto;
 pub mod error;
 pub mod event_log;
+pub mod fec;
 pub mod mask;
 pub mod network_config;
 pub mod protocol;
+pub mod quality;
 pub mod recording;
+
+#[cfg(feature = "client-upload")]
+pub mod mimicry;
 
 #[cfg(feature = "client-upload")]
 pub mod upload_pipeline;

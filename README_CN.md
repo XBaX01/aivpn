@@ -1,347 +1,294 @@
+🌐 [English](README.md) | [Русский](README_RU.md)
+
 # AIVPN
 
 [![CI](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml)
 [![Crates.io Server](https://img.shields.io/crates/v/aivpn-server.svg?label=aivpn-server)](https://crates.io/crates/aivpn-server)
 [![Crates.io Client](https://img.shields.io/crates/v/aivpn-client.svg?label=aivpn-client)](https://crates.io/crates/aivpn-client)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android%20%7C%20iOS%20%7C%20MikroTik-informational)
 
-传统VPN已经消亡。ISP和国家级别的防火墙（如GFW）只需查看数据包大小、时间间隔和握手模式，就能在几毫秒内检测到WireGuard和OpenVPN。你可以使用任何加密算法来加密载荷——DPI系统并不关心内容，它们阻止的是连接本身的"形状"。
+---
 
-**AIVPN**是我对现代深度包检测（DPI）的回应。我们不仅加密数据包——我们将它们伪装成真实的应用流量。当你的ISP看到一个Zoom通话或TikTok滚动时，实际上它是一个完全加密的隧道。
+## 概述
 
-为了在实践中验证这一点，我构建了自己的DPI模拟器，重现了真实的过滤场景，并在不同模式下故意阻止流量。然后我在重负载下对系统进行了压力测试，以测量弹性、掩码切换速度和路由稳定性。为了实现快速路由，我实现了我的专利方法：USPTO（美国）申请号19/452,440，日期为2026年1月19日——《通过信号重建共振实现无监督多任务路由的系统和方法》。
+AIVPN 是一款基于 UDP 的 VPN 系统，将标准隧道加密与**流量拟态**相结合：出站数据包被重塑为已知应用协议的形态（WebRTC、QUIC、DNS-over-UDP），使连接在统计上与正常应用流量无法区分。
 
-## 支持的平台
+核心技术特性：
 
-| 平台 | 服务器 | 客户端 | 全隧道 | 备注 |
-|------|--------|--------|--------|------|
-| **Linux** | ✅ | ✅ | ✅ | 主要平台，通过`/dev/net/tun`的TUN |
-| **macOS** | — | ✅ | ✅ | 通过`utun`内核接口，自动路由配置 |
-| **Windows** | — | ✅ | ✅ | 通过[Wintun](https://www.wintun.net/)驱动程序 |
-| **Android** | — | ✅ | ✅ | 通过`VpnService`API的原生Kotlin应用 |
-| **iOS** | — | ✅ | ✅ | 通过`NetworkExtension`API的原生SwiftUI应用 |
-| **MikroTik RouterOS** | — | ✅ | ✅ | RouterOS 7.6+容器，支持arm64/armv7/amd64 |
+- **零 RTT 数据启动** — 加密载荷可从第一个数据包开始传输，无需强制握手往返。
+- **O(1) 会话查找** — 明文中不传输会话 ID。每个数据包携带一个 8 字节的*共振标签*，由时间戳和每会话密钥派生。服务器通过 `DashMap` 以常数时间解析会话。
+- **完美前向保密** — 通过 X25519 棘轮机制进行飞行中会话密钥轮换。服务器密钥泄露不会暴露过去的流量。
+- **神经共振模块** — 每个掩码的微型 MLP（约 66 KB）实时监控流量统计；高重建误差触发自动掩码轮换，不中断客户端连接。
+- **Rust 编写** — 内存安全，无 GC 停顿。客户端二进制约 2.5 MB，可在 $5 VPS 上运行。
 
-### 当前客户端状态
+---
 
-- ✅ macOS应用：正常工作
-- ✅ CLI客户端：正常工作
-- ✅ Android应用：正常工作
-- ✅ iOS应用：正常工作（构建需要macOS + Xcode 15+）
-- ✅ Windows客户端：正常工作（GUI + CLI）
-- ✅ MikroTik RouterOS容器：正常工作（arm64/armv7/amd64）
+## 架构
 
-## 📥 下载
+### 工作区布局
 
-所有支持平台的预编译二进制文件都会自动构建并附加到每个发布版本中。您可以从 [GitHub Releases](https://github.com/infosave2007/aivpn/releases) 页面下载最新版本。
-
-### 快速开始（macOS）
-
-1. 从 [GitHub Releases](https://github.com/infosave2007/aivpn/releases) 页面下载 `aivpn-macos.dmg` 并打开它
-2. 将**Aivpn.app**拖拽到应用程序文件夹
-3. 启动——应用出现在菜单栏（无坞图标）
-4. 粘贴你的连接密钥（`aivpn://...`）并点击**连接**
-5. 切换🇷🇺/🇬🇧以切换语言
-
-> ⚠️ VPN客户端需要root权限来访问TUN设备。应用将通过`sudo`提示输入密码。
-
-### 快速开始（Windows）
-
-#### 选项A：安装程序（推荐）
-1. 下载[aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases)
-2. 右键点击 → **以管理员身份运行**，按照安装向导操作
-3. 从开始菜单启动**AIVPN**（自动以管理员身份运行）
-4. 粘贴你的连接密钥（`aivpn://...`）并点击**连接**
-
-> ⚠️ VPN客户端需要管理员权限来创建Wintun网络适配器。请始终以管理员身份运行。
-
-#### 选项B：便携归档
-1. 下载并解压[aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)
-2. 确保`aivpn.exe`、`aivpn-client.exe`和`wintun.dll`保留在同一文件夹中
-3. 右键点击`aivpn.exe` → **以管理员身份运行**使用GUI，或通过CLI：
-   ```powershell
-   .\aivpn-client.exe -k "your_connection_key_here"
-   ```
-
-### 快速开始（Linux）
-
-1. 下载 [aivpn-client-linux-x86_64](https://github.com/infosave2007/aivpn/releases)
-2. 使其可执行并作为root运行：
-   ```bash
-   chmod +x ./aivpn-client-linux-x86_64
-   sudo ./aivpn-client-linux-x86_64 -k "your_connection_key_here"
-   ```
-
-### 快速开始（Entware路由器）
-
-1. 从 [GitHub Releases](https://github.com/infosave2007/aivpn/releases) 页面下载 `aivpn-client-linux-mipsel-musl` 或 `aivpn-client-linux-armv7-musleabihf`。
-2. 将二进制文件复制到路由器，例如`/opt/bin/aivpn-client`
-3. 使其可执行并从Entware shell作为root运行：
-   ```sh
-   chmod +x /opt/bin/aivpn-client
-   /opt/bin/aivpn-client -k "your_connection_key_here"
-   ```
-4. 由于这些musl构建是静态链接的，路由器上不需要Rust工具链或额外的共享库。
-
-### 快速开始（MikroTik RouterOS）
-
-1. 启用容器支持：`/system/device-mode/update container=yes`，然后重启路由器
-2. 执行配置命令（详见 [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)）：
-   ```routeros
-   /interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
-   /ip/address/add address=172.31.0.1/30 interface=veth-aivpn
-   /container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
-   /container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
-   /container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
-   /container/start [find remote-image~"aivpn-mikrotik"]
-   ```
-3. 通过容器添加默认路由：`/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2`
-
-完整文档（包括策略路由配置和故障排除）请参见 [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)。
-
-### 快速开始（Android）
-
-1. 下载并安装`aivpn-client.apk`
-2. 在应用中粘贴你的连接密钥（`aivpn://...`）
-3. 点击**连接**
-
-### 快速开始（iOS）
-
-1. 在macOS上构建（需要Xcode 15+、`xcodegen`）：
-   ```bash
-   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-   cargo install xcodegen
-   ./build-ios.sh YOUR_TEAM_ID
-   ```
-2. 在设备上安装`releases/aivpn-ios.ipa`：
-   - 拖拽到**Xcode → Window → Devices and Simulators**，或
-   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
-3. 打开应用，粘贴连接密钥（`aivpn://...`）并点击**连接**
-
-> 免费Apple ID（个人团队）即可——无需付费开发者计划。设备安装7天后过期，需重新签名。
-
-### Android发布签名
-
-对于生产签名的Android APK，创建`aivpn-android/keystore.properties`：
-
-```properties
-storeFile=/absolute/path/to/aivpn-release.jks
-storePassword=your-store-password
-keyAlias=aivpn
-keyPassword=your-key-password
+```
+aivpn-common/       — 共享加密、协议、掩码配置（无 I/O）
+aivpn-server/       — 仅 Linux VPN 网关和管理 CLI
+aivpn-client/       — 跨平台 VPN 客户端（Linux / macOS / Windows）
+aivpn-android-core/ — Android JNI 桥接
+aivpn-windows/      — Windows GUI（egui/eframe）
+aivpn-android/      — Android Kotlin 应用
+aivpn-macos/        — macOS SwiftUI 菜单栏应用
+aivpn-ios-core/     — iOS Rust 静态库（C FFI）
+aivpn-ios/          — iOS SwiftUI 应用 + NEPacketTunnelProvider
+mask-assets/        — 捆绑的流量拟态 JSON 配置文件
 ```
 
-然后使用Java 21构建：
+### 核心模块
 
-```bash
-cd aivpn-android
-export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
-export PATH="$JAVA_HOME/bin:$PATH"
-./build-rust-android.sh release
+| 模块 | 位置 | 用途 |
+|------|------|------|
+| `crypto.rs` | `aivpn-common` | X25519 密钥交换、ChaCha20-Poly1305 AEAD、BLAKE3/HMAC、共振标签生成 |
+| `protocol.rs` | `aivpn-common` | 线路格式：`[8字节标签][pad_len][内部头][加密载荷][poly1305标签]` |
+| `mask.rs` | `aivpn-common` | `MaskProfile` — 流量整形：头部模板、FSM 状态、IAT 分布 |
+| `gateway.rs` | `aivpn-server` | 核心事件循环：UDP 接收、会话分发、NAT 转发、神经检查 |
+| `session.rs` | `aivpn-server` | `SessionManager` — `DashMap` O(1) 查找，256 条目重放窗口 |
+| `neural.rs` | `aivpn-server` | 神经共振：每掩码 MLP 64→128→64，MSE 阈值 0.35，自动轮换 |
+| `client.rs` | `aivpn-client` | 状态机：未配置 → 连接中 → 已连接，密钥交换，重连 |
+| `tunnel.rs` | `aivpn-client` | 跨平台 TUN：`/dev/net/tun`（Linux）、`utun`（macOS）、Wintun（Windows） |
+| `mimicry.rs` | `aivpn-client` | `MimicryEngine` — 对出站数据包应用 `MaskProfile` |
+
+### 节点池同步
+
+服务器间客户端数据库同步使用 `ControlPayload::PoolSync`，通过普通 VPN UDP 数据包传输 — 与客户端流量无法区分。无需单独 TCP 端口或防火墙规则。
+
+---
+
+## 平台支持
+
+| 平台 | 服务器 | 客户端 | GUI | TUN 驱动 |
+|------|:------:|:------:|:---:|---------|
+| Linux | ✅ | ✅ | ✅ AppImage + 托盘 | `/dev/net/tun` |
+| macOS | — | ✅ | ✅ 菜单栏 | `utun` |
+| Windows | — | ✅ | ✅ egui | [Wintun](https://www.wintun.net/) |
+| Android | — | ✅ | ✅ 原生 Kotlin | `VpnService` API |
+| iOS | — | ✅ | ✅ SwiftUI | `NetworkExtension` |
+| MikroTik RouterOS 7.6+ | — | ✅ | — | 容器 veth + TUN |
+| Entware 路由器（ARMv7 / MIPSel） | — | ✅ | — | musl 静态二进制 |
+
+### 功能能力矩阵
+
+| 功能 | CLI | Win | Mac | Android | iOS |
+|------|:---:|:---:|:---:|:-------:|:---:|
+| 流量伪装 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 自适应模式（4 级） | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 实时连接质量 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 分流隧道 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DNS 代理 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Kill Switch | ✅ | ✅ | ✅ | ✅ | ✅ |
+| mTLS 证书 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| FEC（前向纠错） | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 流量录制 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 设备密钥 / JIT | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SOCKS5 代理 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| 全流量隧道 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 诊断 / 基准测试 | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## 快速入门
+
+### 服务器（Linux）
+
+#### Docker（推荐）
+
 ```
-
-如果`keystore.properties`不存在，脚本将回退到未签名的发布APK，然后仅使用调试keystore签名作为本地可安装的后备方案。
-
-### 📦 通过 Cargo 安装 (crates.io)
-
-如果您已经安装了 Rust，可以直接从 crates.io 轻松安装客户端或服务器：
-
-```bash
-cargo install aivpn-client
-cargo install aivpn-server
-```
-
-## ❤️ 支持项目
-
-如果你觉得这个项目有帮助，可以通过Tribute捐款来支持其开发：
-
-👉 https://t.me/tribute/app?startapp=dzX1
-
-每一笔捐款都有助于AIVPN的持续发展。谢谢！🙌
-
-## 主要功能：神经共振（AI）
-
-最有趣的核心功能是我们的AI模块——**神经共振**。
-
-我们没有在项目中拖入一个会耗尽廉价VPS所有内存的400MB大语言模型，而是：
-
-- **预生成掩码编码器：**对于每个掩码配置文件（WebRTC编解码器、QUIC协议），我们从掩码的64维签名向量直接确定性地推导出一个微型神经网络（MLP 64→128→64）——以该签名的BLAKE3哈希作为种子。每个掩码唯一，约66KB，无需外部训练文件。
-- **实时分析：**这个神经网络实时分析传入UDP数据包的熵和IAT（到达间隔时间）。
-- **追踪审查者：**如果ISP的DPI系统试图探测我们的服务器（主动探测）或开始限制数据包，神经模块会检测到重建误差（MSE）的峰值。
-- **自动掩码轮换：**一旦AI确定当前掩码已泄露（例如`webrtc_zoom`被标记），服务器和客户端会*无缝*地将流量重塑为备用掩码（例如`dns_over_udp`）。零断开连接！
-
-## 其他很酷的功能
-
-- **零RTT和PFS：**没有经典握手供嗅探器捕获。数据从第一个数据包就开始流动。完美前向保密（PFS）内置——密钥实时轮换，因此即使服务器被查封，旧流量转储也无法解密。
-- **O(1)加密会话标签：**我们从不在明文中传输会话ID。相反，每个数据包都携带一个从时间戳和密钥派生的动态加密标签。服务器可以立即找到正确的客户端，但对任何观察者来说这只是噪声。
-- **用Rust编写：**快速、内存安全、无泄漏。整个客户端二进制文件约2.5MB。在5美元的VPS上舒适运行。
-
-## 入门指南
-
-### 1. 克隆仓库
-
-```bash
-git clone https://github.com/infosave2007/aivpn.git
-cd aivpn
-```
-
-### 2. 构建（需要Rust 1.75+）
-
-项目分为工作区：`aivpn-common`（加密和掩码）、`aivpn-server`和`aivpn-client`。
-
-```bash
-# 在所有平台上命令相同：
-cargo build --release
-```
-
-要在不在主机上安装Rust的情况下刷新Linux服务器发布工件：
-
-```bash
-./build-server-release.sh
-```
-
-对于ARMv7服务器和Entware级MIPSel路由器的静态musl构建：
-
-```bash
-./build-musl-release.sh server armv7-unknown-linux-musleabihf
-./build-musl-release.sh server mipsel-unknown-linux-musl
-./build-musl-release.sh client armv7-unknown-linux-musleabihf
-./build-musl-release.sh client mipsel-unknown-linux-musl
-```
-
-构建iOS应用（需要macOS + Xcode 15+）：
-
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-cargo install xcodegen
-./build-ios.sh              # 未签名构建（CI/模拟器）
-./build-ios.sh YOUR_TEAM_ID # 真机签名（免费Apple ID）
-```
-
-`.ipa`文件复制到`releases/aivpn-ios.ipa`。
-
-要将最新的已发布Linux服务器版本一键部署到VPS：
-
-```bash
-./deploy-server-release.sh
-```
-
-> 对于GitHub Releases，将`aivpn-server-linux-x86_64`发布为默认Linux服务器资产，将`aivpn-windows-package.zip`作为主要Windows资产，并附加musl工件`aivpn-server-linux-armv7-musleabihf`、`aivpn-server-linux-mipsel-musl`、`aivpn-client-linux-armv7-musleabihf`和`aivpn-client-linux-mipsel-musl`用于ARM/Entware目标。原始`aivpn-client.exe`仅在`wintun.dll`与之一起提供时才是安全的。
-
-GitHub Releases自动化：`.github/workflows/server-release-asset.yml`中的工作流程在每个发布的Release上构建`aivpn-server-linux-x86_64`以及ARMv7和MIPSel musl服务器/客户端资产，并自动上传它们。
-
-### 3. 服务器（仅Linux）
-
-#### 选项A：Docker（推荐）
-
-最简单的方式——一切都在`docker-compose.yml`中预配置。
-
-```bash
-# 选择你系统上可用的Compose命令
-if docker compose version >/dev/null 2>&1; then
-    AIVPN_COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    AIVPN_COMPOSE="docker-compose"
-else
-    echo "安装Docker Compose v2（`docker-compose-v2`或`docker-compose-plugin`）或旧版`docker-compose`。"
-    exit 1
-fi
-
-# 可选：在此处预创建config/server.json或config/server.key。
-# 如果它们缺失，容器现在会自动引导两者。
 mkdir -p config
-
-# 启用NAT（VPN互联网访问所需）
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-
-# 从预编译的Linux发布二进制文件快速启动
-AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt $AIVPN_COMPOSE up -d aivpn-server
-
-# 或保留原始源码构建路径
-$AIVPN_COMPOSE up -d aivpn-server
+docker compose up -d aivpn-server
 ```
 
-快速路径需要`releases/aivpn-server-linux-x86_64`本地存在。使用`./build-server-release.sh`构建或从Releases下载后再启动Docker。
+容器首次启动时自动生成 `server.key` 和 `server.json`，以 `network_mode: host` 运行，挂载 `./config` → `/etc/aivpn`。
 
-对于VPS一键快速部署，运行`./deploy-server-release.sh`。它会下载发布资产，在需要时创建`config/server.key`，启用IPv4转发，为默认接口添加NAT规则，并使用`Dockerfile.prebuilt`启动Docker。
+开放防火墙 UDP 443 端口：
 
-如果启用了防火墙，还使用系统工具允许`443/udp`：
-
-```bash
-# UFW (Ubuntu/Debian)
+```
+# UFW
 sudo ufw allow 443/udp
-
-# firewalld (RHEL/CentOS/Fedora)
-sudo firewall-cmd --add-port=443/udp --permanent
-sudo firewall-cmd --reload
+# firewalld
+sudo firewall-cmd --add-port=443/udp --permanent && sudo firewall-cmd --reload
 ```
 
-> 容器以`network_mode: "host"`运行，并在容器内挂载`./config` → `/etc/aivpn`。
-> 首次启动时，它会从捆绑的示例自动创建`server.json`，并在任一文件缺失时生成`server.key`。
+#### 裸机
 
-#### 选项B：裸金属
-
-SSH到你的VPS，生成密钥：
-
-```bash
+```
 sudo mkdir -p /etc/aivpn
 openssl rand 32 | sudo tee /etc/aivpn/server.key > /dev/null
 sudo chmod 600 /etc/aivpn/server.key
+sudo ./aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
 ```
 
-启动：
+服务器自动启用 IPv4 转发并安装 NAT 伪装规则（优先 nftables，回退 iptables）。隧道本身无需手动配置防火墙。
 
-```bash
-sudo ./target/release/aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
+#### 添加客户端
+
+```
+# Docker
+docker compose exec aivpn-server aivpn-server \
+    --add-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip 您的公网IP:443
+
+# 裸机
+aivpn-server \
+    --add-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip 您的公网IP:443
 ```
 
-启用NAT：
+输出包含连接密钥（`aivpn://…`）— 分发给客户端。
 
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+其他管理命令：`--list-clients`、`--show-client`、`--remove-client`。
+
+---
+
+### 客户端 — Linux
+
+```
+sudo ./aivpn-client -k "aivpn://..."
+# 全隧道（所有流量通过 VPN）
+sudo ./aivpn-client -k "aivpn://..." --full-tunnel
 ```
 
-如果你使用不同于旧版`10.0.0.0/24`的VPN子网，请在`config/server.json`中将其保留为权威来源：
+### 客户端 — macOS
 
-```json
-{
-    "listen_addr": "0.0.0.0:443",
-    "tun_name": "aivpn0",
-    "network_config": {
-        "server_vpn_ip": "10.150.0.1",
-        "prefix_len": 24,
-        "mtu": 1346
-    }
-}
+从 [Releases](https://github.com/infosave2007/aivpn/releases) 下载 `aivpn-macos.dmg`，将 **Aivpn.app** 拖入 Applications，启动 — 出现在菜单栏。粘贴连接密钥并点击 **Connect**。
+
+命令行：
+```
+sudo ./aivpn-client -k "aivpn://..."
 ```
 
-然后将NAT规则匹配到该子网，例如：
+> 应用通过 `sudo` 请求密码以创建 `utun` 接口。
 
-```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+### 客户端 — Windows
+
+**安装程序（推荐）：** 下载 `aivpn-windows-installer.exe`，以管理员身份运行，从开始菜单启动 **AIVPN**。
+
+**便携版：** 解压 `aivpn-windows-package.zip`（包含 `aivpn.exe`、`aivpn-client.exe`、`wintun.dll`），以管理员身份运行 `aivpn.exe`。
+
+命令行（PowerShell，管理员权限）：
+```
+.\aivpn-client.exe -k "aivpn://..."
 ```
 
-`listen_addr` 控制监听端口（默认：443）。使用其他端口：
+> 创建 Wintun 网络适配器需要管理员权限。
 
-```json
-{
-  "listen_addr": "0.0.0.0:8443",
-  ...
-}
+### 客户端 — Android
+
+1. 安装 `aivpn-client.apk`
+2. 粘贴连接密钥（`aivpn://…`）
+3. 点击 **Connect**
+
+### 客户端 — iOS
+
+在 macOS 上构建（需要 Xcode 15+）：
+
+```
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./scripts/build-ios.sh 您的TEAM_ID
 ```
 
-端口会自动嵌入连接密钥中——客户端无需手动配置。环境变量 `AIVPN_LISTEN` 或 `--listen` 命令行参数可覆盖 `server.json` 中的设置。
+安装 `releases/aivpn-ios.ipa`：
+```
+xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa
+```
 
-#### server.json 完整参数参考
+> 免费 Apple 开发者账户即可。侧载构建 7 天后过期。
+
+### 客户端 — Entware 路由器（ARMv7 / MIPSel）
+
+```
+scp aivpn-client-linux-armv7-musleabihf root@router:/opt/bin/aivpn-client
+ssh root@router 'chmod +x /opt/bin/aivpn-client && /opt/bin/aivpn-client -k "aivpn://..."'
+```
+
+### 客户端 — MikroTik RouterOS 7.6+
+
+```
+/system/device-mode/update container=yes
+/interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+/ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+/container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+/container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
+/container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
+/container/start [find remote-image~"aivpn-mikrotik"]
+/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2
+```
+
+详见 [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)。
+
+### SOCKS5 代理模式（无需 root）
+
+```
+aivpn-client -k "aivpn://..." --proxy-listen 127.0.0.1:1080
+```
+
+配置 Firefox / Chrome / curl 使用 `SOCKS5 127.0.0.1:1080`，无需 TUN 设备或管理员权限。
+
+---
+
+## 连接密钥格式
+
+连接密钥将所有服务器和客户端参数编码为单个可移植字符串：
+
+```
+aivpn://<base64url(JSON)>
+```
+
+JSON 字段：
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `s` | `string` | 服务器地址，如 `"1.2.3.4:443"` |
+| `k` | `string` | 服务器 X25519 公钥（base64） |
+| `p` | `string` | 客户端预共享密钥 / PSK（base64） |
+| `i` | `string` | 客户端静态 VPN IP，如 `"10.0.0.2"` |
+| `n` | `object` | *（可选）* 引导 `network_config`（见下文） |
+
+`network_config` 对象（`n`）：
+
+| 字段 | 描述 |
+|------|------|
+| `client_ip` | 客户端 TUN IP |
+| `server_vpn_ip` | 服务器 TUN IP |
+| `prefix_len` | 子网前缀长度 |
+| `mtu` | 内部 MTU |
+
+连接时的优先级：
+
+1. `ServerHello` 确认的设置（权威）
+2. 密钥中的引导 `network_config`
+3. 传统回退 `10.0.0.0/24`
+
+不含 `network_config` 的密钥完全兼容。
+
+生成密钥：
+```
+aivpn-server --add-client "姓名" --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json --server-ip IP:PORT
+```
+
+重新打印现有密钥：
+```
+aivpn-server --show-client "姓名" --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json --server-ip IP:PORT
+```
+
+---
+
+## 服务器配置参考
+
+默认配置路径：`config/server.json`（本地）或 `/etc/aivpn/server.json`。CLI 标志覆盖文件值。
 
 ```json
 {
@@ -349,9 +296,10 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
   "tun_name": "aivpn0",
   "tun_mtu": "auto",
   "mask_dir": "/var/lib/aivpn/masks",
-  "bootstrap_mask_files": ["/etc/aivpn/masks/custom.json"],
+  "bootstrap_mask_files": [],
   "session_timeout_secs": 0,
   "idle_timeout_secs": 300,
+  "allow_peer_routing": false,
   "network_config": {
     "server_vpn_ip": "10.0.0.1",
     "prefix_len": 24,
@@ -359,464 +307,216 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
     "keepalive_secs": 8,
     "ipv6_enabled": false,
     "ipv6_prefix": "fd10:cafe::/48"
-  }
-}
-```
-
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| `listen_addr` | `0.0.0.0:443` | UDP 监听地址和端口 |
-| `tun_name` | 随机 | TUN 设备名称（`aivpn0`、`tun0` 等） |
-| `tun_mtu` | _(未设置)_ | `"auto"` 自动检测物理接口 MTU（减去 64 字节协议开销，失败时回退到 1346）；或固定整数，如 `1400` |
-| `mask_dir` | `/var/lib/aivpn/masks` | 扫描 `.json` 掩码配置文件的目录 |
-| `bootstrap_mask_files` | `[]` | 启动时预加载的额外掩码文件（降低首次连接延迟） |
-| `session_timeout_secs` | `0` | 会话硬性时间上限（秒）；`0` 表示无限制 |
-| `idle_timeout_secs` | `300` | 客户端静默超过 N 秒后断开连接 |
-| `network_config.server_vpn_ip` | `10.0.0.1` | 服务器 TUN 接口 IP |
-| `network_config.prefix_len` | `24` | VPN 子网前缀长度 |
-| `network_config.mtu` | `1346` | 通过 `ServerHello` 发送给客户端的内层隧道 MTU |
-| `network_config.keepalive_secs` | `8` | 与客户端协商的 keepalive 间隔（秒） |
-| `network_config.ipv6_enabled` | `false` | 启用 IPv6 NAT66——为每个客户端分配来自 `ipv6_prefix` 的 IPv6 地址 |
-| `network_config.ipv6_prefix` | `fd10:cafe::/48` | NAT66 客户端地址的 ULA /48 前缀 |
-
-### 3.1 客户端管理
-
-AIVPN使用类似于WireGuard/XRay的客户端注册模型：每个客户端获得唯一的PSK、静态VPN IP和流量统计。
-
-所有配置都打包在一个**连接密钥**中——用户将其粘贴到应用或CLI客户端的一个字符串。
-
-连接密钥现在同时携带旧版顶级VPN IP字段和可选的引导`network_config`块。新客户端使用此块中的服务器提供的网络设置，然后从`ServerHello`确认它们。没有`network_config`的旧密钥仍然有效。
-
-#### Docker
-
-```bash
-# 重用上面检测到的相同Compose命令
-# 添加新客户端（打印连接密钥）
-$AIVPN_COMPOSE exec aivpn-server aivpn-server \
-    --add-client "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_PUBLIC_IP:443
-
-# 输出：
-# ✅ 客户端'Alice Phone'已创建！
-#    ID:     a1b2c3d4e5f67890
-#    VPN IP: 10.0.0.2
-#
-# ══ 连接密钥（粘贴到应用） ══
-#
-# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwibiI6eyJjbGllbnRfaXAiOiIxMC4wLjAuMiIsInNlcnZlcl92cG5faXAiOiIxMC4wLjAuMSIsInByZWZpeF9sZW4iOjI0LCJtdHUiOjEzNDZ9LCJwIjoiLi4uIiwicyI6IjEuMi4zLjQ6NDQzIn0
-
-# 列出所有客户端及其流量统计
-docker compose exec aivpn-server aivpn-server \
-    --list-clients --clients-db /etc/aivpn/clients.json
-
-# 显示特定客户端（及其连接密钥）
-$AIVPN_COMPOSE exec aivpn-server aivpn-server \
-    --show-client "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_PUBLIC_IP:443
-
-# 删除客户端
-docker compose exec aivpn-server aivpn-server \
-    --remove-client "Alice Phone" \
-    --clients-db /etc/aivpn/clients.json
-```
-
-> 使用Compose服务名称，因此无论生成的容器名称如何都能工作。
-
-#### 裸金属
-
-```bash
-# 添加新客户端
-aivpn-server \
-    --add-client "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_PUBLIC_IP:443
-
-# 列出所有客户端及其流量统计
-aivpn-server --list-clients --clients-db /etc/aivpn/clients.json
-
-# 显示特定客户端（及其连接密钥）
-aivpn-server \
-    --show-client "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_PUBLIC_IP:443
-
-# 删除客户端
-aivpn-server \
-    --remove-client "Alice Phone" \
-    --clients-db /etc/aivpn/clients.json
-```
-
-### 3.2 录制自定义掩码
-
-AIVPN支持从真实应用自动录制流量以创建新的伪装配置文件。这允许系统适应你网络中未被阻止的特定服务。
-
-#### 录制工作原理
-
-录制系统通过**认证的客户端连接**工作：
-
-1. **创建管理员客户端**：在服务器上生成特殊的管理员密钥
-2. **连接客户端**：使用管理员连接密钥启动AIVPN客户端
-3. **开始录制**：通过VPN隧道发送`record start <service>`命令
-4. **使用服务**：系统捕获数据包元数据（大小、间隔、头部）
-5. **停止录制**：发送`record stop`以触发掩码生成和自测试
-
-服务器端管道：
-- **录制**：拦截来自VPN会话的UDP数据包
-- **分析**：构建大小直方图，计算IAT周期，推断FSM
-- **生成**：创建包含`HeaderSpec`的完整`MaskProfile`
-- **自测试**：验证统计重现性
-- **存储**：保存到掩码存储并在目录中注册
-
-#### 分步指南
-
-**1. 在服务器上创建管理员客户端：**
-
-```bash
-# Docker
-docker compose exec aivpn-server aivpn-server \
-    --add-client "recording-admin" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_SERVER_IP:443
-
-# 裸金属
-aivpn-server \
-    --add-client "recording-admin" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip YOUR_SERVER_IP:443
-```
-
-保存输出的连接密钥（以`aivpn://`开头）。
-
-**2. 使用管理员密钥连接客户端：**
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://..."
-```
-
-**3. 开始录制服务：**
-
-```bash
-# 通过VPN隧道发送录制开始命令
-aivpn record start --service zoom
-```
-
-**4. 正常使用服务30-60秒**以捕获多样的流量模式。
-
-**5. 停止录制：**
-
-```bash
-aivpn record stop
-```
-
-服务器将分析捕获的数据包并生成新掩码。你将看到类似输出：
-
-```
-✅ 掩码已生成并测试！
-
-   掩码ID:     zoom_custom_abc123
-   服务:       zoom
-   置信度:     0.87
-
-   广播到所有客户端...
-```
-
-#### 良好掩码的要求
-
-- **至少500个数据包**以获得统计显著性
-- **最少60秒**的录制时间（系统要求）
-- **多样化流量**：服务中的不同操作类型
-- **稳定连接**：无断开连接或重传
-
-每个掩码是一个单独的JSON文件，命名为`{mask_id}.json`。
-
-### 4. 客户端
-
-#### 连接密钥（推荐）
-
-最简单的方式——粘贴来自`--add-client`的连接密钥：
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://eyJp..."
-```
-
-现代客户端的优先级是：
-
-1. 由`ServerHello`确认的网络设置
-2. 来自连接密钥的引导`network_config`
-3. 旧版回退`10.0.0.0/24`
-
-迁移说明：旧客户端继续使用旧密钥和旧版`/24`默认值工作，但如果你将服务器移动到不同的子网或前缀，必须更新客户端并重新签发连接密钥。
-
-全隧道：
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://eyJp..." --full-tunnel
-```
-
-#### 手动模式
-
-你也可以手动指定服务器地址和密钥（不使用PSK——用于旧版/无认证模式）：
-
-##### Linux
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server YOUR_VPS_IP:443 \
-    --server-key SERVER_PUBLIC_KEY_BASE64
-```
-
-全隧道模式（通过VPN路由所有流量）：
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server YOUR_VPS_IP:443 \
-    --server-key SERVER_PUBLIC_KEY_BASE64 \
-    --full-tunnel
-```
-
-##### macOS
-
-同样，`cargo build --release`生成原生二进制文件：
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server YOUR_VPS_IP:443 \
-    --server-key SERVER_PUBLIC_KEY_BASE64
-```
-
-> macOS将通过`ifconfig`/`route`自动配置`utun`接口和路由。
-
-##### Windows
-
-推荐用户通过 [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases) 安装（包含GUI应用、CLI客户端和Wintun驱动）。
-
-或者下载并解压 [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)。归档包含：
-
-```
-aivpn.exe          # GUI应用程序
-aivpn-client.exe   # CLI客户端
-wintun.dll         # Wintun网络驱动
-```
-
-> ⚠️ **需要管理员权限。** VPN客户端需要管理员权限来创建Wintun网络适配器。请始终右键点击 → "以管理员身份运行"或从提升权限的PowerShell启动。
-
-**GUI模式**（推荐）：右键点击`aivpn.exe` → **以管理员身份运行**，粘贴连接密钥并点击连接。
-
-**CLI模式**，从PowerShell**以管理员身份**运行：
-
-```powershell
-.\aivpn-client.exe --server YOUR_VPS_IP:443 --server-key SERVER_PUBLIC_KEY_BASE64
-```
-
-全隧道：
-
-```powershell
-.\aivpn-client.exe --server YOUR_VPS_IP:443 --server-key SERVER_PUBLIC_KEY_BASE64 --full-tunnel
-```
-
-> 客户端将通过`route add`自动配置路由，并在退出时清理它们。
-
-### 4.1 代理模式（SOCKS5，无需root）
-
-客户端可以作为本地 **SOCKS5 代理**运行，而无需创建 TUN 设备。这样您可以将特定浏览器或应用程序通过 VPN 路由，无需管理员/root 权限，也无需安装内核驱动程序。
-
-```bash
-# 在 1080 端口启动 SOCKS5 代理（无需 sudo）
-aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
-```
-
-将您的应用程序配置为使用 `127.0.0.1:1080` 的 `SOCKS5` 代理：
-
-| 应用程序 | 配置方法 |
-|---------|---------|
-| **Firefox** | 设置 → 网络设置 → 手动代理配置 → SOCKS5 `127.0.0.1:1080`，启用"通过代理解析DNS" |
-| **Chrome / Chromium** | 使用 `--proxy-server=socks5://127.0.0.1:1080` 启动 |
-| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
-| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
-
-**限制：**
-- 不支持 IPv6 目标地址（请使用主机名或 IPv4）
-- 不代理 UDP 流量（仅支持 TCP CONNECT）
-- DNS 通过本地系统解析器解析（查询不经过 VPN）
-
-### 5. Android
-
-1. 安装APK（`aivpn-android/app/build/outputs/apk/debug/app-debug.apk`）
-2. 在单个输入字段中粘贴你的**连接密钥**（`aivpn://...`）
-3. 点击**连接**
-
-连接密钥包含一切：服务器地址、公钥、你的PSK和VPN IP。无需手动配置。
-
-## 交叉编译
-
-从当前机器为任何平台构建客户端：
-
-```bash
-# 从macOS/Windows构建Linux目标
-rustup target add x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-unknown-linux-gnu
-
-# 从Linux/macOS构建Windows目标
-rustup target add x86_64-pc-windows-msvc
-cargo build --release --target x86_64-pc-windows-msvc
-```
-
-对于不需要安装本地交叉工具链的静态musl交叉构建，使用Docker支持的发布构建：
-
-```bash
-./build-musl-release.sh client armv7-unknown-linux-musleabihf
-./build-musl-release.sh client mipsel-unknown-linux-musl
-./build-musl-release.sh server armv7-unknown-linux-musleabihf
-./build-musl-release.sh server mipsel-unknown-linux-musl
-```
-
-这些工件适用于ARM Linux服务器/SBC和支持Entware的MIPSel路由器。
-
-对于Entware路由器，通常的流程是：构建或下载musl工件，将其复制到`/opt/bin`，`chmod +x`，然后直接从路由器shell运行。
-
-## 高级服务器配置
-
-### 多服务器池同步（内置于协议）
-
-服务器节点自动共享客户端数据库。同步作为 `PoolSync` 控制消息内置于 VPN 协议中，与客户端流量无法区分。无需额外 TCP 端口或防火墙规则。
-
-`server.json`:
-```json
-{
+  },
   "pool": {
-    "peers": ["node2.example.com:443", "node3.example.com:443"],
-    "sync_key": "<base64编码的32字节密钥>"
+    "peers": [],
+    "sync_key": ""
   }
 }
 ```
-生成密钥：`openssl rand -base64 32`
 
-### 备份 / 迁移
+| 字段 | 默认值 | 描述 |
+|------|--------|------|
+| `listen_addr` | `0.0.0.0:443` | UDP 绑定地址，端口自动嵌入连接密钥 |
+| `tun_name` | 随机 | TUN 接口名称 |
+| `tun_mtu` | _（未设置）_ | `"auto"` = 物理 MTU 减去 64 字节开销（回退 1346）；或固定整数 |
+| `mask_dir` | `/var/lib/aivpn/masks` | 扫描 `.json` 掩码配置文件的目录 |
+| `bootstrap_mask_files` | `[]` | 启动时预加载的掩码文件，降低首次连接延迟 |
+| `session_timeout_secs` | `0` | 会话硬性上限；`0` = 无限制 |
+| `idle_timeout_secs` | `300` | 断开静默超时（秒） |
+| `allow_peer_routing` | `false` | 在子网内路由 VPN 客户端间的数据包 |
+| `network_config.server_vpn_ip` | `10.0.0.1` | 服务器 TUN IP |
+| `network_config.prefix_len` | `24` | VPN 子网前缀 |
+| `network_config.mtu` | `1346` | 通过 `ServerHello` 发送给客户端的内部 MTU |
+| `network_config.keepalive_secs` | `8` | 与客户端协商的心跳间隔 |
+| `network_config.ipv6_enabled` | `false` | 启用 IPv6 NAT66 |
+| `network_config.ipv6_prefix` | `fd10:cafe::/48` | 客户端 IPv6 地址的 ULA /48 前缀 |
+| `pool.peers` | `[]` | 数据库同步的对等服务器地址 |
+| `pool.sync_key` | `""` | 共享 32 字节 BLAKE3 密钥（base64）。生成：`openssl rand -base64 32` |
 
-```bash
-# 导出（客户端数据库、掩码配置、服务器配置）
-aivpn-server --export /tmp/aivpn-backup.tar.gz
+### 可选功能（Cargo）
 
-# 预览并恢复
-aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
-aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
+| 功能 | 启用内容 |
+|------|---------|
+| `neural` | 神经共振模块（基于 MSE 的掩码轮换） |
+| `management-api` | Unix 套接字 HTTP API，位于 `/run/aivpn/api.sock` |
+| `metrics` | Prometheus 导出器 |
+| `passive-distribution` | 引导描述符分发渠道 |
+
+```
+cargo build --release --bin aivpn-server --features "management-api,metrics,neural"
 ```
 
-### 客户端级 QoS
+---
 
-```bash
-aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
+## 从源码构建
+
+要求：Rust 1.75+、`cargo`。
+
+```
+git clone https://github.com/infosave2007/aivpn.git
+cd aivpn
+
+# 构建所有工作区成员
+cargo build --release
+
+# 单独构建
+cargo build --release --bin aivpn-server
+cargo build --release --bin aivpn-client
+
+# 运行测试
+cargo test
+
+# 静态 musl 交叉构建（ARMv7 / MIPSel）
+./scripts/build-musl-release.sh server armv7-unknown-linux-musleabihf
+./scripts/build-musl-release.sh client mipsel-unknown-linux-musl
+
+# Docker 服务器构建（输出到 releases/）
+./scripts/build-server-release.sh
+
+# Windows GUI（从 Linux 交叉编译）
+./scripts/build-windows-gui.sh
+
+# iOS（macOS + Xcode 15+）
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./scripts/build-ios.sh              # 未签名 / 模拟器
+./scripts/build-ios.sh 您的TEAM_ID # 设备签名
 ```
 
-有 eBPF TC 内核支持时优先使用，否则自动回退到用户态令牌桶。
+### Android
 
-### 基准测试与诊断
+```
+export ANDROID_SDK_ROOT=/opt/android-sdk
+export ANDROID_NDK_ROOT=/opt/android-ndk
+echo "sdk.dir=$ANDROID_SDK_ROOT" > aivpn-android/local.properties
 
-```bash
-# 默认：10 秒测试
-aivpn-client bench -k "aivpn://..."
-# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
-
-# 自定义测试时长
-aivpn-client bench -k "aivpn://..." --duration 30
-
-# 输出 JSON 格式
-aivpn-client bench -k "aivpn://..." --json
+cd aivpn-android
+./build-rust-android.sh release
 ```
 
-可从命令行及所有 GUI 客户端（Windows、macOS、iOS、Android）的诊断面板使用。
+签名构建：运行脚本前创建 `aivpn-android/keystore.properties`。
 
-查看掩码录制进度：
+### 从 crates.io 安装
 
-```bash
-aivpn-client record status -k "aivpn://..."
+```
+cargo install aivpn-client
+cargo install aivpn-server
 ```
 
-清除异常退出后残留的 kill-switch 防火墙规则：
+---
 
-```bash
-aivpn-client kill-switch clear
+## 高级功能
+
+### 设备绑定（JIT 注册）
+
+连接密钥可指定为*一次性*：第一个连接的设备绑定其 X25519 静态密钥，来自不同设备的后续连接将被拒绝。
+
+```
+# 创建注册槽位
+aivpn-server --add-client-one-time "Alice-Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip IP:PORT
+
+# 重置绑定（重新启用注册）
+aivpn-server --reset-device "Alice-Phone" \
+    --clients-db /etc/aivpn/clients.json
 ```
 
-### 自适应模式
+各平台设备密钥存储位置：
 
-基于实时丢包测量自动调整 MTU 和 keepalive：
+| 平台 | 位置 |
+|------|------|
+| Linux / macOS | `~/.config/aivpn/device.key`（权限 600，自动生成） |
+| Windows | `%APPDATA%\aivpn\device.key` |
+| Android | 通过 `EncryptedSharedPreferences` 使用 Android Keystore |
+| iOS | Keychain，`kSecAttrAccessibleAfterFirstUnlock` |
 
-```bash
+### 连接质量评分与自适应模式
+
+AIVPN 持续计算 **0–100 质量评分**，来源：RTT（40 分）、抖动（20 分）、丢包（30 分）、Neural MSE（10 分）。自适应模式自动调整心跳间隔和 FEC 组大小：
+
+| 评分 | 自适应级别 | 心跳 | FEC 组 |
+|------|-----------|------|--------|
+| 80–100 | 关闭 | 8 秒 | 禁用 |
+| 50–79 | 轻度 | 6 秒 | 1/16 |
+| 20–49 | 积极 | 4 秒 | 1/8 |
+| 0–19 | 卫星 | 15 秒 | 1/4 |
+
+```
 aivpn-client -k "aivpn://..." --adaptive
 ```
 
-### OpenWRT / LuCI
+### 前向纠错（FEC）
 
-原生 OpenWRT 软件包，含 procd init 脚本、UCI 配置及 LuCI Web 界面。参见 `aivpn-openwrt/docs/openwrt-setup.md`。
+每 N 个上行数据包发送一个 XOR 修复包。如果一组中恰好丢失一个包，服务器立即重建 — 无需重传往返。N 由自适应模式控制。清洁链路上 FEC 禁用。
 
-### 管理员审计日志
-
-所有管理操作记录至 `/var/log/aivpn/audit.log`（JSONL，可通过 `--audit-log` 配置路径），包含操作者、动作、目标、结果及 ISO-8601 时间戳。
-
-### 多跳链式转发
-
-无需修改客户端，通过两台节点路由流量。入口节点：`pool.exit_node`。出口节点：`pool.exit_node_enabled: true`。两节点共享同一 `pool.sync_key`。
-
-### DNS-over-HTTPS 代理
-
-将客户端 DNS 查询通过 VPN 接口上的加密 DoH 解析器转发。编译时添加 `--features "dns"`，配置 `dns.upstream_doh` 字段。
-
-### 站点间 VPN
-
-无需客户端软件连通多个站点子网。配置 `site_to_site.peers`，含 `endpoint`、`sync_key`、`remote_subnets` 白名单。
-
-### mTLS 客户端证书
-
-可选 ed25519 签名证书（104 字节）叠加于 X25519+PSK 之上。`required: false`（默认）向后兼容；`required: true` 强制验证。
-
-**1. 在服务器上生成 CA 密钥对：**
-
-```bash
-aivpn-server --gen-ca --key-file /etc/aivpn/server.key
-# 输出：CA 公钥和私钥（十六进制）
-```
-
-**2. 签发客户端证书：**
-
-```bash
-aivpn-server --issue-cert "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --ca-key <CA_PRIVATE_KEY_HEX> \
-    --days 365
-# 输出 104 字节证书（base64），发给客户端
-```
-
-**3. 配置服务器**（`server.json`）：
+### 多服务器节点池同步
 
 ```json
 {
-  "mtls": {
-    "ca_public_key_hex": "<CA_PUBLIC_KEY_HEX>",
-    "required": false
+  "pool": {
+    "peers": ["node2.example.com:443"],
+    "sync_key": "<base64-32字节密钥>"
   }
 }
 ```
 
-**4. 携带证书连接（CLI 客户端）：**
+### 多跳链式转发
 
-```bash
-aivpn-client -k "aivpn://..." --mtls-cert /path/to/client.cert
+客户端流量通过两个 AIVPN 节点路由。客户端仅连接入口节点；互联网看到出口节点的 IP。
+
+**入口节点：**
+```json
+{ "pool": { "sync_key": "<密钥>", "exit_node": "exit.example.com:443" } }
+```
+**出口节点：**
+```json
+{ "pool": { "sync_key": "<相同密钥>", "exit_node_enabled": true } }
 ```
 
-GUI 客户端（Windows、macOS、iOS、Android）在连接配置中均提供专用 mTLS 证书输入字段。
+### 本地 DNS 代理
 
-### eBPF XDP 丢包遥测
+```
+aivpn-client -k "aivpn://..." --dns-proxy 127.0.0.1:5300 --dns-upstream 1.1.1.1:53
+```
 
-按原因统计丢包（`TOO_SHORT`、`TAG_EXPIRED`、`TOTAL`），通过 BPF 环形缓冲区发布至 `EventBus`。检测到 `/sys/fs/bpf/aivpn/drop_stats` 时自动激活。
+### 流量录制 — 自定义掩码创建
+
+```
+aivpn-client record start --service myapp
+# ... 使用应用程序 60+ 秒 ...
+aivpn-client record stop
+```
+
+服务器分析数据包大小直方图和到达间隔时间，生成 `MaskProfile`，通过自测验证，并分发到活跃会话。
+
+### 基准测试
+
+```
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+aivpn-client bench -k "aivpn://..." --json
+```
+
+---
+
+## 安全模型
+
+| 属性 | 机制 |
+|------|------|
+| 加密 | ChaCha20-Poly1305 AEAD |
+| 密钥交换 | X25519 ECDH |
+| 会话认证 | 每客户端 PSK（可选设备绑定） |
+| 前向保密 | 飞行中 X25519 密钥棘轮 |
+| 重放保护 | 每会话 256 条目滑动窗口 |
+| 会话匿名性 | 8 字节 BLAKE3 派生共振标签；明文中无会话 ID |
+| 流量拟态 | `MaskProfile` FSM：头部注入、IAT 整形 |
+| 掩码完整性 | 神经共振 MSE 阈值（0.35）；自动轮换 |
+| NAT 穿透 | 服务器端 nftables/iptables，客户端 `SO_REUSEPORT` |
+
+详细对手模型和威胁分析：[THREAT_MODEL.md](THREAT_MODEL.md)。
 
 ---
 
@@ -825,39 +525,35 @@ GUI 客户端（Windows、macOS、iOS、Android）在连接配置中均提供专
 ```
 aivpn/
 ├── aivpn-common/src/
-│   ├── crypto.rs        # X25519, ChaCha20-Poly1305, BLAKE3
-│   ├── mask.rs          # 伪装配置文件（WebRTC, QUIC, DNS）
-│   └── protocol.rs      # 数据包格式，内部类型
+│   ├── crypto.rs
+│   ├── mask.rs
+│   ├── protocol.rs
+│   └── fec.rs
 ├── aivpn-client/src/
-│   ├── client.rs        # 核心客户端逻辑
-│   ├── tunnel.rs        # TUN接口（Linux / macOS / Windows）
-│   └── mimicry.rs       # 流量整形引擎
+│   ├── client.rs
+│   ├── tunnel.rs
+│   ├── kill_switch.rs
+│   └── mimicry.rs
 ├── aivpn-server/src/
-│   ├── gateway.rs       # UDP网关，MaskCatalog，共振循环
-│   ├── neural.rs        # 预训练掩码编码器，异常检测器
-│   ├── nat.rs           # NAT转发器（iptables）
-│   ├── client_db.rs     # 客户端数据库（PSK，静态IP，统计）
-│   ├── key_rotation.rs  # 会话密钥轮换
-│   └── metrics.rs       # Prometheus监控
-├── aivpn-android/       # Android客户端（Kotlin）
-├── aivpn-ios-core/      # iOS Rust静态库（C FFI，socketpair TUN桥接）
-├── aivpn-ios/           # iOS SwiftUI应用 + NEPacketTunnelProvider扩展
+│   ├── gateway.rs
+│   ├── neural.rs
+│   ├── nat.rs
+│   ├── client_db.rs
+│   └── pool_sync.rs
+├── aivpn-android/
+├── aivpn-ios/
+├── aivpn-windows/
+├── aivpn-macos/
+├── mask-assets/
+├── scripts/
+├── docker/
 ├── Dockerfile
 ├── docker-compose.yml
-└── build.sh
+└── THREAT_MODEL.md
 ```
-
-## 贡献
-
-想深入研究代码或为你的神经模块训练自己的掩码？加入：
-
-- 掩码引擎：[`aivpn-common/src/mask.rs`](aivpn-common/src/mask.rs)
-- 神经权重和异常检测器：[`aivpn-server/src/neural.rs`](aivpn-server/src/neural.rs)
-- 跨平台TUN模块：[`aivpn-client/src/tunnel.rs`](aivpn-client/src/tunnel.rs)
-- 测试（100+）：`cargo test`
-
-欢迎PR！我们特别寻找有流量分析经验的人来捕获流行应用的转储并为神经共振训练新的配置文件。
 
 ---
 
-许可证 — MIT。使用它，fork它，负责任地绕过审查。
+## 许可证
+
+MIT — 见 [LICENSE](LICENSE)。

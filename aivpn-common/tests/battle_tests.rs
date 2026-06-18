@@ -276,10 +276,13 @@ fn battle_inner_header_unknown_type() {
 
 #[test]
 fn battle_control_payload_keepalive_roundtrip() {
-    let payload = ControlPayload::Keepalive;
+    let payload = ControlPayload::Keepalive { send_ts: 12345 };
     let encoded = payload.encode().unwrap();
     let decoded = ControlPayload::decode(&encoded).unwrap();
-    assert!(matches!(decoded, ControlPayload::Keepalive));
+    assert!(matches!(
+        decoded,
+        ControlPayload::Keepalive { send_ts: 12345 }
+    ));
 }
 
 #[test]

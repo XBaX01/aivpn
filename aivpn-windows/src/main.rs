@@ -219,7 +219,8 @@ pub struct AivpnApp {
     // Kill-switch
     kill_switch: bool,
     // Adaptive / diagnostics
-    adaptive_enabled: bool,
+    adaptive_level: u8,
+    dns_proxy: String,
     show_diagnostics: bool,
     bench_p50: Option<f64>,
     bench_p95: Option<f64>,
@@ -228,6 +229,8 @@ pub struct AivpnApp {
     bench_quality: Option<u8>,
     bench_running: bool,
     bench_rx: Option<std::sync::mpsc::Receiver<Option<vpn_manager::BenchResult>>>,
+    // Device identity
+    device_public_key: Option<String>,
     // Tray
     tray: Option<tray::TrayManager>,
     pub should_quit: bool,
@@ -236,8 +239,10 @@ pub struct AivpnApp {
 
 impl AivpnApp {
     fn new(tray: Option<tray::TrayManager>) -> Self {
+        let vpn = VpnManager::new();
+        let device_public_key = vpn.get_device_public_key();
         Self {
-            vpn: VpnManager::new(),
+            vpn,
             keys: KeyStorage::load(),
             lang: Lang::load(),
             show_add_key: false,
@@ -252,8 +257,10 @@ impl AivpnApp {
             error_message: None,
             error_timer: None,
             recording_service_name: String::new(),
+            device_public_key,
             kill_switch: false,
-            adaptive_enabled: false,
+            adaptive_level: 0,
+            dns_proxy: String::new(),
             show_diagnostics: false,
             bench_p50: None,
             bench_p95: None,

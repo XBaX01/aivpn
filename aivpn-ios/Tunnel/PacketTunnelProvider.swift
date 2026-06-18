@@ -17,8 +17,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var outboundTask: Task<Void, Never>?
     private var isStopped = false
     private let appGroup = "group.com.aivpn.client"
-    // Recording requires full Rust control-plane wiring — not yet implemented
-    private let canRecord: Bool = false
+    private let canRecord: Bool = true
 
     // MARK: - Start
 
@@ -32,7 +31,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let fullTunnel = cfg["fullTunnel"] as? Bool ?? true
-        let adaptiveMode = cfg["adaptiveMode"] as? Bool ?? false
+        let adaptiveLevel = cfg["adaptiveLevel"] as? Int ?? 0
+        let killSwitch = cfg["killSwitch"] as? Bool ?? false
 
         // Split-tunnel lists forwarded by VPNManager from App Group UserDefaults.
         let excludedRoutes = (cfg["excluded_routes"] as? String ?? "")
@@ -74,7 +74,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                      fullTunnel: fullTunnel,
                                      excludedRoutes: excludedRoutes,
                                      excludedDomains: excludedDomains,
-                                     adaptiveMode: adaptiveMode)
+                                     adaptiveLevel: adaptiveLevel,
+                                     killSwitch: killSwitch)
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self = self else { return }
@@ -95,35 +96,32 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return Array(data)
             }
 
+            // Load or generate the device private key for JIT Device Enrollment.
+            let deviceKey = loadOrCreateDeviceKey()
+
             let thread = Thread {
                 sKeyArr.withUnsafeBufferPointer { sKeyPtr in
-                    let certCount = Int32(certBytes?.count ?? 0)
-                    if let pskArr = pskArr {
-                        pskArr.withUnsafeBufferPointer { pskPtr in
-                            if let certBytes = certBytes {
-                                certBytes.withUnsafeBufferPointer { certPtr in
-                                    _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                          sKeyPtr.baseAddress!, pskPtr.baseAddress!,
-                                                          certPtr.baseAddress!, certCount,
-                                                          nil, nil)
-                                }
+                    deviceKey.withUnsafeBufferPointer { dkPtr in
+                        let certCount = Int32(certBytes?.count ?? 0)
+
+                        // Collapse psk/cert optionality into a single call site.
+                        func withOptional(_ arr: [UInt8]?, body: (UnsafePointer<UInt8>?) -> Void) {
+                            if let a = arr {
+                                a.withUnsafeBufferPointer { body($0.baseAddress) }
                             } else {
-                                _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                      sKeyPtr.baseAddress!, pskPtr.baseAddress!,
-                                                      nil, 0, nil, nil)
+                                body(nil)
                             }
                         }
-                    } else {
-                        if let certBytes = certBytes {
-                            certBytes.withUnsafeBufferPointer { certPtr in
+
+                        withOptional(pskArr) { pskPtr in
+                            withOptional(certBytes) { certPtr in
                                 _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                      sKeyPtr.baseAddress!, nil,
-                                                      certPtr.baseAddress!, certCount,
-                                                      nil, nil)
+                                                     sKeyPtr.baseAddress!, pskPtr,
+                                                     certPtr, certCount,
+                                                     dkPtr.baseAddress!, Int32(32),
+                                                     Int32(adaptiveLevel),
+                                                     nil, nil)
                             }
-                        } else {
-                            _ = aivpn_run_tunnel(rustFd, host, Int32(port),
-                                                  sKeyPtr.baseAddress!, nil, nil, 0, nil, nil)
                         }
                     }
                 }
@@ -175,24 +173,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch type {
         case "get_traffic":
-            let up   = (NSNumber(value: aivpn_get_upload_bytes())).int64Value
-            let down = (NSNumber(value: aivpn_get_download_bytes())).int64Value
+            let up      = (NSNumber(value: aivpn_get_upload_bytes())).int64Value
+            let down    = (NSNumber(value: aivpn_get_download_bytes())).int64Value
+            let quality = Int(aivpn_get_quality_score())
             let resp: [String: Any] = [
                 "upload":          up,
                 "download":        down,
                 "can_record":      canRecord,
                 "recording_state": "idle",
+                "quality_score":   quality,
             ]
             completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
 
-        case "record_start", "record_stop", "record_status":
-            // Recording requires full Rust control-plane wiring not yet implemented
-            // in the tunnel extension. Return a well-formed error response so the
-            // UI does not get stuck in .starting state waiting for a nil reply.
-            let resp: [String: Any] = [
-                "canRecord": false,
-                "error":     "not supported in tunnel extension",
-            ]
+        case "record_start":
+            let service = json["service"] as? String ?? ""
+            let ok: Bool
+            if service.isEmpty {
+                ok = false
+            } else {
+                ok = service.withCString { ptr in
+                    aivpn_start_recording(ptr) != 0
+                }
+            }
+            let resp: [String: Any] = ["started": ok]
+            completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
+
+        case "record_stop":
+            aivpn_stop_recording()
+            completionHandler?(try? JSONSerialization.data(withJSONObject: ["stopped": true]))
+
+        case "record_status":
+            let resp: [String: Any] = ["can_record": canRecord]
             completionHandler?(try? JSONSerialization.data(withJSONObject: resp))
 
         default:
@@ -254,9 +265,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                fullTunnel: Bool,
                                excludedRoutes: [String] = [],
                                excludedDomains: [String] = [],
-                               adaptiveMode: Bool = false) -> NEPacketTunnelNetworkSettings {
+                               adaptiveLevel: Int = 0,
+                               killSwitch: Bool = false) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
-        settings.mtu = adaptiveMode ? 1200 : 1400
+        settings.mtu = adaptiveLevel >= 2 ? 1200 : (adaptiveLevel == 1 ? 1300 : 1400)
+        settings.includeAllNetworks = killSwitch
 
         let ipv4 = NEIPv4Settings(addresses: [vpnIP], subnetMasks: ["255.255.255.0"])
         if fullTunnel {
@@ -315,6 +328,50 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let b2 = (bits >>  8) & 0xFF
         let b3 =  bits        & 0xFF
         return "\(b0).\(b1).\(b2).\(b3)"
+    }
+
+    // MARK: - Device key (JIT enrollment)
+
+    /// Loads the 32-byte device private key from Keychain, generating and saving it
+    /// if this is the first run. Uses SecRandomCopyBytes for cryptographic randomness.
+    private func loadOrCreateDeviceKey() -> [UInt8] {
+        let account = "aivpn_device_privkey_v1"
+        let service = "com.aivpn.client"
+
+        let query: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrService as String: service,
+            kSecReturnData as String:  true,
+            kSecMatchLimit as String:  kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data, data.count == 32 {
+            return Array(data)
+        }
+
+        var keyBytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &keyBytes)
+        let keyData = Data(keyBytes)
+
+        let deleteQuery: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrService as String: service,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String:            kSecClassGenericPassword,
+            kSecAttrAccount as String:      account,
+            kSecAttrService as String:      service,
+            kSecValueData as String:        keyData,
+            kSecAttrAccessible as String:   kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        SecItemAdd(addQuery as CFDictionary, nil)
+
+        return keyBytes
     }
 
     // MARK: - Helpers

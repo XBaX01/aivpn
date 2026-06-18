@@ -38,6 +38,17 @@ pub struct ClientConfig {
     /// Per-client QoS / bandwidth settings (0.8.0+, optional for backward compat)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<crate::qos::ClientQos>,
+    /// Static X25519 device public key bound to this client (0.9.0+).
+    /// None = any device may connect; Some = only the enrolled device may connect.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_base64_bytes"
+    )]
+    pub device_pubkey: Option<[u8; 32]>,
+    /// When true, the first connecting device's static key is auto-bound (one-time enrollment).
+    #[serde(default)]
+    pub one_time: bool,
 }
 
 /// Per-client traffic statistics
@@ -156,6 +167,8 @@ impl ClientDatabase {
             created_at: Utc::now(),
             stats: ClientStats::default(),
             qos: None,
+            device_pubkey: None,
+            one_time: false,
         };
 
         data.clients.push(client.clone());
@@ -163,6 +176,75 @@ impl ClientDatabase {
 
         self.save()?;
         Ok(client)
+    }
+
+    /// Add a new one-time enrollment client — the first device to connect will be auto-bound.
+    pub fn add_client_one_time(&self, name: &str) -> Result<ClientConfig> {
+        let mut client = self.add_client(name)?;
+        {
+            let mut data = self.data.write();
+            if let Some(c) = data.clients.iter_mut().find(|c| c.id == client.id) {
+                c.one_time = true;
+                client.one_time = true;
+            }
+        }
+        self.save()?;
+        Ok(client)
+    }
+
+    /// Find client by human-readable name.
+    pub fn find_by_name(&self, name: &str) -> Option<ClientConfig> {
+        let data = self.data.read();
+        data.clients.iter().find(|c| c.name == name).cloned()
+    }
+
+    /// Enroll or verify a device public key for `client_id`.
+    ///
+    /// Returns `Ok(true)` if the key was newly bound (one-time enrollment completed).
+    /// Returns `Ok(false)` if the key was already bound and matches.
+    /// Returns `Err` if there is an existing binding that does not match the presented key.
+    pub fn enroll_device(&self, client_id: &str, static_pub: &[u8; 32]) -> Result<bool> {
+        let mut data = self.data.write();
+        let client = data
+            .clients
+            .iter_mut()
+            .find(|c| c.id == client_id)
+            .ok_or_else(|| Error::Session(format!("Client '{}' not found", client_id)))?;
+
+        match client.device_pubkey {
+            None => {
+                client.device_pubkey = Some(*static_pub);
+                client.one_time = false;
+                drop(data);
+                self.save()?;
+                Ok(true)
+            }
+            Some(ref bound) => {
+                use subtle::ConstantTimeEq;
+                if bound.ct_eq(static_pub).into() {
+                    Ok(false)
+                } else {
+                    Err(Error::Session(format!(
+                        "Device binding mismatch for client '{}'",
+                        client_id
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Reset device binding — clears the bound key and re-enables one-time enrollment.
+    pub fn reset_device_binding(&self, client_id: &str) -> Result<()> {
+        let mut data = self.data.write();
+        let client = data
+            .clients
+            .iter_mut()
+            .find(|c| c.id == client_id)
+            .ok_or_else(|| Error::Session(format!("Client '{}' not found", client_id)))?;
+        client.device_pubkey = None;
+        client.one_time = true;
+        drop(data);
+        self.save()
     }
 
     pub fn network_config(&self) -> VpnNetworkConfig {
@@ -426,6 +508,49 @@ impl ClientDatabase {
         Err(Error::Session(
             "No more VPN IPs available in configured subnet".into(),
         ))
+    }
+}
+
+/// Custom serde for Option<[u8; 32]> as base64 string or null
+mod opt_base64_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        bytes: &Option<[u8; 32]>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use base64::Engine;
+        match bytes {
+            Some(b) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(b);
+                b64.serialize(serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<[u8; 32]>, D::Error> {
+        use base64::Engine;
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(s) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&s)
+                    .map_err(serde::de::Error::custom)?;
+                if bytes.len() != 32 {
+                    return Err(serde::de::Error::custom(format!(
+                        "device_pubkey must be 32 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+        }
     }
 }
 

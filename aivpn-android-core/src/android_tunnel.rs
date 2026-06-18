@@ -4,10 +4,11 @@
 //! Wire protocol is byte-for-byte identical to AivpnCrypto.kt so that both can talk to the
 //! same Rust server without any server-side changes.
 
+use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,8 +25,10 @@ use aivpn_common::client_wire::{
 };
 use aivpn_common::crypto::{derive_session_keys, KeyPair, SessionKeys};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::MaskProfile;
+use aivpn_common::mimicry::{bootstrap_mask_for_psk, MimicryEncryptor};
 use aivpn_common::protocol::{ControlPayload, InnerType};
-use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 // ──────────── Constants ────────────
 
@@ -33,7 +36,6 @@ const BUF_SIZE: usize = 2048;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // below typical provider NAT UDP timeout (~10-15s)
-const ADAPTIVE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2); // aggressive keepalive for restrictive mobile NAT (MTS/Megafon)
 const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
@@ -82,6 +84,30 @@ static LAST_LOCAL_PORT: AtomicU16 = AtomicU16::new(0);
 // when a new intentional connection is about to start (called from the
 // restartJob in Kotlin after cancelAndJoin()).
 static STOP_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Last computed connection quality score (0–100). Updated on each KeepaliveAck.
+/// Polled by JNI via getQualityScore().
+pub static ACTIVE_QUALITY_SCORE: AtomicU8 = AtomicU8::new(0);
+
+/// Suggested adaptive level from the last server AdaptiveHint (0–3). 0 = no hint yet.
+/// Polled by JNI via getAdaptiveLevelHint(); takes effect on next reconnect.
+pub static ACTIVE_ADAPTIVE_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+/// Sender half of the control-payload channel to the active upload loop.
+/// JNI uses this to inject RecordingStart / RecordingStop without a reconnect.
+static ACTIVE_CONTROL_TX: Mutex<Option<mpsc::Sender<ControlPayload>>> = Mutex::new(None);
+
+/// Queue a control payload to the active upload loop.
+/// Returns true if the payload was accepted, false if there is no active session
+/// or the channel is full.
+pub fn send_control_payload(payload: ControlPayload) -> bool {
+    let guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        tx.try_send(payload).is_ok()
+    } else {
+        false
+    }
+}
 
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
@@ -231,8 +257,10 @@ pub async fn run_tunnel_android(
     psk: Option<[u8; 32]>,
     mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
-    adaptive: bool,
+    adaptive_level: u8,
+    static_privkey: Option<[u8; 32]>,
 ) -> Result<()> {
+    let level = AdaptiveLevel::from_u8(adaptive_level);
     let session = Arc::new(SessionRuntime::new());
     let _active_session_guard = activate_session(session.clone())?;
 
@@ -294,7 +322,7 @@ pub async fn run_tunnel_android(
     // ── 4. Send init handshake (Control/Keepalive + obfuscated eph_pub) ──
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    let keepalive = ControlPayload::Keepalive.encode()?;
+    let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
     {
         let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
         let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
@@ -374,10 +402,10 @@ pub async fn run_tunnel_android(
         .filter(|&s| s > 0)
         .map(|s| Duration::from_secs(s as u64))
         .unwrap_or(KEEPALIVE_INTERVAL);
-    let keepalive_interval = if adaptive {
-        base_keepalive.min(ADAPTIVE_KEEPALIVE_INTERVAL)
-    } else {
+    let keepalive_interval = if level == AdaptiveLevel::Off {
         base_keepalive
+    } else {
+        base_keepalive.min(Duration::from_secs(level.keepalive_secs()))
     };
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
@@ -400,7 +428,7 @@ pub async fn run_tunnel_android(
     // last handshake packet and the upload pipeline's first keepalive tick (which is
     // intentionally skipped). One early packet keeps the NAT entry alive.
     {
-        let ka = ControlPayload::Keepalive.encode()?;
+        let ka = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
         let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
         if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
             send_seq = send_seq.wrapping_add(1);
@@ -423,12 +451,32 @@ pub async fn run_tunnel_android(
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                if let Ok(ka) = (ControlPayload::Keepalive { send_ts: 0 }).encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         send_seq = send_seq.wrapping_add(1);
                         let _ = udp.send(&pkt).await;
                     }
+                }
+            }
+        }
+    }
+
+    // Device enrollment: send static key proof after ratchet (PFS-protected).
+    if let Some(priv_bytes) = static_privkey {
+        let static_kp = KeyPair::from_private_key(priv_bytes);
+        if let Ok(dh_proof) = static_kp.compute_shared(&server_key) {
+            let enrollment = ControlPayload::DeviceEnrollment {
+                static_pub: static_kp.public_key_bytes(),
+                dh_proof,
+            };
+            if let Ok(encoded) = enrollment.encode() {
+                let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
+                if let Ok(pkt) =
+                    build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)
+                {
+                    send_seq = send_seq.wrapping_add(1);
+                    let _ = udp.send(&pkt).await;
                 }
             }
         }
@@ -476,14 +524,40 @@ pub async fn run_tunnel_android(
         }
     });
 
+    let keepalive_sent_ms = Arc::new(AtomicU64::new(0));
+    let mut quality_tracker = QualityTracker::new();
+
+    // Reset per-session hint so getAdaptiveLevelHint() returns 0 ("no hint yet") for this session.
+    ACTIVE_ADAPTIVE_LEVEL.store(0, Ordering::Relaxed);
+
+    // Control-payload channel: lets JNI send RecordingStart/Stop without reconnecting.
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlPayload>(8);
+    {
+        let mut guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ctrl_tx);
+    }
+    // RAII guard: clears ACTIVE_CONTROL_TX when run_tunnel_android returns (any path).
+    struct CtrlTxGuard;
+    impl Drop for CtrlTxGuard {
+        fn drop(&mut self) {
+            let mut g = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+            *g = None;
+        }
+    }
+    let _ctrl_tx_guard = CtrlTxGuard;
+
+    let initial_mask = bootstrap_mask_for_psk(psk.as_ref());
+    let mask_update_slot: Arc<Mutex<Option<MaskProfile>>> = Arc::new(Mutex::new(None));
+    let mask_update_for_enc = Arc::clone(&mask_update_slot);
+
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
     let session_for_upload = session.clone();
     let upload_sender_task = tokio::spawn(async move {
-        // Wrap ZeroMdhEncryptor with UPLOAD_BYTES tracking.
         struct AndroidEncryptor {
-            inner: ZeroMdhEncryptor,
+            inner: MimicryEncryptor,
             session: Arc<SessionRuntime>,
+            keepalive_sent_ms: Arc<AtomicU64>,
         }
 
         impl PacketEncryptor for AndroidEncryptor {
@@ -497,26 +571,45 @@ pub async fn run_tunnel_android(
                 self.inner.encrypt_control(payload)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
-                self.inner.encrypt_keepalive()
+                let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                self.keepalive_sent_ms.store(now_ms, Ordering::Relaxed);
+                self.inner.encrypt_keepalive_ts(now_ms)
             }
             fn on_data_sent(&mut self, payload_len: usize) {
                 self.session
                     .upload_bytes
                     .fetch_add(payload_len as u64, Ordering::Relaxed);
             }
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.inner.take_fec_repair()
+            }
         }
 
         let mut enc = AndroidEncryptor {
-            inner: ZeroMdhEncryptor::with_mdh_len(keys_tx, send_counter, send_seq, mdh_len),
+            inner: MimicryEncryptor::new(
+                keys_tx,
+                send_counter,
+                send_seq,
+                initial_mask,
+                mask_update_for_enc,
+            ),
             session: session_for_upload,
+            keepalive_sent_ms,
         };
+        enc.inner.set_fec_group(level.fec_n());
         let config = UploadConfig {
             keepalive_interval,
             ..Default::default()
         };
 
-        if let Err(e) =
-            upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &config).await
+        if let Err(e) = upload_pipeline::run_upload_loop(
+            &mut tun_rx,
+            Some(&mut ctrl_rx),
+            &udp_tx,
+            &mut enc,
+            &config,
+        )
+        .await
         {
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
@@ -603,36 +696,81 @@ pub async fn run_tunnel_android(
                     // Handle server-initiated inline rekey (PFS without reconnect).
                     if decoded.header.inner_type == InnerType::Control {
                         if let Ok(ctrl) = ControlPayload::decode(&decoded.payload) {
-                            if let ControlPayload::KeyRotate { new_eph_pub } = ctrl {
-                                let rekey_kp = KeyPair::generate();
-                                if let Ok(dh) = rekey_kp.compute_shared(&new_eph_pub) {
-                                    let new_keys = derive_session_keys(
-                                        &dh,
-                                        Some(&keys.session_key),
-                                        &rekey_kp.public_key_bytes(),
-                                    );
-                                    // Respond with our new ephemeral pub using OLD keys
-                                    if let Ok(resp) = (ControlPayload::KeyRotate {
-                                        new_eph_pub: rekey_kp.public_key_bytes()
-                                    }).encode() {
-                                        let inner = build_inner_packet(
-                                            InnerType::Control, send_seq, &resp,
+                            match ctrl {
+                                ControlPayload::KeyRotate { new_eph_pub } => {
+                                    let rekey_kp = KeyPair::generate();
+                                    if let Ok(dh) = rekey_kp.compute_shared(&new_eph_pub) {
+                                        let new_keys = derive_session_keys(
+                                            &dh,
+                                            Some(&keys.session_key),
+                                            &rekey_kp.public_key_bytes(),
                                         );
-                                        if let Ok(pkt) = build_random_mdh_packet(
-                                            &keys, &mut send_counter, &inner, None, mdh_len,
-                                        ) {
-                                            let _ = udp.send(&pkt).await;
-                                            send_seq = send_seq.wrapping_add(1);
+                                        if let Ok(resp) = (ControlPayload::KeyRotate {
+                                            new_eph_pub: rekey_kp.public_key_bytes()
+                                        }).encode() {
+                                            let inner = build_inner_packet(
+                                                InnerType::Control, send_seq, &resp,
+                                            );
+                                            if let Ok(pkt) = build_random_mdh_packet(
+                                                &keys, &mut send_counter, &inner, None, mdh_len,
+                                            ) {
+                                                let _ = udp.send(&pkt).await;
+                                                send_seq = send_seq.wrapping_add(1);
+                                            }
+                                        }
+                                        transition_recv_keys = Some(keys.clone());
+                                        transition_recv_deadline =
+                                            Some(Instant::now() + Duration::from_secs(2));
+                                        transition_recv_win = std::mem::take(&mut recv_win);
+                                        keys = new_keys;
+                                        log::info!("aivpn: inline PFS rekey complete");
+                                    }
+                                }
+                                ControlPayload::KeepaliveAck { echo_ts } => {
+                                    if echo_ts > 0 {
+                                        let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                                        if now_ms >= echo_ts {
+                                            let rtt_us = (now_ms - echo_ts) * 1_000;
+                                            quality_tracker.record_rtt(rtt_us);
+                                            quality_tracker.record_received();
+                                            let score = quality_tracker.score();
+                                            ACTIVE_QUALITY_SCORE.store(score, Ordering::Relaxed);
+                                            if let Ok(qr) = (ControlPayload::QualityReport {
+                                                quality: score,
+                                                rtt_ms: quality_tracker.rtt_ms(),
+                                                loss_ppm: quality_tracker.loss_ppm(),
+                                                jitter_ms: quality_tracker.jitter_ms(),
+                                            }).encode() {
+                                                let inner = build_inner_packet(
+                                                    InnerType::Control, send_seq, &qr,
+                                                );
+                                                if let Ok(pkt) = build_random_mdh_packet(
+                                                    &keys, &mut send_counter, &inner, None, mdh_len,
+                                                ) {
+                                                    send_seq = send_seq.wrapping_add(1);
+                                                    let _ = udp.send(&pkt).await;
+                                                }
+                                            }
+                                            log::debug!(
+                                                "aivpn: KeepaliveAck rtt={}ms quality={}/100",
+                                                quality_tracker.rtt_ms(), score
+                                            );
                                         }
                                     }
-                                    // Transition: old keys for receive 2 s, new keys for send
-                                    transition_recv_keys = Some(keys.clone());
-                                    transition_recv_deadline =
-                                        Some(Instant::now() + Duration::from_secs(2));
-                                    transition_recv_win.reset();
-                                    keys = new_keys;
-                                    log::info!("aivpn: inline PFS rekey complete");
                                 }
+                                ControlPayload::AdaptiveHint { level } => {
+                                    ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
+                                    log::info!("aivpn: AdaptiveHint level={} stored", level);
+                                }
+                                ControlPayload::MaskUpdate { mask_data, .. } => {
+                                    if let Some(mask) = aivpn_common::mimicry::decode_mask_update(&mask_data) {
+                                        *mask_update_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(mask);
+                                        log::info!("aivpn: MaskUpdate received — mask queued for mimicry engine");
+                                    } else {
+                                        log::warn!("aivpn: MaskUpdate decode failed — ignoring");
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

@@ -298,7 +298,6 @@
                         android:layout_height="wrap_content"
                         android:inputType="text"
                         android:textColor="@color/text_primary"
-                        android:hint="@string/hint_connection_key_example"
                         android:singleLine="true" />
                 </com.google.android.material.textfield.TextInputLayout>
             </LinearLayout>

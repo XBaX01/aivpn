@@ -26,6 +26,10 @@ object AivpnJni {
      * @param psk         32-byte pre-shared key or `null`.
      * @return            Empty string on a clean rekey-triggered exit, error message otherwise.
      */
+    /**
+     * adaptiveLevel: 0=Off, 1=Light (keepalive 6s), 2=Aggressive (4s), 3=Satellite (15s).
+     * The level controls keepalive interval and FEC group size.
+     */
     external fun runTunnel(
         vpnService: VpnService,
         tunFd: Int,
@@ -34,7 +38,8 @@ object AivpnJni {
         serverKey: ByteArray,
         psk: ByteArray?,
         mtlsCert: ByteArray?,
-        adaptive: Boolean,
+        adaptiveLevel: Int,
+        staticPrivkey: ByteArray?,
     ): String
 
     /**
@@ -55,4 +60,16 @@ object AivpnJni {
 
     /** Total bytes written to the TUN interface in the current session. */
     external fun getDownloadBytes(): Long
+
+    /** Connection quality score 0–100 from last KeepaliveAck RTT. 0 = no data yet. */
+    external fun getQualityScore(): Int
+
+    /** Adaptive level hint from server (0–3). 0 = no hint received. Takes effect on next reconnect. */
+    external fun getAdaptiveLevelHint(): Int
+
+    /** Send RecordingStart to the server. Returns 1 if queued, 0 if no active session. */
+    external fun startRecording(serviceName: String): Int
+
+    /** Send RecordingStop to the server. No-op if no active session. */
+    external fun stopRecording()
 }

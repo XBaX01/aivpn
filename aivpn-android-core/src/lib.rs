@@ -10,13 +10,16 @@
 mod android_tunnel;
 
 use aivpn_common::client_wire::DEFAULT_MDH_LEN;
+use aivpn_common::protocol::ControlPayload;
 use android_tunnel::{
     clear_pending_stop, get_active_download_bytes, get_active_upload_bytes, run_tunnel_android,
-    stop_active_tunnel,
+    send_control_payload, stop_active_tunnel, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE,
 };
 
+use std::sync::atomic::Ordering;
+
 use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::{jboolean, jint, jlong, jstring};
+use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
 
 // ──────────────────────────────────────────────────────────
@@ -47,7 +50,8 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
     server_key_arr: JByteArray<'local>,
     psk_obj: JObject<'local>,       // nullable JByteArray
     mtls_cert_obj: JObject<'local>, // nullable JByteArray
-    adaptive: jboolean,
+    adaptive_level: jint,
+    static_privkey_obj: JObject<'local>, // nullable JByteArray — device binding key
 ) -> jstring {
     // ── Initialize Android logcat logger once per process lifetime ──
     static LOG_INIT: std::sync::Once = std::sync::Once::new();
@@ -124,6 +128,31 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         }
     };
 
+    let static_privkey: Option<[u8; 32]> = if static_privkey_obj.is_null() {
+        None
+    } else {
+        match env.is_instance_of(&static_privkey_obj, "[B") {
+            Ok(true) => {}
+            Ok(false) => return make_str(&mut env, "static_privkey must be a byte array (byte[])"),
+            Err(e) => return make_str(&mut env, &format!("static_privkey type check failed: {e}")),
+        }
+        let arr: JByteArray<'local> = unsafe { JByteArray::from_raw(static_privkey_obj.as_raw()) };
+        match env.convert_byte_array(&arr) {
+            Ok(b) if b.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&b);
+                Some(out)
+            }
+            Ok(b) => {
+                return make_str(
+                    &mut env,
+                    &format!("static_privkey must be 32 bytes, got {}", b.len()),
+                )
+            }
+            Err(e) => return make_str(&mut env, &format!("bad static_privkey: {e}")),
+        }
+    };
+
     // ── Get JavaVM for use inside the tokio runtime ──
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
@@ -153,7 +182,8 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_runTunnel<'local>(
         psk,
         mtls_cert,
         DEFAULT_MDH_LEN,
-        adaptive != 0,
+        adaptive_level.clamp(0, 3) as u8,
+        static_privkey,
     ));
 
     match result {
@@ -187,6 +217,16 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_clearPendingStop(
 // Traffic counters (polled by Kotlin every ~1 s)
 // ──────────────────────────────────────────────────────────
 
+/// Returns the last connection quality score (0–100) computed from KeepaliveAck RTT.
+/// Returns 0 if no keepalive round-trip has been observed yet this session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_getQualityScore(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    ACTIVE_QUALITY_SCORE.load(Ordering::Relaxed) as jint
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_aivpn_client_AivpnJni_getUploadBytes(
     _env: JNIEnv,
@@ -201,6 +241,38 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_getDownloadBytes(
     _class: JClass,
 ) -> jlong {
     get_active_download_bytes() as jlong
+}
+
+/// Returns the last adaptive level hint received from the server via AdaptiveHint (0–3).
+/// 0 means no hint has been received yet this session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_getAdaptiveLevelHint(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    ACTIVE_ADAPTIVE_LEVEL.load(Ordering::Relaxed) as jint
+}
+
+/// Send a RecordingStart control message to the server. Returns 1 if queued, 0 if no session.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_startRecording<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    service_name: JString<'local>,
+) -> jint {
+    let service = match env.get_string(&service_name) {
+        Ok(s) => String::from(s).chars().take(128).collect::<String>(),
+        Err(_) => return 0,
+    };
+    send_control_payload(ControlPayload::RecordingStart { service }) as jint
+}
+
+/// Send a RecordingStop control message to the server.
+#[no_mangle]
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopRecording(_env: JNIEnv, _class: JClass) {
+    send_control_payload(ControlPayload::RecordingStop {
+        session_id: [0u8; 16],
+    });
 }
 
 // ──────────────────────────────────────────────────────────

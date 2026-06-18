@@ -19,6 +19,8 @@ pub enum ConnectionState {
 pub struct TrafficStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    pub quality_score: u8,
+    pub server_adaptive_level: u8,
 }
 
 // ── Recording ───────────────────────────────────────────────────────────────
@@ -75,6 +77,8 @@ impl VpnManager {
             stats: TrafficStats {
                 bytes_sent: 0,
                 bytes_received: 0,
+                quality_score: 0,
+                server_adaptive_level: 0,
             },
             last_poll: None,
             client_binary: Self::find_client_binary(),
@@ -116,6 +120,8 @@ impl VpnManager {
         mtls_cert_path: Option<&str>,
         exclude_routes: &[String],
         kill_switch: bool,
+        adaptive_level: u8,
+        dns_proxy: Option<&str>,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
@@ -162,6 +168,19 @@ impl VpnManager {
             cmd.arg("--kill-switch");
         }
 
+        if adaptive_level > 0 {
+            cmd.arg("--adaptive-level").arg(adaptive_level.to_string());
+        }
+
+        if let Some(addr) = dns_proxy {
+            if !addr.is_empty() {
+                if addr.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(format!("Invalid dns-proxy address: {addr}"));
+                }
+                cmd.arg("--dns-proxy").arg(addr);
+            }
+        }
+
         // Hide console window on Windows
         #[cfg(windows)]
         {
@@ -194,6 +213,12 @@ impl VpnManager {
         self.state = ConnectionState::Disconnecting;
 
         if let Some(ref mut child) = self.child {
+            for _ in 0..5 {
+                if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -223,6 +248,22 @@ impl VpnManager {
             return None;
         }
         serde_json::from_slice(&out.stdout).ok()
+    }
+
+    /// Run `aivpn-client --show-device-key` and return the base64-encoded device public key.
+    pub fn get_device_public_key(&self) -> Option<String> {
+        let out = Command::new(&self.client_binary)
+            .arg("--show-device-key")
+            .output()
+            .ok()?;
+        if out.status.success() {
+            String::from_utf8(out.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        }
     }
 
     /// Return the current server address (set when connect() was called).
@@ -457,10 +498,24 @@ impl VpnManager {
                     if recv >= self.stats.bytes_received || self.stats.bytes_received == 0 {
                         self.stats.bytes_received = recv;
                     }
+                    let (qs, sal) = Self::read_quality_json();
+                    self.stats.quality_score = qs;
+                    self.stats.server_adaptive_level = sal;
                     return;
                 }
             }
         }
+    }
+
+    fn read_quality_json() -> (u8, u8) {
+        let path = std::env::temp_dir().join("aivpn-quality.json");
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let quality = v["quality"].as_u64().unwrap_or(0) as u8;
+            let adaptive = v["adaptive"].as_u64().unwrap_or(0) as u8;
+            return (quality, adaptive);
+        }
+        (0, 0)
     }
 
     fn parse_stats(content: &str) -> Option<(u64, u64)> {

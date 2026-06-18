@@ -1,330 +1,295 @@
+🌐 [English](README.md) | [中文](README_CN.md)
+
 # AIVPN
 
 [![CI](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/infosave2007/aivpn/actions/workflows/ci.yml)
 [![Crates.io Server](https://img.shields.io/crates/v/aivpn-server.svg?label=aivpn-server)](https://crates.io/crates/aivpn-server)
 [![Crates.io Client](https://img.shields.io/crates/v/aivpn-client.svg?label=aivpn-client)](https://crates.io/crates/aivpn-client)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android%20%7C%20iOS%20%7C%20MikroTik-informational)
 
-Обычные VPN давно мертвы. Провайдеры и GFW (китайский файрвол) палят WireGuard и OpenVPN за доли секунды по размерам пакетов, интервалам и хэндшейкам. Можете шифровать трафик хоть тройным AES — DPI-системам плевать на содержимое, они блокируют саму *форму* соединения.
+---
 
-**AIVPN** — это мой ответ современным системам глубокого анализа трафика (DPI). Мы не просто шифруем пакеты, мы "натягиваем" на них маску реальных приложений. Для провайдера вы сидите в Zoom-колле или листаете TikTok, а на деле — это зашифрованный туннель.
+## Обзор
 
-Чтобы проверить это на практике, я разработал собственный эмулятор DPI, воспроизводил реальные сценарии фильтрации и целенаправленно блокировал трафик в разных режимах. Затем прогонял систему под высокой нагрузкой, чтобы оценить устойчивость, скорость переключения масок и стабильность маршрутизации. Для быстрого роутинга внедрено мое запатентованное решение: заявка USPTO (USA) № 19/452,440 от Jan 19, 2026 — *SYSTEM AND METHOD FOR UNSUPERVISED MULTI-TASK ROUTING VIA SIGNAL RECONSTRUCTION RESONANCE*.
+AIVPN — VPN-система на базе UDP, совмещающая шифрование туннеля с **мимикрией трафика**: исходящие пакеты маскируются под известные прикладные протоколы (WebRTC, QUIC, DNS-over-UDP), и соединение становится статистически неотличимым от обычного приложения для пассивного наблюдателя.
 
+Ключевые технические характеристики:
+
+- **Zero-RTT** — зашифрованный трафик может пойти с первого пакета, обязательного рукопожатия нет.
+- **O(1) поиск сессий** — идентификатор сессии не передаётся в открытом виде. Каждый пакет несёт 8-байтовый *резонансный тег*, выведенный из временной метки и ключа сессии. Сервер находит сессию за константное время через `DashMap`.
+- **Совершенная прямая секретность** — ротация ключей сессии по X25519 в режиме рэтчет. Компрометация ключа сервера не раскрывает прошлый трафик.
+- **Модуль Neural Resonance** — micro-MLP (~66 КБ) на каждую маску следит за статистикой трафика; высокая ошибка реконструкции (MSE) запускает автоматическую ротацию маски без разрыва соединения клиента.
+- **Написан на Rust** — нет GC, нет утечек памяти. Клиентский бинарник ≈ 2,5 МБ. Работает на VPS за $5.
+
+---
+
+## Архитектура
+
+### Структура воркспейса
+
+```
+aivpn-common/       — общая крипто, протокол, маски (без I/O)
+aivpn-server/       — VPN-шлюз и управляющий CLI (только Linux)
+aivpn-client/       — кроссплатформенный клиент (Linux / macOS / Windows)
+aivpn-android-core/ — JNI-мост для Android
+aivpn-windows/      — Windows GUI (egui/eframe)
+aivpn-android/      — Android-приложение на Kotlin
+aivpn-macos/        — macOS SwiftUI в строке меню
+aivpn-ios-core/     — iOS Rust staticlib (C FFI)
+aivpn-ios/          — iOS SwiftUI + NEPacketTunnelProvider
+mask-assets/        — встроенные профили мимикрии (JSON)
+```
+
+### Ключевые модули
+
+| Модуль | Расположение | Назначение |
+|--------|-------------|-----------|
+| `crypto.rs` | `aivpn-common` | X25519, ChaCha20-Poly1305, BLAKE3/HMAC, генерация резонансных тегов |
+| `protocol.rs` | `aivpn-common` | Wire-формат: `[8-byte tag][pad_len][inner_header][encrypted payload][poly1305 tag]` |
+| `mask.rs` | `aivpn-common` | `MaskProfile` — шейпинг трафика: шаблоны заголовков, FSM, IAT-распределения |
+| `gateway.rs` | `aivpn-server` | Центральный event loop: UDP-приём, диспетчер сессий, NAT, нейронные проверки |
+| `session.rs` | `aivpn-server` | `SessionManager` — O(1) через `DashMap`, окно воспроизведения на 256 записей |
+| `neural.rs` | `aivpn-server` | Neural Resonance: MLP 64→128→64 на маску, порог MSE 0,35, авто-ротация |
+| `client.rs` | `aivpn-client` | Машина состояний: Unprovisioned → Connecting → Connected |
+| `tunnel.rs` | `aivpn-client` | TUN: `/dev/net/tun` (Linux), `utun` (macOS), Wintun (Windows) |
+| `mimicry.rs` | `aivpn-client` | `MimicryEngine` — применяет `MaskProfile` к исходящим пакетам |
+
+### Синхронизация пула
+
+Синхронизация клиентских баз между серверами пула использует `ControlPayload::PoolSync` внутри обычных VPN UDP-пакетов — неотличима от клиентского трафика. Отдельный TCP-порт и правило файрволла не нужны.
+
+---
 
 ## Поддерживаемые платформы
 
-| Платформа | Сервер | Клиент | Полный туннель | Примечания |
-|-----------|--------|--------|----------------|------------|
-| **Linux** | ✅ | ✅ | ✅ | Основная платформа, TUN через `/dev/net/tun`; GUI-приложение (AppImage + трей) |
-| **macOS** | — | ✅ | ✅ | Через `utun`, автоматическая настройка маршрутов |
-| **Windows** | — | ✅ | ✅ | Через [Wintun](https://www.wintun.net/) драйвер |
-| **Android** | — | ✅ | ✅ | Kotlin-приложение через `VpnService` API |
-| **iOS** | — | ✅ | ✅ | Нативное SwiftUI-приложение через `NetworkExtension` API |
-| **MikroTik RouterOS** | — | ✅ | ✅ | Контейнер RouterOS 7.6+, arm64/armv7/amd64 |
+| Платформа | Сервер | Клиент | GUI | TUN-драйвер |
+|-----------|:------:|:------:|:---:|-------------|
+| Linux | ✅ | ✅ | ✅ AppImage + трей | `/dev/net/tun` |
+| macOS | — | ✅ | ✅ строка меню | `utun` |
+| Windows | — | ✅ | ✅ egui | [Wintun](https://www.wintun.net/) |
+| Android | — | ✅ | ✅ нативный Kotlin | `VpnService` API |
+| iOS | — | ✅ | ✅ SwiftUI | `NetworkExtension` |
+| MikroTik RouterOS 7.6+ | — | ✅ | — | контейнер veth + TUN |
+| Entware-роутеры (ARMv7 / MIPSel) | — | ✅ | — | статический musl-бинарник |
 
-### Текущий статус клиентов
+### Таблица функциональных возможностей
 
-- ✅ Приложение macOS: работает
-- ✅ CLI-клиент: работает
-- ✅ Android-приложение: работает
-- ✅ iOS-приложение: работает (сборка требует macOS + Xcode 15+)
-- ✅ Windows-клиент: работает (GUI + CLI)
-- ✅ MikroTik RouterOS контейнер: работает (arm64/armv7/amd64)
+| Функция | CLI | Win | Mac | Android | iOS |
+|---------|:---:|:---:|:---:|:-------:|:---:|
+| Маскировка трафика | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Адаптивный режим (4 уровня) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Качество соединения (live) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Split Tunnel | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DNS Proxy | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Kill Switch | ✅ | ✅ | ✅ | ✅ | ✅ |
+| mTLS сертификат | ✅ | ✅ | ✅ | ✅ | ✅ |
+| FEC (помехоустойчивость) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Запись трафика | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Device Key / JIT | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SOCKS5 Proxy | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Полный туннель | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Диагностика / тест | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-## 📥 Загрузки
+---
 
-Готовые бинарные файлы для всех поддерживаемых платформ автоматически собираются и прикрепляются к каждому релизу. Вы можете скачать последние версии на странице [GitHub Releases](https://github.com/infosave2007/aivpn/releases).
+## Быстрый старт
 
+### Сервер (Linux)
 
-### Быстрый старт (macOS)
-1. Скачайте `aivpn-macos.dmg` со страницы [GitHub Releases](https://github.com/infosave2007/aivpn/releases) и откройте его
-2. Перетащите **Aivpn.app** в Applications
-3. Запустите — приложение появится в menu bar (без иконки в Dock)
-4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
-5. Нажмите 🇷🇺/🇬🇧 для переключения языка
-> ⚠️ VPN-клиенту требуются права root для создания TUN-устройства. Приложение запросит пароль через `sudo`.
-
-### Быстрый старт (Windows)
-
-#### Вариант А: Установщик (рекомендуется)
-1. Скачайте [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases)
-2. Правой кнопкой мыши → **Запустить от имени администратора**, следуйте инструкциям установщика
-3. Запустите **AIVPN** из меню «Пуск» (запускается с правами администратора автоматически)
-4. Вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
-
-> ⚠️ VPN-клиенту требуются права администратора для создания сетевого адаптера Wintun. Всегда запускайте от имени администратора.
-
-#### Вариант Б: Портативный архив
-1. Скачайте и распакуйте [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases)
-2. Убедитесь, что `aivpn.exe`, `aivpn-client.exe` и `wintun.dll` лежат в одной папке
-3. Правой кнопкой на `aivpn.exe` → **Запустить от имени администратора** для GUI, или через CLI:
-   ```powershell
-   .\aivpn-client.exe -k "ваш_ключ_подключения"
-   ```
-
-### Быстрый старт (Linux)
-1. Скачайте [aivpn-client-linux-x86_64](https://github.com/infosave2007/aivpn/releases)
-2. Сделайте файл исполняемым и запустите от root:
-    ```bash
-    chmod +x ./aivpn-client-linux-x86_64
-    sudo ./aivpn-client-linux-x86_64 -k "ваш_ключ_подключения"
-    ```
-
-### Быстрый старт (Entware роутеры)
-1. Скачайте `aivpn-client-linux-mipsel-musl` или `aivpn-client-linux-armv7-musleabihf` со страницы [GitHub Releases](https://github.com/infosave2007/aivpn/releases).
-2. Скопируйте бинарник на роутер, например в `/opt/bin/aivpn-client`.
-3. Сделайте файл исполняемым и запустите из Entware shell от root:
-    ```sh
-    chmod +x /opt/bin/aivpn-client
-    /opt/bin/aivpn-client -k "ваш_ключ_подключения"
-    ```
-4. Эти musl-сборки статически слинкованы, поэтому на роутере не нужен Rust toolchain и дополнительные shared libraries.
-
-### Быстрый старт (MikroTik RouterOS)
-1. Включите поддержку контейнеров: `/system/device-mode/update container=yes` и перезагрузите роутер
-2. Выполните команды настройки (см. [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md)):
-   ```routeros
-   /interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
-   /ip/address/add address=172.31.0.1/30 interface=veth-aivpn
-   /container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
-   /container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
-   /container/add remote-image=infosave2007/aivpn-mikrotik:latest interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
-   /container/start [find remote-image~"aivpn-mikrotik"]
-   ```
-3. Добавьте маршрут по умолчанию через контейнер: `/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2`
-
-Полная документация с настройкой policy routing и решением типичных проблем — в [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md).
-
-### Быстрый старт (Android)
-1. Скачайте и установите `aivpn-client.apk`
-2. Вставьте ключ подключения (`aivpn://...`) в приложение
-3. Нажмите **Подключить**
-
-### 📦 Установка через Cargo (crates.io)
-
-Если у вас установлен Rust, вы можете легко установить клиент или сервер напрямую из crates.io:
+#### Docker (рекомендуется)
 
 ```bash
-cargo install aivpn-client
-cargo install aivpn-server
-```
-
-### Быстрый старт (iOS)
-1. Соберите на macOS (требуется Xcode 15+, `xcodegen`):
-   ```bash
-   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-   cargo install xcodegen
-   ./build-ios.sh ВАШ_TEAM_ID
-   ```
-2. Установите `releases/aivpn-ios.ipa` на устройство:
-   - Перетащите в **Xcode → Window → Devices and Simulators**, или
-   - `xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa`
-3. Откройте приложение, вставьте ключ подключения (`aivpn://...`) и нажмите **Подключить**
-
-> Бесплатный Apple ID (personal team) достаточен — платный Developer Program не нужен. Установки истекают через 7 дней.
-
-## ❤️ Поддержать проект
-
-Если проект оказался полезным, вы можете поддержать его развитие донейшеном через Tribute:
-
-👉 https://t.me/tribute/app?startapp=dzX1
-
-Любая поддержка помогает развивать AIVPN дальше. Спасибо! 🙌
-
-## Главная фича: Нейронный Резонанс (AI)
-
-Самое интересное под капотом — это наш ИИ-модуль, который мы называем **Neural Resonance**.
-Мы не стали тащить в проект огромные LLM-модели на 400 мегабайт, которые сожрут всю память на дешевом VPS. Вместо этого:
-
-- **Baked Mask Encoder:** Под каждую маску (кодек WebRTC, протокол QUIC) мы детерминированно выводим микро-нейросеть (MLP 64→128→64) напрямую из 64-float вектора подписи маски — засеянного BLAKE3-хэшем этой подписи. Уникальна для каждой маски, ~66 КБ, никаких внешних файлов обучения не требуется.
-- **Анализ в реальном времени:** Эта нейронка на лету анализирует энтропию и IAT (тайминги) прилетающих UDP-пакетов.
-- **Охота на цензоров:** Если DPI-система провайдера пытается прощупать наш сервер (Active Probing) или начинает задерживать пакеты, нейромодуль видит рост ошибки реконструкции (MSE).
-- **Авто-ротация масок:** Как только ИИ понимает, что текущая маска скомпрометирована (например, `webrtc_zoom` спалили), сервер и клиент *без разрыва соединения* перестраивают шейпинг трафика под резервную маску (например, на `dns_over_udp`). Никаких дисконнектов!
-
-## Что ещё крутого
-
-- **Zero-RTT и PFS:** Нет классического рукопожатия (handshake), которое так любят ловить снифферы. Данные льются с первого же пакета. При этом работает Perfect Forward Secrecy — ключи ротируются на лету, так что если сервак когда-нибудь изымут, расшифровать старый дамп трафика не выйдет.
-- **O(1) криптотеги сессий:** Мы не передаем ID сессии в открытом виде. Вместо этого в каждый пакет вшивается динамический криптографический тег, зависящий от таймстемпа и секретного ключа. Сервер находит нужного клиента моментально, а для стороннего наблюдателя это просто белый шум.
-- **Написан на Rust:** Быстрый, безопасный, без утечек памяти. Весь бинарник клиента весит около 2.5 МБ. Спокойно крутится на серверах за пару баксов.
-
-## Как поднять всё это добро
-
-### 1. Клонируем репозиторий
-
-```bash
-git clone https://github.com/infosave2007/aivpn.git
-cd aivpn
-```
-
-### 2. Сборка (потребуется Rust 1.75+)
-
-Проект разбит на воркспейсы: `aivpn-common` (шифры и маски), `aivpn-server` и `aivpn-client`.
-
-```bash
-# Все плафтормы — одна команда:
-cargo build --release
-```
-
-Чтобы обновить Linux-артефакт сервера без установки Rust на хост:
-
-```bash
-./build-server-release.sh
-```
-
-Для статических musl-сборок под ARMv7 серверы и MIPSel/Entware роутеры:
-
-```bash
-./build-musl-release.sh server armv7-unknown-linux-musleabihf
-./build-musl-release.sh server mipsel-unknown-linux-musl
-./build-musl-release.sh client armv7-unknown-linux-musleabihf
-./build-musl-release.sh client mipsel-unknown-linux-musl
-```
-
-Для сборки iOS-приложения (требуется macOS + Xcode 15+):
-
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-cargo install xcodegen
-./build-ios.sh              # неподписанная сборка (CI / симулятор)
-./build-ios.sh ВАШ_TEAM_ID  # подписанная для устройства (бесплатный Apple ID)
-```
-
-Артефакт копируется в `releases/aivpn-ios.ipa`.
-
-Чтобы развернуть последнюю опубликованную Linux-версию сервера на VPS одной командой:
-
-```bash
-./deploy-server-release.sh
-```
-
-> Для GitHub Releases серверным Linux-артефактом по умолчанию должен оставаться `aivpn-server-linux-x86_64`, основным Windows-артефактом — `aivpn-windows-package.zip`, а для ARM/Entware нужно прикладывать musl-артефакты `aivpn-server-linux-armv7-musleabihf`, `aivpn-server-linux-mipsel-musl`, `aivpn-client-linux-armv7-musleabihf` и `aivpn-client-linux-mipsel-musl`. Отдельный `aivpn-client.exe` безопасно выкладывать только вместе с `wintun.dll` рядом.
-
-Автоматизация GitHub Releases: workflow в `.github/workflows/server-release-asset.yml` собирает `aivpn-server-linux-x86_64`, а также ARMv7 и MIPSel musl-артефакты для сервера и клиента при публикации Release и автоматически прикладывает их к релизу.
-
-Для Docker-backed кросс-сборки без локального тулчейна используйте:
-
-```bash
-./build-musl-release.sh client armv7-unknown-linux-musleabihf
-./build-musl-release.sh client mipsel-unknown-linux-musl
-./build-musl-release.sh server armv7-unknown-linux-musleabihf
-./build-musl-release.sh server mipsel-unknown-linux-musl
-```
-
-Эти артефакты рассчитаны на ARM Linux-серверы/SBC и MIPSel-роутеры с Entware.
-
-### 3. Сервер (только Linux)
-
-#### Вариант А: Docker (рекомендуется)
-
-Самый простой способ — всё настроено в `docker-compose.yml`.
-
-```bash
-# Определяем Compose-команду, которая есть именно на вашей системе
-if docker compose version >/dev/null 2>&1; then
-    AIVPN_COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    AIVPN_COMPOSE="docker-compose"
-else
-    echo "Установите Docker Compose v2 (`docker-compose-v2` или `docker-compose-plugin`) либо legacy `docker-compose`."
-    exit 1
-fi
-
-# Генерируем ключ сервера
 mkdir -p config
-openssl rand 32 > config/server.key
-chmod 600 config/server.key
-
-# Включаем NAT (нужен для доступа в интернет через VPN)
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-
-# Быстрый старт из готового Linux-бинарника
-AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt $AIVPN_COMPOSE up -d aivpn-server
-
-# Или оставить исходный путь со сборкой из исходников
-$AIVPN_COMPOSE up -d aivpn-server
+docker compose up -d aivpn-server
 ```
 
-Быстрый путь ожидает локальный файл `releases/aivpn-server-linux-x86_64`. Его можно собрать командой `./build-server-release.sh` или скачать из Releases перед запуском Docker.
+Контейнер автоматически генерирует `server.key` и `server.json` при первом запуске. Работает в режиме `network_mode: host`, монтирует `./config` → `/etc/aivpn`.
 
-Для быстрого деплоя на VPS одной командой используйте `./deploy-server-release.sh`. Скрипт скачивает релизный артефакт, создаёт `config/server.key` при необходимости, включает IPv4 forwarding, добавляет NAT-правило для интерфейса по умолчанию и запускает Docker через `Dockerfile.prebuilt`.
-
-Если у вас включён firewall, откройте `443/udp` тем инструментом, который есть в системе:
+Открыть UDP-порт 443:
 
 ```bash
-# UFW (Ubuntu/Debian)
+# UFW
 sudo ufw allow 443/udp
-
-# firewalld (RHEL/CentOS/Fedora)
-sudo firewall-cmd --add-port=443/udp --permanent
-sudo firewall-cmd --reload
+# firewalld
+sudo firewall-cmd --add-port=443/udp --permanent && sudo firewall-cmd --reload
 ```
 
-> Контейнер запускается с `network_mode: "host"` и монтирует `./config` → `/etc/aivpn` внутри контейнера.
-
-#### Вариант Б: На голом железе
-
-Заходите на свой VPS, генерите ключ:
+#### Bare metal
 
 ```bash
 sudo mkdir -p /etc/aivpn
 openssl rand 32 | sudo tee /etc/aivpn/server.key > /dev/null
 sudo chmod 600 /etc/aivpn/server.key
+sudo ./aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
 ```
 
-Поднимаем:
+Сервер автоматически включает переадресацию IPv4 и устанавливает NAT-правила (nftables при наличии, иначе iptables). Ручная настройка файрволла для туннеля не нужна.
+
+#### Добавить клиента
 
 ```bash
-sudo ./target/release/aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/server.key
+# Docker
+docker compose exec aivpn-server aivpn-server \
+    --add-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
+
+# Bare metal
+aivpn-server \
+    --add-client "Alice Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
 ```
 
-Включаем NAT:
+Вывод содержит ключ подключения (`aivpn://…`) — передать клиенту.
+
+Другие команды управления: `--list-clients`, `--show-client`, `--remove-client`.
+
+---
+
+### Клиент — Linux
 
 ```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+sudo ./aivpn-client -k "aivpn://..."
+# Полный туннель (весь трафик через VPN)
+sudo ./aivpn-client -k "aivpn://..." --full-tunnel
 ```
 
-Если VPN-подсеть у вас не legacy `10.0.0.0/24`, держите её в `config/server.json` как единственный авторитетный источник:
+### Клиент — macOS
 
-```json
-{
-    "listen_addr": "0.0.0.0:443",
-    "tun_name": "aivpn0",
-    "network_config": {
-        "server_vpn_ip": "10.150.0.1",
-        "prefix_len": 24,
-        "mtu": 1346
-    }
-}
+Скачать `aivpn-macos.dmg` из [Releases](https://github.com/infosave2007/aivpn/releases), перетащить **Aivpn.app** в Applications, запустить — появится в строке меню. Вставить ключ подключения и нажать **Connect**.
+
+CLI:
+```bash
+sudo ./aivpn-client -k "aivpn://..."
 ```
 
-И NAT-правило тоже должно соответствовать этой подсети, например:
+> Приложение запрашивает пароль через `sudo` для создания интерфейса `utun`.
+
+### Клиент — Windows
+
+**Установщик (рекомендуется):** скачать `aivpn-windows-installer.exe`, запустить от имени Администратора, открыть **AIVPN** из меню Пуск.
+
+**Portable:** извлечь `aivpn-windows-package.zip` (содержит `aivpn.exe`, `aivpn-client.exe`, `wintun.dll`). Запустить `aivpn.exe` от Администратора.
+
+CLI (PowerShell, с правами Администратора):
+```powershell
+.\aivpn-client.exe -k "aivpn://..."
+```
+
+> Требуются права Администратора для создания сетевого адаптера Wintun.
+
+### Клиент — Android
+
+1. Установить `aivpn-client.apk`
+2. Вставить ключ подключения (`aivpn://…`)
+3. Нажать **Connect**
+
+### Клиент — iOS
+
+Сборка на macOS (требуется Xcode 15+):
 
 ```bash
-DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
-sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./scripts/build-ios.sh ВАШ_TEAM_ID
 ```
 
-`listen_addr` управляет портом (по умолчанию: 443). Чтобы использовать другой порт:
-
-```json
-{
-  "listen_addr": "0.0.0.0:8443",
-  ...
-}
+Установка `releases/aivpn-ios.ipa`:
+```bash
+xcrun devicectl device install app --device <UDID> releases/aivpn-ios.ipa
 ```
 
-Порт автоматически вшивается в ключи подключения — клиентам не нужна ручная настройка. Переменная окружения `AIVPN_LISTEN` или флаг `--listen` переопределяют значение из `server.json`.
+> Достаточно бесплатного Apple Developer аккаунта. Сайдлоад-сборки истекают через 7 дней.
 
-#### Полный справочник server.json
+### Клиент — Entware-роутеры (ARMv7 / MIPSel)
+
+```bash
+scp aivpn-client-linux-armv7-musleabihf root@router:/opt/bin/aivpn-client
+ssh root@router 'chmod +x /opt/bin/aivpn-client && /opt/bin/aivpn-client -k "aivpn://..."'
+```
+
+### Клиент — MikroTik RouterOS 7.6+
+
+```routeros
+/system/device-mode/update container=yes   # затем перезагрузка
+/interface/veth/add name=veth-aivpn address=172.31.0.2/30 gateway=172.31.0.1
+/ip/address/add address=172.31.0.1/30 interface=veth-aivpn
+/container/mounts/add name=aivpn-tun src=/dev/net/tun dst=/dev/net/tun type=bind
+/container/envs/add list=aivpn-env name=AIVPN_KEY value="aivpn://..."
+/container/add remote-image=infosave2007/aivpn-mikrotik:latest \
+    interface=veth-aivpn start-on-boot=yes envlist=aivpn-env mounts=aivpn-tun
+/container/start [find remote-image~"aivpn-mikrotik"]
+/ip/route/add dst-address=0.0.0.0/0 gateway=172.31.0.2
+```
+
+Подробнее: [aivpn-mikrotik/README.md](aivpn-mikrotik/README.md).
+
+### Режим SOCKS5-прокси (без root)
+
+```bash
+aivpn-client -k "aivpn://..." --proxy-listen 127.0.0.1:1080
+```
+
+Настроить Firefox / Chrome / curl на `SOCKS5 127.0.0.1:1080`. TUN-устройство и права Администратора не нужны.
+
+---
+
+## Формат ключа подключения
+
+Ключ подключения кодирует все параметры сервера и клиента в одну строку:
+
+```
+aivpn://<base64url(JSON)>
+```
+
+Поля JSON:
+
+| Поле | Тип | Описание |
+|------|-----|---------|
+| `s` | `string` | Адрес сервера, напр. `"1.2.3.4:443"` |
+| `k` | `string` | Публичный ключ X25519 сервера (base64) |
+| `p` | `string` | Предварительный общий ключ (PSK) клиента (base64) |
+| `i` | `string` | Статический VPN-IP клиента, напр. `"10.0.0.2"` |
+| `n` | `object` | *(необязательно)* Bootstrap `network_config` (см. ниже) |
+
+Объект `network_config` (`n`):
+
+| Поле | Описание |
+|------|---------|
+| `client_ip` | TUN-IP клиента |
+| `server_vpn_ip` | TUN-IP сервера |
+| `prefix_len` | Длина префикса подсети |
+| `mtu` | Внутренний MTU |
+
+Приоритет при подключении:
+
+1. Параметры из `ServerHello` (авторитетный источник)
+2. Bootstrap `network_config` из ключа
+3. Устаревший фолбэк `10.0.0.0/24`
+
+Ключи без `network_config` полностью поддерживаются.
+
+Выпустить ключ:
+```bash
+aivpn-server --add-client "Имя" --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json --server-ip IP:PORT
+```
+
+Повторно показать существующий ключ:
+```bash
+aivpn-server --show-client "Имя" --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json --server-ip IP:PORT
+```
+
+---
+
+## Справочник конфигурации сервера
+
+Пути конфига: `config/server.json` (локально) или `/etc/aivpn/server.json`. CLI-флаги перекрывают значения файла.
 
 ```json
 {
@@ -332,9 +297,10 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
   "tun_name": "aivpn0",
   "tun_mtu": "auto",
   "mask_dir": "/var/lib/aivpn/masks",
-  "bootstrap_mask_files": ["/etc/aivpn/masks/custom.json"],
+  "bootstrap_mask_files": [],
   "session_timeout_secs": 0,
   "idle_timeout_secs": 300,
+  "allow_peer_routing": false,
   "network_config": {
     "server_vpn_ip": "10.0.0.1",
     "prefix_len": 24,
@@ -342,478 +308,216 @@ sudo iptables -t nat -A POSTROUTING -s 10.150.0.0/24 -o "$DEFAULT_IFACE" -j MASQ
     "keepalive_secs": 8,
     "ipv6_enabled": false,
     "ipv6_prefix": "fd10:cafe::/48"
-  }
-}
-```
-
-| Поле | По умолчанию | Описание |
-|------|-------------|----------|
-| `listen_addr` | `0.0.0.0:443` | UDP-адрес и порт прослушивания |
-| `tun_name` | случайный | Имя TUN-устройства (`aivpn0`, `tun0`, …) |
-| `tun_mtu` | _(не задан)_ | `"auto"` — автоопределение MTU по физическому интерфейсу (−64 байта накладных расходов, при ошибке — 1346); или целое число, например `1400` |
-| `mask_dir` | `/var/lib/aivpn/masks` | Папка с `.json`-файлами профилей масок |
-| `bootstrap_mask_files` | `[]` | Дополнительные маски, загружаемые при старте (снижают задержку первого подключения) |
-| `session_timeout_secs` | `0` | Жёсткий лимит сессии в секундах; `0` = без ограничений |
-| `idle_timeout_secs` | `300` | Отключить клиента после N секунд тишины |
-| `network_config.server_vpn_ip` | `10.0.0.1` | IP сервера в TUN-интерфейсе |
-| `network_config.prefix_len` | `24` | Длина префикса VPN-подсети |
-| `network_config.mtu` | `1346` | Внутренний MTU туннеля, передаваемый клиенту в `ServerHello` |
-| `network_config.keepalive_secs` | `8` | Интервал keepalive, согласуемый с клиентами (сек.) |
-| `network_config.ipv6_enabled` | `false` | Включить IPv6 NAT66 — каждому клиенту назначается IPv6-адрес из `ipv6_prefix` |
-| `network_config.ipv6_prefix` | `fd10:cafe::/48` | ULA /48-префикс для клиентских IPv6-адресов |
-
-### 3.1 Управление клиентами
-
-AIVPN использует модель регистрации клиентов по аналогии с WireGuard/XRay: у каждого клиента — уникальный PSK, статический VPN IP и статистика трафика.
-
-Вся конфигурация упаковывается в один **ключ подключения** — одну строку, которую пользователь вставляет в приложение или CLI-клиент.
-
-Теперь ключ подключения несёт не только legacy-поле VPN IP, но и необязательный блок `network_config` для начальной сетевой конфигурации. Новый клиент берёт сетевые параметры из этого блока и затем подтверждает их через `ServerHello`. Старые ключи без `network_config` продолжают работать.
-
-#### Docker
-
-```bash
-# Используйте ту же Compose-команду, что определили выше
-# Добавить клиента (выводит ключ подключения)
-$AIVPN_COMPOSE exec aivpn-server aivpn-server \
-    --add-client "Телефон Алисы" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
-
-# Вывод:
-# ✅ Client 'Телефон Алисы' created!
-#    ID:     a1b2c3d4e5f67890
-#    VPN IP: 10.0.0.2
-#
-# ══ Connection Key (paste into app) ══
-#
-# aivpn://eyJpIjoiMTAuMC4wLjIiLCJrIjoiLi4uIiwibiI6eyJjbGllbnRfaXAiOiIxMC4wLjAuMiIsInNlcnZlcl92cG5faXAiOiIxMC4wLjAuMSIsInByZWZpeF9sZW4iOjI0LCJtdHUiOjEzNDZ9LCJwIjoiLi4uIiwicyI6IjEuMi4zLjQ6NDQzIn0
-
-# Список всех клиентов со статистикой
-docker compose exec aivpn-server aivpn-server \
-    --list-clients --clients-db /etc/aivpn/clients.json
-
-# Показать конкретного клиента (и его ключ подключения)
-$AIVPN_COMPOSE exec aivpn-server aivpn-server \
-    --show-client "Телефон Алисы" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
-
-# Удалить клиента
-docker compose exec aivpn-server aivpn-server \
-    --remove-client "Телефон Алисы" \
-    --clients-db /etc/aivpn/clients.json
-```
-
-> Используется имя сервиса Compose, поэтому команда не зависит от сгенерированного имени контейнера.
-
-#### На голом железе
-
-```bash
-# Добавить клиента
-aivpn-server \
-    --add-client "Телефон Алисы" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
-
-# Список всех клиентов со статистикой
-aivpn-server --list-clients --clients-db /etc/aivpn/clients.json
-
-# Показать конкретного клиента (и его ключ подключения)
-aivpn-server \
-    --show-client "Телефон Алисы" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_ПУБЛИЧНЫЙ_IP:443
-
-# Удалить клиента
-aivpn-server \
-    --remove-client "Телефон Алисы" \
-    --clients-db /etc/aivpn/clients.json
-```
-
-### 3.2 Запись собственных масок
-
-AIVPN поддерживает автоматическую запись трафика реальных приложений для создания новых профилей мимикрии. Это позволяет адаптировать систему под конкретные сервисы, которые не блокируются в вашей сети.
-
-#### Как работает запись
-
-Система записи работает через **аутентифицированное клиентское подключение**:
-
-1. **Создать admin-клиента**: Сгенерировать специальный админский ключ на сервере
-2. **Подключить клиент**: Запустить AIVPN-клиент с админским ключом подключения
-3. **Начать запись**: Отправить команду `record start <service>` через VPN-туннель
-4. **Использовать сервис**: Система захватывает метаданные пакетов (размеры, интервалы, заголовки)
-5. **Остановить запись**: Отправить `record stop` для генерации маски и самотестирования
-
-Серверный конвейер:
-- **Запись**: Перехват UDP-пакетов из VPN-сессии
-- **Анализ**: Построение гистограммы размеров, вычисление периодов IAT, вывод FSM
-- **Генерация**: Создание полного `MaskProfile` с `HeaderSpec`
-- **Самотестирование**: Проверка воспроизведения статистических свойств
-- **Сохранение**: Сохранение в хранилище и регистрация в каталоге
-
-#### Пошаговая инструкция
-
-**1. Создать admin-клиента на сервере:**
-
-```bash
-# Docker
-docker compose exec aivpn-server aivpn-server \
-    --add-client "recording-admin" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_IP_СЕРВЕРА:443
-
-# На голом железе
-aivpn-server \
-    --add-client "recording-admin" \
-    --key-file /etc/aivpn/server.key \
-    --clients-db /etc/aivpn/clients.json \
-    --server-ip ВАШ_IP_СЕРВЕРА:443
-```
-
-Сохраните выходной ключ подключения (начинается с `aivpn://`).
-
-**2. Подключить клиент с админским ключом:**
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://..."
-```
-
-**3. Начать запись для сервиса:**
-
-```bash
-# Отправить команду начала записи через VPN-туннель
-aivpn record start --service zoom
-```
-
-**4. Использовать сервис нормально** в течение нескольких минтут для захвата разнообразных паттернов трафика.
-
-**5. Остановить запись:**
-
-```bash
-aivpn record stop
-```
-
-Сервер проанализирует захваченные пакеты и сгенерирует новую маску. Вы увидите вывод:
-
-```
-✅ Mask generated and tested!
-
-   Mask ID:     zoom_custom_abc123
-   Service:     zoom
-   Confidence:  0.87
-
-   Broadcasting to all clients...
-```
-
-#### Требования к хорошим маскам
-
-- **Минимум 500 пакетов** для статистической значимости
-- **Минимум 60 секунд** записи (требование системы) лучше больше
-- **Разнообразный трафик**: разные типы операций в сервисе
-- **Стабильное соединение**: без разрывов и ретрансмиссий
-
-Каждая маска — отдельный JSON-файл с именем `{mask_id}.json`.
-
-### 4. Клиент
-
-#### Ключ подключения (рекомендуется)
-
-Самый простой способ — вставить ключ подключения из `--add-client`:
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://eyJp..."
-```
-
-Приоритет у новых клиентов такой:
-
-1. Сетевые параметры, подтверждённые сервером в `ServerHello`
-2. Bootstrap `network_config` из ключа подключения
-3. Legacy fallback `10.0.0.0/24`
-
-Важно для миграции: старые клиенты продолжают работать со старыми ключами и legacy `/24`, но если вы переносите сервер в другую подсеть или меняете префикс, клиентов нужно обновить, а ключи подключения лучше перевыпустить.
-
-Полный туннель:
-
-```bash
-sudo ./target/release/aivpn-client -k "aivpn://eyJp..." --full-tunnel
-```
-
-#### Ручной режим
-
-Также можно указать адрес и ключ сервера вручную (без PSK — для работы без регистрации):
-
-#### Linux
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server IP_ВАШЕГО_VPS:443 \
-    --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64
-```
-
-Для полного туннеля (весь трафик через VPN):
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server IP_ВАШЕГО_VPS:443 \
-    --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64 \
-    --full-tunnel
-```
-
-#### macOS
-
-Точно так же, `cargo build --release` соберет нативный бинарник:
-
-```bash
-sudo ./target/release/aivpn-client \
-    --server IP_ВАШЕГО_VPS:443 \
-    --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64
-```
-
-> macOS автоматически настроит `utun`-интерфейс и маршруты через `ifconfig` / `route`.
-
-#### Windows
-
-Для пользователей предпочтительна установка через [aivpn-windows-installer.exe](https://github.com/infosave2007/aivpn/releases) (включает GUI-приложение, CLI-клиент и Wintun драйвер).
-
-Альтернативно можно скачать и распаковать [aivpn-windows-package.zip](https://github.com/infosave2007/aivpn/releases). Архив содержит:
-
-```
-aivpn.exe          # GUI-приложение
-aivpn-client.exe   # CLI-клиент
-wintun.dll         # Сетевой драйвер Wintun
-```
-
-> ⚠️ **Требуются права администратора.** VPN-клиенту нужны права администратора для создания сетевого адаптера Wintun. Всегда запускайте через правую кнопку мыши → «Запуск от имени администратора» или из PowerShell с повышенными привилегиями.
-
-**GUI-режим** (рекомендуется): правой кнопкой на `aivpn.exe` → **Запуск от имени администратора**, вставьте ключ подключения и нажмите «Подключить».
-
-**CLI-режим** из PowerShell **от имени администратора**:
-
-```powershell
-.\aivpn-client.exe --server IP_ВАШЕГО_VPS:443 --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64
-```
-
-Для полного туннеля:
-
-```powershell
-.\aivpn-client.exe --server IP_ВАШЕГО_VPS:443 --server-key ПУБЛИЧНЫЙ_КЛЮЧ_BASE64 --full-tunnel
-```
-
-> Клиент автоматически настроит маршруты через `route add` и корректно откатит их при завершении.
-
-### 4.1 Прокси-режим (SOCKS5, без root)
-
-Вместо TUN-устройства клиент может работать как локальный **SOCKS5-прокси**. Это позволяет пустить конкретный браузер или приложение через VPN без прав администратора/root и без установки драйвера ядра.
-
-```bash
-# Запустить SOCKS5-прокси на порту 1080 (sudo не нужен)
-aivpn-client -k "aivpn://eyJp..." --proxy-listen 127.0.0.1:1080
-```
-
-Настройте своё приложение на использование `SOCKS5` по адресу `127.0.0.1:1080`:
-
-| Приложение | Настройка |
-|------------|-----------|
-| **Firefox** | Настройки → Параметры сети → Ручная настройка прокси → SOCKS5 `127.0.0.1:1080`, включить «Проксировать DNS» |
-| **Chrome / Chromium** | Запуск с флагом `--proxy-server=socks5://127.0.0.1:1080` |
-| **curl** | `curl --proxy socks5h://127.0.0.1:1080 https://example.com` |
-| **git** | `git config --global http.proxy socks5h://127.0.0.1:1080` |
-
-**Ограничения:**
-- IPv6-адреса назначения не поддерживаются (используйте имена хостов или IPv4)
-- UDP-трафик не проксируется (только TCP CONNECT)
-- DNS разрешается локально через системный резолвер (запросы не идут через VPN)
-
-### 5. Android
-
-1. Установите APK (`aivpn-android/app/build/outputs/apk/debug/app-debug.apk`)
-2. Вставьте свой **ключ подключения** (`aivpn://...`) в поле ввода
-3. Нажмите **Подключить**
-
-Ключ подключения содержит всё: адрес сервера, публичный ключ, ваш PSK и VPN IP. Никакой ручной настройки.
-
-## Кросс-компиляция
-
-Можно собирать клиент под любую платформу прямо со своей машины:
-
-```bash
-# Для Linux из macOS/Windows
-rustup target add x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-unknown-linux-gnu
-
-# Для Windows из Linux/macOS
-rustup target add x86_64-pc-windows-msvc
-cargo build --release --target x86_64-pc-windows-msvc
-```
-
-Для статических musl-кросс-сборок без локального тулчейна используйте Docker-backed release builds:
-
-```bash
-./build-musl-release.sh client armv7-unknown-linux-musleabihf
-./build-musl-release.sh client mipsel-unknown-linux-musl
-./build-musl-release.sh server armv7-unknown-linux-musleabihf
-./build-musl-release.sh server mipsel-unknown-linux-musl
-```
-
-Эти артефакты рассчитаны на ARM Linux-серверы/SBC и MIPSel-роутеры с Entware.
-
-Для Entware-роутеров обычный поток такой: собрать или скачать musl-артефакт, скопировать его в `/opt/bin`, выдать `chmod +x` и запускать прямо из shell роутера.
-
-## Расширенная конфигурация сервера
-
-### Пул-синхронизация между серверами (встроена в протокол)
-
-Серверы автоматически синхронизируют базу клиентов. Синхронизация встроена в основной VPN-протокол как управляющее сообщение `PoolSync` — неотличима от клиентского трафика. Отдельный TCP-порт и дополнительные правила брандмауэра не нужны.
-
-`server.json`:
-```json
-{
+  },
   "pool": {
-    "peers": ["node2.example.com:443", "node3.example.com:443"],
-    "sync_key": "<base64-ключ 32 байта>"
+    "peers": [],
+    "sync_key": ""
   }
 }
 ```
-Генерация ключа: `openssl rand -base64 32`
 
-### Резервное копирование / Миграция
+| Параметр | По умолчанию | Описание |
+|----------|-------------|---------|
+| `listen_addr` | `0.0.0.0:443` | UDP-адрес. Порт автоматически встраивается в ключи подключения |
+| `tun_name` | случайное | Имя TUN-интерфейса |
+| `tun_mtu` | _(не задан)_ | `"auto"` = физический MTU минус 64 байта накладных расходов (фолбэк 1346); или целое число |
+| `mask_dir` | `/var/lib/aivpn/masks` | Директория с `.json` профилями масок |
+| `bootstrap_mask_files` | `[]` | Маски, предзагружаемые при старте |
+| `session_timeout_secs` | `0` | Жёсткий лимит сессии; `0` = без лимита |
+| `idle_timeout_secs` | `300` | Разрыв молчащих сессий (секунды) |
+| `allow_peer_routing` | `false` | Маршрутизация пакетов между VPN-клиентами |
+| `network_config.server_vpn_ip` | `10.0.0.1` | TUN-IP сервера |
+| `network_config.prefix_len` | `24` | Префикс VPN-подсети |
+| `network_config.mtu` | `1346` | Внутренний MTU, отправляемый клиентам в `ServerHello` |
+| `network_config.keepalive_secs` | `8` | Интервал keepalive |
+| `network_config.ipv6_enabled` | `false` | Включить IPv6 NAT66 |
+| `network_config.ipv6_prefix` | `fd10:cafe::/48` | ULA /48 префикс для клиентских IPv6-адресов |
+| `pool.peers` | `[]` | Адреса узлов пула для синхронизации БД |
+| `pool.sync_key` | `""` | Общий 32-байтный ключ BLAKE3 (base64). Генерация: `openssl rand -base64 32` |
 
-```bash
-# Экспорт (БД клиентов, маски, конфиг сервера)
-aivpn-server --export /tmp/aivpn-backup.tar.gz
+### Опциональные возможности (Cargo features)
 
-# Предпросмотр и восстановление
-aivpn-server --import /tmp/aivpn-backup.tar.gz --dry-run
-aivpn-server --import /tmp/aivpn-backup.tar.gz --target-dir /etc/aivpn
-```
-
-### QoS на уровне клиента
-
-```bash
-aivpn-server --set-client-qos "Alice" --bw-up 10M --bw-down 50M --dscp EF
-```
-
-Применяется через eBPF TC при наличии ядра, иначе — программный токен-баккет.
-
-### Бенчмарк и диагностика
-
-```bash
-# По умолчанию: 10-секундный тест
-aivpn-client bench -k "aivpn://..."
-# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
-
-# Задать продолжительность
-aivpn-client bench -k "aivpn://..." --duration 30
-
-# Вывод в JSON
-aivpn-client bench -k "aivpn://..." --json
-```
-
-Доступен из CLI и в панели диагностики всех GUI-клиентов (Windows, macOS, iOS, Android).
-
-Проверить статус записи маски:
+| Feature | Что включает |
+|---------|-------------|
+| `neural` | Модуль Neural Resonance (ротация маски по MSE) |
+| `management-api` | HTTP API на Unix-сокете `/run/aivpn/api.sock` |
+| `metrics` | Экспортёр Prometheus |
+| `passive-distribution` | Каналы распространения bootstrap-дескрипторов |
 
 ```bash
-aivpn-client record status -k "aivpn://..."
+cargo build --release --bin aivpn-server --features "management-api,metrics,neural"
 ```
 
-Удалить зависшие правила kill-switch после некорректного завершения:
+---
+
+## Сборка из исходников
+
+Требования: Rust 1.75+, `cargo`.
 
 ```bash
-aivpn-client kill-switch clear
+git clone https://github.com/infosave2007/aivpn.git
+cd aivpn
+
+# Все компоненты воркспейса
+cargo build --release
+
+# Отдельные бинарники
+cargo build --release --bin aivpn-server
+cargo build --release --bin aivpn-client
+
+# Тесты
+cargo test
+
+# Статические musl-сборки (ARMv7 / MIPSel)
+./scripts/build-musl-release.sh server armv7-unknown-linux-musleabihf
+./scripts/build-musl-release.sh client mipsel-unknown-linux-musl
+
+# Docker-сборка сервера (результат в releases/)
+./scripts/build-server-release.sh
+
+# Windows GUI (кросс-компиляция с Linux)
+./scripts/build-windows-gui.sh
+
+# iOS (требуется macOS + Xcode 15+)
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo install xcodegen
+./scripts/build-ios.sh              # без подписи / симулятор
+./scripts/build-ios.sh ВАШ_TEAM_ID  # с подписью для устройства
 ```
 
-### Адаптивный режим
+### Android
 
-Автоматическая настройка MTU и keepalive на основе измерения потерь пакетов в реальном времени:
+```bash
+export ANDROID_SDK_ROOT=/opt/android-sdk
+export ANDROID_NDK_ROOT=/opt/android-ndk
+echo "sdk.dir=$ANDROID_SDK_ROOT" > aivpn-android/local.properties
+
+cd aivpn-android
+./build-rust-android.sh release
+```
+
+Подписанная сборка: создать `aivpn-android/keystore.properties` перед запуском скрипта.
+
+### Установка из crates.io
+
+```bash
+cargo install aivpn-client
+cargo install aivpn-server
+```
+
+---
+
+## Расширенные возможности
+
+### Привязка устройства (JIT-зачисление)
+
+Ключ подключения может быть одноразовым: первое подключившееся устройство привязывает свой статический X25519-ключ, последующие подключения с другого устройства отклоняются.
+
+```bash
+# Создать слот зачисления
+aivpn-server --add-client-one-time "Alice-Phone" \
+    --key-file /etc/aivpn/server.key \
+    --clients-db /etc/aivpn/clients.json \
+    --server-ip IP:PORT
+
+# Сбросить привязку (повторное зачисление)
+aivpn-server --reset-device "Alice-Phone" \
+    --clients-db /etc/aivpn/clients.json
+```
+
+Хранение ключа устройства:
+
+| Платформа | Путь |
+|-----------|------|
+| Linux / macOS | `~/.config/aivpn/device.key` (режим 600, автогенерация) |
+| Windows | `%APPDATA%\aivpn\device.key` |
+| Android | Android Keystore через `EncryptedSharedPreferences` |
+| iOS | Keychain, `kSecAttrAccessibleAfterFirstUnlock` |
+
+### Оценка качества соединения и адаптивный режим
+
+AIVPN непрерывно вычисляет **оценку качества 0–100** из RTT (40 пт), джиттера (20 пт), потерь пакетов (30 пт) и Neural MSE (10 пт). Адаптивный режим автоматически регулирует keepalive и размер FEC-группы:
+
+| Оценка | Уровень | Keepalive | FEC-группа |
+|--------|---------|-----------|-----------|
+| 80–100 | Выкл. | 8 с | выключено |
+| 50–79 | Лёгкий | 6 с | 1/16 |
+| 20–49 | Агрессивный | 4 с | 1/8 |
+| 0–19 | Спутниковый | 15 с | 1/4 |
 
 ```bash
 aivpn-client -k "aivpn://..." --adaptive
 ```
 
-### OpenWRT / LuCI
+### Прямая коррекция ошибок (FEC)
 
-Нативный пакет для OpenWRT: procd init-скрипт, UCI-конфигурация и веб-интерфейс LuCI. Смотри `aivpn-openwrt/docs/openwrt-setup.md`.
+Каждые N uplink-пакетов отправляется один XOR-ремонтный пакет. При потере ровно одного пакета из группы сервер восстанавливает его немедленно без повторной передачи. N управляется адаптивным режимом. На качественном канале FEC отключён.
 
-### Журнал аудита администратора
-
-Все операции управления записываются в `/var/log/aivpn/audit.log` (JSONL, путь задаётся через `--audit-log`) с полями: актор, действие, объект, результат, ISO-8601 метка времени.
-
-### Многоскачковая цепочка (Multi-hop)
-
-Маршрутизация трафика клиента через два узла AIVPN без изменений на стороне клиента. Входной узел пересылает зашифрованные IP-пакеты на выходной узел. Клиент общается только с входным узлом.
-
-```
-[Клиент] ──(зашифровано)──► [Входной узел] ──(ChainForward)──► [Выходной узел] ──► Интернет
-```
-
-Входной узел: `pool.exit_node = "exit.example.com:443"`. Выходной узел: `pool.exit_node_enabled = true`. Оба узла используют одинаковый `pool.sync_key`.
-
-### DNS-over-HTTPS прокси
-
-Направляет DNS-трафик клиентов через зашифрованный DoH-резолвер. Сборка с `--features "dns"`. `block_plain_dns: true` блокирует UDP/53 вне VPN-интерфейса.
-
-```json
-{ "dns": { "upstream_doh": "https://cloudflare-dns.com/dns-query", "block_plain_dns": true } }
-```
-
-### Сеть сайт-сайт
-
-Соединяет подсети нескольких серверов AIVPN без клиентского ПО. Маршруты устанавливаются автоматически при получении объявлений от пиров.
-
-```json
-{ "site_to_site": { "local_subnets": ["192.168.1.0/24"], "peers": [{ "name": "b", "endpoint": "b.example.com:443", "sync_key": "...", "remote_subnets": ["192.168.2.0/24"] }] } }
-```
-
-### mTLS-сертификаты клиентов
-
-Опциональный ed25519-сертификат (104 байта) поверх X25519 + PSK. `required: false` (по умолчанию) — обратная совместимость. `required: true` — блокирует данные до предъявления сертификата.
-
-**1. Генерация CA-ключа на сервере:**
-
-```bash
-aivpn-server --gen-ca --key-file /etc/aivpn/server.key
-# Выводит: публичный и приватный ключи CA в hex
-```
-
-**2. Выпуск клиентского сертификата:**
-
-```bash
-aivpn-server --issue-cert "Alice Phone" \
-    --key-file /etc/aivpn/server.key \
-    --ca-key <CA_PRIVATE_KEY_HEX> \
-    --days 365
-# Выводит 104-байтовый сертификат (base64) для передачи клиенту
-```
-
-**3. Настройка сервера** (`server.json`):
+### Синхронизация пула (multi-server)
 
 ```json
 {
-  "mtls": {
-    "ca_public_key_hex": "<CA_PUBLIC_KEY_HEX>",
-    "required": false
+  "pool": {
+    "peers": ["node2.example.com:443"],
+    "sync_key": "<base64-32-byte-key>"
   }
 }
 ```
 
-**4. Подключение с сертификатом (CLI-клиент):**
+### Многоузловая цепочка (multi-hop)
 
-```bash
-aivpn-client -k "aivpn://..." --mtls-cert /path/to/client.cert
+Клиент подключается только к входному узлу; интернет видит IP выходного узла.
+
+**Входной узел:**
+```json
+{ "pool": { "sync_key": "<ключ>", "exit_node": "exit.example.com:443" } }
+```
+**Выходной узел:**
+```json
+{ "pool": { "sync_key": "<тот же ключ>", "exit_node_enabled": true } }
 ```
 
-GUI-клиенты (Windows, macOS, iOS, Android) имеют отдельное поле mTLS в настройках профиля.
+### Локальный DNS-прокси
 
-### Телеметрия дропов eBPF XDP
+```bash
+aivpn-client -k "aivpn://..." --dns-proxy 127.0.0.1:5300 --dns-upstream 1.1.1.1:53
+```
 
-Счётчики дропов по причинам через BPF-кольцевой буфер, события `XdpDrop` в `EventBus`. Активируется при наличии `/sys/fs/bpf/aivpn/drop_stats`.
+### Запись трафика — создание собственных масок
+
+```bash
+aivpn-client record start --service myapp
+# ... работать с приложением 60+ секунд ...
+aivpn-client record stop
+```
+
+Сервер анализирует гистограммы размеров пакетов и IAT, генерирует `MaskProfile`, валидирует через самотестирование и распространяет на активные сессии.
+
+### Бенчмарк соединения
+
+```bash
+aivpn-client bench -k "aivpn://..."
+# P50: 12ms  P95: 28ms  Up: 47 Mbps  Down: 52 Mbps  Score: 94/100
+aivpn-client bench -k "aivpn://..." --json
+```
+
+---
+
+## Модель безопасности
+
+| Свойство | Механизм |
+|----------|---------|
+| Шифрование | ChaCha20-Poly1305 AEAD |
+| Обмен ключами | X25519 ECDH |
+| Аутентификация сессии | PSK на клиента (опционально — привязка устройства) |
+| Прямая секретность | X25519 рэтчет в полёте |
+| Защита от повтора | Скользящее окно на 256 записей на сессию |
+| Анонимность сессии | 8-байтовый BLAKE3-тег; идентификатор сессии не передаётся |
+| Мимикрия трафика | FSM `MaskProfile`: инъекция заголовков, IAT-шейпинг |
+| Целостность маски | Neural Resonance MSE 0,35; авто-ротация |
+| NAT | Сервер: nftables/iptables; клиент: `SO_REUSEPORT` |
+
+Подробная модель угроз и анализ: [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ---
 
@@ -824,42 +528,33 @@ aivpn/
 ├── aivpn-common/src/
 │   ├── crypto.rs          # X25519, ChaCha20-Poly1305, BLAKE3
 │   ├── mask.rs            # Профили мимикрии (WebRTC, QUIC, DNS)
-│   ├── protocol.rs        # Формат пакетов, inner types
-│   └── kernel_accel.rs    # API /dev/aivpn + XDP-хелперы
+│   ├── protocol.rs        # Формат пакетов и управляющий протокол
+│   └── fec.rs             # XOR Forward Error Correction
 ├── aivpn-client/src/
-│   ├── client.rs          # Логика клиента (split-tunnel, kill-switch, XDP)
-│   ├── tunnel.rs          # TUN-интерфейс (Linux / macOS / Windows)
+│   ├── client.rs          # Ядро машины состояний
+│   ├── tunnel.rs          # Кроссплатформенный TUN
 │   ├── kill_switch.rs     # Kill-switch (nftables / pfctl / netsh)
 │   └── mimicry.rs         # Движок шейпинга трафика
 ├── aivpn-server/src/
-│   ├── gateway.rs         # UDP-шлюз, MaskCatalog, resonance loop
-│   ├── neural.rs          # Baked Mask Encoder, AnomalyDetector
-│   ├── nat.rs             # NAT-форвардер (IPv4 + IPv6 NAT66)
-│   ├── client_db.rs       # База клиентов (PSK, статический IP, статистика)
-│   ├── key_rotation.rs    # Ротация сессионных ключей
-│   └── metrics.rs         # Prometheus-мониторинг
-├── aivpn-common/mask-assets/   # 11 профилей мимикрии трафика (JSON)
-├── aivpn-linux/           # Linux Iced GUI (AppImage + системный трей)
-├── aivpn-linux-kernel/    # Опциональный ядерный модуль (aivpn.ko) + XDP-фильтр
-├── aivpn-android/         # Android-клиент (Kotlin)
-├── aivpn-ios-core/        # iOS Rust staticlib (C FFI)
+│   ├── gateway.rs         # UDP-шлюз, диспетчер сессий
+│   ├── neural.rs          # Модуль Neural Resonance
+│   ├── nat.rs             # NAT (IPv4 + IPv6 NAT66)
+│   ├── client_db.rs       # База клиентов
+│   └── pool_sync.rs       # Внутрипротокольная синхронизация пула
+├── aivpn-android/         # Android Kotlin-приложение
 ├── aivpn-ios/             # iOS SwiftUI + NEPacketTunnelProvider
+├── aivpn-windows/         # Windows egui GUI
+├── aivpn-macos/           # macOS SwiftUI в строке меню
+├── mask-assets/           # Встроенные профили мимикрии (JSON)
+├── scripts/               # Скрипты сборки и деплоя
+├── docker/                # Dockerfiles и точка входа
 ├── Dockerfile
 ├── docker-compose.yml
-└── THREAT_MODEL.md        # Модель угроз и безопасность протокола
+└── THREAT_MODEL.md
 ```
-
-## Разработка и контрибы
-
-Хотите поковыряться в коде или обучить свою маску для нейронки? Залетайте:
-
-- Движок масок: [`aivpn-common/src/mask.rs`](aivpn-common/src/mask.rs)
-- Обученные веса и детектор аномалий: [`aivpn-server/src/neural.rs`](aivpn-server/src/neural.rs)
-- Кроссплатформенный TUN-модуль: [`aivpn-client/src/tunnel.rs`](aivpn-client/src/tunnel.rs)
-- Тесты (больше сотни): `cargo test`
-
-Буду рад пулл-реквестам! Особо ищем спецов по анализу трафика, чтобы снимать дампы с реальных приложений и обучать новые профили для Neural Resonance.
 
 ---
 
-Лицензия — MIT. Пользуйтесь, форкайте, обходите блокировки с умом.
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).

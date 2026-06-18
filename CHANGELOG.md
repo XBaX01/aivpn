@@ -1,5 +1,100 @@
 # Changelog
 
+## [0.9.0] - 2026-06-17
+
+### Added
+
+- **Device Binding (JIT Device Enrollment)** — one-time client slots that auto-bind to the first device connecting; subsequent connections from a different X25519 static key are rejected (Shutdown reason 4). Enrollment uses a DH proof `X25519(static_priv, server_static_pub)` so the server verifies key ownership without the private key ever leaving the client. New CLI commands: `--add-client-one-time <NAME>`, `--reset-device <NAME_OR_ID>`. New `ClientConfig` fields: `one_time: bool`, `device_pubkey: Option<[u8;32]>`. Static key storage by platform: Linux/macOS `~/.config/aivpn/device.key` (mode 0600, atomic create); Windows `%APPDATA%\aivpn\device.key`; Android — `EncryptedSharedPreferences` (Android Keystore); iOS — Keychain (`kSecAttrAccessibleAfterFirstUnlock`).
+- **Connection Quality Score (0–100)** — per-session EWMA tracker computing RTT (40 pts), jitter (20 pts), packet loss (30 pts), neural MSE (10 pts). Exposed via new `QualityReport` control payload; server receives telemetry from each client on every keepalive exchange.
+- **Adaptive Mode auto-tuning** — quality score drives `AdaptiveLevel` (Off/Light/Aggressive/Satellite) automatically. Each level adjusts keepalive interval (8/6/4/15 s) and FEC group size (disabled/16/8/4). Server can also push `AdaptiveHint` to override the client-computed level.
+- **KeepaliveAck RTT measurement** — server echoes client keepalive timestamp; client computes RTT on receipt and feeds it into the quality tracker.
+- **XOR Forward Error Correction (upload path)** — new `InnerType::FecRepair` (0x0005) and `FecEncoder`/`FecDecoder` in `aivpn-common::fec`. Every N data packets, one repair packet (XOR of the group) is emitted on the client upload path. Group size N controlled by `AdaptiveLevel::fec_n()`.
+- **Client-to-Client Relay** — new `--allow-peer-routing` server flag (env `AIVPN_ALLOW_PEER_ROUTING`); when set, the TUN read loop forwards packets whose source IP belongs to a VPN client session directly to the destination VPN client session, enabling intra-VPN unicast routing. Disabled by default to preserve client isolation.
+- **Local DNS Proxy** — new `aivpn-client::dns_proxy` module; `--dns-proxy <bind_addr> --dns-upstream <resolver>` starts a lightweight UDP forwarder that tunnels all DNS queries through the active VPN path, preventing DNS leaks on platforms without per-app DNS routing.
+- **New protocol control subtypes** — `DeviceEnrollment` (0x17), `KeepaliveAck` (0x18), `QualityReport` (0x19), `AdaptiveHint` (0x1A) with full encode/decode in `protocol.rs`.
+- **Device Key display (CLI / Windows / macOS)** — `--show-device-key` CLI flag prints the device's X25519 public key (base64) and exits, enabling GUI clients to surface the key via subprocess. Windows GUI shows a truncated key in the Connection Keys panel with a copy button. macOS menu bar loads the key via helper action and displays it in the status view.
+- **Traffic Mimicry Engine for iOS and Android** — `MimicryEncryptor` from `aivpn-common` is now used on the upload path of both iOS (`aivpn-ios-core`) and Android (`aivpn-android-core`). A bootstrap mask is derived from the PSK via `bootstrap_mask_for_psk()` so the very first packet already uses traffic shaping; subsequent `MaskUpdate` messages hot-swap the active profile. Traffic Mimicry is now ✅ on all five platforms.
+- **Feature Capability Matrix** — formal table added after the Platform Support section in all three READMEs with verified ✅/❌ status for 13 features across 5 platforms.
+
+### Fixed
+
+- **FEC: `FecEncoder` count overflow** — `count += 1` in hot path could panic on overflow in debug builds; replaced with `wrapping_add(1)`.
+- **FEC: stale XOR buffer injected after lost repair packet** — server FEC accumulator now tracks `group_seq`; when a new group begins before the previous repair arrived, the stale XOR buffer is detected and discarded instead of being applied to the new group.
+- **FEC: `FecDecoder::record` division by zero** — `FecRepair::decode` now returns `None` for `group_size == 0`; `FecDecoder` guards against malformed repair packets that would cause a div-by-zero panic.
+- **iOS FFI: `static_privkey_len` not validated** — `aivpn_run_tunnel` FFI entry point now checks `static_privkey_len == 32` before `from_raw_parts`; mismatched lengths are rejected with an error instead of causing undefined behavior.
+- **Keepalive RTT skew** — `ControlPayload::Keepalive` now carries `send_ts` (client's own monotonic clock); server echoes it in `KeepaliveAck`; RTT is computed without client/server clock synchronization.
+- **Server: non-IPv4 payload bypasses anti-spoof check** — the data handler now rejects non-IPv4 inner payloads before the source-address enforcement step, preventing clients from bypassing the VPN IP ownership check via crafted packets.
+- **Android: `CtrlTxGuard::drop` silent failure on poisoned mutex** — when the async control-tx channel mutex was poisoned, `drop()` silently skipped cleanup; now recovers from poison with `into_inner()` and completes the cleanup.
+- **Android: adaptive hint leaks across reconnects** — `ACTIVE_ADAPTIVE_LEVEL` was not reset at session start; the previous session's server-pushed level could influence the new session before the first `AdaptiveHint` arrived; reset to `0` on session entry.
+- **Android JNI: recording service name unbounded** — `startRecording` service name string was passed through JNI without length validation; capped to 128 UTF-8 bytes at the boundary to prevent allocation abuse.
+- **macOS helper: DNS proxy port range not validated** — `dnsProxy` value in helper requests was checked for HOST:PORT format but not for port in range 1–65535; added explicit range check.
+- **Security: quality sidecar written to world-readable `/tmp`** — `write_quality_file()` wrote `aivpn-quality.json` to `std::env::temp_dir()` which is world-readable; moved to `/var/run/aivpn/` (mode 0750, root:root) so other local users cannot read connection quality metrics.
+- **iOS: `ControlPayload::Keepalive` used as unit variant** (critical) — three call sites in `ios_tunnel.rs` used `ControlPayload::Keepalive.encode()` which would fail to compile on iOS; corrected to `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
+- **Android: `transition_recv_win.reset()` discards in-flight window** — during inline PFS rekey the old receive window was cleared instead of moved to the transition slot; corrected to `std::mem::take(&mut recv_win)`.
+- **Android: dead load of `keepalive_sent_ms_rx`** — the `Arc` clone was only used in a discarded `load()` call in the `KeepaliveAck` handler; removed.
+- **iOS: quality tracker not updated when `echo_ts == 0`** — `record_received()` and score update were inside the `echo_ts > 0` guard; moved outside so quality tracks liveness even without RTT.
+- **`aivpn-common`: clippy `manual_abs_diff` in `quality.rs`** — manual branch replaced with `sample_us.abs_diff(self.rtt_us)`.
+- **`aivpn-common`: clippy warnings in `kernel_accel.rs`** — `ioctl_ref(&mut v)` corrected to `ioctl_ref(&v)`; `io::Error::new(Other, …)` replaced with `io::Error::other(…)`.
+- **`aivpn-client`: `send_control` silently swallowed upload channel errors** — send error was logged but `Ok(())` was returned; now propagates `Error::Channel(…)`.
+- **`aivpn-client`: `Shutdown` handler returned `Ok(())` after disconnect** — now returns `Err(Error::Session("server shutdown: …"))` to cleanly break the run loop.
+- **Windows: DNS proxy address validated with Unicode en-dash** — the allowlist `":.[]−-"` contained U+2212 instead of ASCII hyphen; replaced with `addr.parse::<SocketAddr>().is_err()`.
+- **Windows: manual JSON parsing in `read_quality_json`** — fragile comma-split parser replaced with `serde_json::from_str::<serde_json::Value>`.
+- **Windows: `child.kill()` without graceful wait** — `disconnect()` now polls `try_wait()` for up to 500 ms before force-killing.
+- **CLI: `unwrap()` in `record start`/`stop` subcommands** — `UdpSocket::bind` and `send_to` panics replaced with `eprintln!` error messages.
+
+### Changed
+
+- Version bumped 0.8.5 → 0.9.0 across workspace `Cargo.toml`, all crate `Cargo.toml` files, macOS `Info.plist`, iOS `App/Info.plist` and `Tunnel/Info.plist`.
+
+---
+
+## [0.9.0] — 2026-06-17
+
+### Добавлено
+
+- **Привязка устройства (JIT Device Enrollment)** — одноразовые конфиги, автоматически привязывающиеся к первому подключившемуся устройству. Последующие подключения с другим статическим X25519-ключом отклоняются (Shutdown, причина 4). Регистрация использует DH-доказательство `X25519(static_priv, server_static_pub)` — приватный ключ никогда не покидает клиент. Новые команды CLI: `--add-client-one-time <ИМЯ>`, `--reset-device <ИМЯ_ИЛИ_ID>`. Новые поля `ClientConfig`: `one_time: bool`, `device_pubkey: Option<[u8;32]>`. Хранение ключа по платформам: Linux/macOS — `~/.config/aivpn/device.key` (права 0600, атомарное создание); Windows — `%APPDATA%\aivpn\device.key`; Android — `EncryptedSharedPreferences` (Android Keystore); iOS — Keychain (`kSecAttrAccessibleAfterFirstUnlock`).
+- **Оценка качества соединения (0–100)** — EWMA-трекер на сессию, вычисляющий RTT (40 очков), джиттер (20 очков), потери пакетов (30 очков) и нейронный MSE (10 очков). Передаётся серверу через новый control payload `QualityReport` при каждом keepalive.
+- **Автоматическая настройка Adaptive Mode** — оценка качества управляет `AdaptiveLevel` (Off/Light/Aggressive/Satellite) автоматически. Каждый уровень задаёт интервал keepalive (8/6/4/15 с) и группу FEC (отключено/16/8/4). Сервер может принудительно задать уровень через `AdaptiveHint`.
+- **Измерение RTT через KeepaliveAck** — сервер эхирует временную метку keepalive клиента; клиент вычисляет RTT при получении и передаёт его в трекер качества.
+- **XOR Forward Error Correction (upload-путь)** — новый `InnerType::FecRepair` (0x0005) и `FecEncoder`/`FecDecoder` в `aivpn-common::fec`. Каждые N пакетов данных клиент отправляет один repair-пакет (XOR группы). Размер группы N задаётся `AdaptiveLevel::fec_n()`.
+- **Маршрутизация клиент-клиент** — новый флаг сервера `--allow-peer-routing` (env `AIVPN_ALLOW_PEER_ROUTING`): TUN read loop перенаправляет пакеты, исходный IP которых принадлежит сессии VPN-клиента, напрямую к целевой клиентской сессии — без выхода в интернет. По умолчанию отключено для изоляции клиентов.
+- **Локальный DNS-прокси** — новый модуль `aivpn-client::dns_proxy`; флаги `--dns-proxy <адрес> --dns-upstream <резолвер>` запускают лёгкий UDP-форвардер, туннелирующий DNS-запросы через активный VPN-путь и предотвращающий DNS-утечки.
+- **Новые control subtype протокола** — `DeviceEnrollment` (0x17), `KeepaliveAck` (0x18), `QualityReport` (0x19), `AdaptiveHint` (0x1A) с полным encode/decode в `protocol.rs`.
+- **Отображение Device Key (CLI / Windows / macOS)** — флаг CLI `--show-device-key` выводит X25519-публичный ключ устройства в base64 и завершает работу; используется GUI-клиентами. Windows GUI показывает усечённый ключ в панели «Ключи подключения» с кнопкой копирования. macOS получает ключ через helper action и отображает его в статусном окне.
+- **Mimicry Engine для iOS и Android** — `MimicryEncryptor` из `aivpn-common` теперь используется на upload-пути iOS (`aivpn-ios-core`) и Android (`aivpn-android-core`). Начальная маска формируется из PSK через `bootstrap_mask_for_psk()`, поэтому первый пакет уже маскирован; `MaskUpdate` заменяет профиль без переподключения. Маскировка трафика теперь ✅ на всех пяти платформах.
+- **Таблица функциональных возможностей** — добавлена после раздела «Поддерживаемые платформы» во всех трёх README с проверенными статусами ✅/❌ для 13 функций на 5 платформах.
+
+### Исправлено
+
+- **FEC: переполнение счётчика `FecEncoder`** — `count += 1` в горячем пути мог вызвать панику в debug-сборке; заменено на `wrapping_add(1)`.
+- **FEC: устаревший XOR-буфер из потерянного repair-пакета** — FEC-аккумулятор сервера теперь отслеживает `group_seq`; когда новая группа начинается до получения repair-пакета предыдущей, устаревший XOR-буфер обнаруживается и отбрасывается вместо применения к новой группе.
+- **FEC: деление на ноль в `FecDecoder::record`** — `FecRepair::decode` теперь возвращает `None` при `group_size == 0`; добавлена защита от повреждённых repair-пакетов, вызывавших панику.
+- **iOS FFI: параметр `static_privkey_len` не валидировался** — точка входа FFI `aivpn_run_tunnel` теперь проверяет `static_privkey_len == 32` до `from_raw_parts`; несоответствие длины возвращает ошибку вместо неопределённого поведения.
+- **Keepalive: смещение RTT из-за рассинхронизации часов** — `ControlPayload::Keepalive` теперь несёт `send_ts` (монотонные часы клиента); сервер отражает его в `KeepaliveAck`; RTT вычисляется без синхронизации часов клиента и сервера.
+- **Сервер: не-IPv4 payload обходил проверку anti-spoof** — обработчик данных теперь отклоняет не-IPv4 внутренние payload до шага проверки владельца IP-адреса, предотвращая обход VPN IP ownership check через сформированные пакеты.
+- **Android: `CtrlTxGuard::drop` молчал при отравленном мьютексе** — когда мьютекс async control-tx канала был отравлен, `drop()` тихо пропускал очистку; теперь восстанавливается из отравления через `into_inner()` и завершает очистку.
+- **Android: утечка adaptive hint между переподключениями** — `ACTIVE_ADAPTIVE_LEVEL` не сбрасывался при начале сессии; уровень, заданный сервером в прошлой сессии, мог влиять на новую до прихода первого `AdaptiveHint`; сбрасывается в `0` при входе в сессию.
+- **Android JNI: имя сервиса записи не ограничено по длине** — строка имени в `startRecording` передавалась через JNI без проверки длины; ограничена 128 байтами UTF-8 на границе JNI.
+- **macOS helper: диапазон порта DNS-прокси не проверялся** — значение `dnsProxy` в запросах к helper проверялось на формат HOST:PORT, но не на диапазон порта 1–65535; добавлена явная проверка диапазона.
+- **Безопасность: quality sidecar записывался в мировой `/tmp`** — `write_quality_file()` писал `aivpn-quality.json` в `std::env::temp_dir()`, доступный всем локальным пользователям; перемещён в `/var/run/aivpn/` (режим 0750, root:root).
+- **iOS: `ControlPayload::Keepalive` использовался как unit-вариант** (критическое) — три точки в `ios_tunnel.rs` использовали `ControlPayload::Keepalive.encode()`, что не компилируется; исправлено на `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
+- **Android: `transition_recv_win.reset()` уничтожал окно в полёте** — при inline PFS rekey старое receive-окно очищалось вместо переноса в transition-слот; исправлено на `std::mem::take(&mut recv_win)`.
+- **Android: мёртвая загрузка `keepalive_sent_ms_rx`** — `Arc`-клон использовался только в выброшенном `load()` в обработчике `KeepaliveAck`; удалён.
+- **iOS: трекер качества не обновлялся при `echo_ts == 0`** — `record_received()` был внутри проверки `echo_ts > 0`; вынесен наружу.
+- **`aivpn-common`: clippy-предупреждения в `quality.rs` и `kernel_accel.rs`** — `manual_abs_diff`, `needless_pass_by_ref_mut`, `io_error_other` — все исправлены.
+- **`aivpn-client`: `send_control` молча проглатывал ошибки канала** — теперь пробрасывает `Error::Channel(…)`.
+- **`aivpn-client`: обработчик `Shutdown` возвращал `Ok(())` после отключения** — теперь возвращает `Err(Error::Session("server shutdown: …"))` для выхода из run loop.
+- **Windows: валидация адреса DNS-прокси с Unicode en-dash** — `":.[]−-"` содержал U+2212; заменено на `addr.parse::<SocketAddr>().is_err()`.
+- **Windows: ручной разбор JSON в `read_quality_json`** — хрупкий парсер заменён на `serde_json::from_str::<serde_json::Value>`.
+- **Windows: `child.kill()` без мягкого ожидания** — `disconnect()` опрашивает `try_wait()` до 500 мс перед `kill()`.
+- **CLI: `unwrap()` в подкомандах `record start`/`stop`** — заменены на вывод ошибки через `eprintln!`.
+
+### Изменено
+
+- Версия 0.8.5 → 0.9.0 обновлена в `Cargo.toml` воркспейса, во всех `Cargo.toml` крейтов, macOS `Info.plist`, iOS `App/Info.plist` и `Tunnel/Info.plist`.
+
+---
+
 ## [0.8.5] - 2026-06-17
 
 ### Fixed

@@ -16,8 +16,12 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.aivpn.client.databinding.ActivitySplitTunnelBinding
 import com.google.android.material.tabs.TabLayout
 
@@ -142,50 +146,54 @@ class SplitTunnelActivity : AppCompatActivity() {
     }
 
     private fun loadApps() {
-        val pm = packageManager
-        val ownPackage = packageName
+        lifecycleScope.launch {
+            val pm = packageManager
+            val ownPackage = packageName
+            val defaultIcon = pm.defaultActivityIcon
 
-        // MATCH_ALL was added in API 33 (Android 13)
-        // For older versions, use 0 (default behavior)
-        val flags = if (android.os.Build.VERSION.SDK_INT >= 33) {
-            PackageManager.MATCH_ALL
-        } else {
-            0
-        }
+            data class LoadResult(val apps: List<AppEntry>, val denied: Boolean)
 
-        // On Android 12+ the system may deny QUERY_ALL_PACKAGES for policy reasons
-        // even when it is declared in the manifest.  Catch SecurityException so the
-        // activity degrades gracefully instead of crashing.
-        val installedApps = try {
-            pm.getInstalledApplications(flags)
-        } catch (e: Exception) {
-            android.util.Log.w("SplitTunnelActivity",
-                "getInstalledApplications denied — app list unavailable: ${e.message}")
-            Toast.makeText(this,
-                getString(R.string.split_tunnel_apps_unavailable), Toast.LENGTH_LONG).show()
-            emptyList()
-        }
+            val result = withContext(Dispatchers.IO) {
+                val flags = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    PackageManager.MATCH_ALL
+                } else {
+                    0
+                }
+                val installedApps = try {
+                    pm.getInstalledApplications(flags)
+                } catch (e: Exception) {
+                    android.util.Log.w("SplitTunnelActivity",
+                        "getInstalledApplications denied — app list unavailable: ${e.message}")
+                    return@withContext LoadResult(emptyList(), denied = true)
+                }
 
-        allApps = installedApps
-            .filter { appInfo ->
-                // Exclude own package
-                appInfo.packageName != ownPackage
+                val apps = installedApps
+                    .filter { it.packageName != ownPackage }
+                    .map { appInfo ->
+                        val icon = try { appInfo.loadIcon(pm) } catch (_: Exception) { defaultIcon }
+                        AppEntry(
+                            name = try { appInfo.loadLabel(pm).toString() } catch (_: Exception) { appInfo.packageName },
+                            packageName = appInfo.packageName,
+                            isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                                && (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
+                            icon = icon
+                        )
+                    }
+                    .distinctBy { it.packageName }
+                    .sortedWith(
+                        compareBy<AppEntry> { !allowedPackages.contains(it.packageName) }
+                            .thenBy { it.name.lowercase() }
+                    )
+                LoadResult(apps, denied = false)
             }
-            .map { appInfo ->
-                AppEntry(
-                    name = appInfo.loadLabel(pm).toString(),
-                    packageName = appInfo.packageName,
-                    isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                        && (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
-                    icon = appInfo.loadIcon(pm)
-                )
+
+            if (result.denied) {
+                Toast.makeText(this@SplitTunnelActivity,
+                    getString(R.string.split_tunnel_apps_unavailable), Toast.LENGTH_LONG).show()
             }
-            .distinctBy { it.packageName }
-            .sortedWith(
-                compareBy<AppEntry> { !allowedPackages.contains(it.packageName) }
-                    .thenBy { it.name.lowercase() }
-            )
-        applyFilter()
+            allApps = result.apps
+            applyFilter()
+        }
     }
 
     private fun applyFilter() {

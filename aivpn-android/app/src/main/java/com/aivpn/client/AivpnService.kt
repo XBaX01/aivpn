@@ -335,11 +335,23 @@ class AivpnService : VpnService() {
                 while (isActive) {
                     delay(1_000L)
                     val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
+                    // Apply server-suggested adaptive level silently (takes effect on next reconnect).
+                    val hint = AivpnJni.getAdaptiveLevelHint()
+                    if (hint > 0 && hint != adaptiveLevel()) {
+                        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                            .edit().putInt("adaptive_level", hint).apply()
+                    }
                 }
             }
             try {
+                // Load or generate the device private key for JIT Device Enrollment.
+                val deviceKey: ByteArray = SecureStorage.loadDeviceKey(this@AivpnService)
+                    ?: ByteArray(32).also { bytes ->
+                        java.security.SecureRandom().nextBytes(bytes)
+                        SecureStorage.saveDeviceKey(this@AivpnService, bytes)
+                    }
                 val error = withContext(Dispatchers.IO) {
-                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, isAdaptiveEnabled())
+                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, adaptiveLevel(), deviceKey)
                 }
                 if (error.isNotEmpty()) throw RuntimeException(error)
             } finally {
@@ -484,9 +496,11 @@ class AivpnService : VpnService() {
         }
     }
 
-    private fun isAdaptiveEnabled(): Boolean =
+    fun adaptiveLevel(): Int =
         getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
-            .getBoolean("adaptive_enabled", false)
+            .getInt("adaptive_level", 0)
+
+    private fun isAdaptiveEnabled(): Boolean = adaptiveLevel() > 0
 
     private fun isTransportChange(prev: NetworkCapabilities, next: NetworkCapabilities): Boolean {
         val prevWifi     = prev.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
@@ -577,6 +591,8 @@ class AivpnService : VpnService() {
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
         // IPv6 is intentionally disabled in this client.
+        // allowBypass() is intentionally NOT called — default VpnService.Builder behaviour
+        // prevents any app from bypassing the VPN tunnel.
         val builder = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, tunPrefixLen)

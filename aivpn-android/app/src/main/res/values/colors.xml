@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="background">#FF121218</color>
-    <color name="surface">#FF1E1E2A</color>
-    <color name="accent">#FF6C5CE7</color>
+    <color name="background">#FF160F2F</color>
+    <color name="surface">#FF211060</color>
+    <color name="accent">#FF7B61FF</color>
+    <color name="accent_lemon">#FFE8FF6B</color>
     <color name="disconnect">#FFE74C3C</color>
     <color name="text_primary">#FFFFFFFF</color>
     <color name="text_secondary">#FFB0B0BF</color>

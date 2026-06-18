@@ -12,7 +12,9 @@ struct HelperRequest: Codable {
     let service: String?
     let mtlsCertPath: String?
     let excludeRoutes: String?
-    let adaptiveMode: Bool?
+    let adaptiveLevel: Int?
+    let dnsProxy: String?
+    let killSwitch: Bool?
 }
 
 struct HelperResponse: Codable {
@@ -71,6 +73,9 @@ class VPNManager: ObservableObject {
     @Published var lastError: String?
     @Published var bytesSent: Int64 = 0
     @Published var bytesReceived: Int64 = 0
+    @Published var qualityScore: Int = 0
+    @Published var serverAdaptiveLevel: Int = 0
+    @Published var devicePublicKey: String = ""
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
@@ -119,15 +124,24 @@ class VPNManager: ObservableObject {
             savedKey = keyValue
         }
 
-        // Check helper availability after a short delay
+        // Check helper availability and load device key after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.checkHelperAvailable()
+            self?.loadDeviceKey()
         }
     }
 
     private func helperClientBinaryPath() -> String? {
         let bundledBinary = Bundle.main.bundlePath + "/Contents/Resources/aivpn-client"
         return FileManager.default.isExecutableFile(atPath: bundledBinary) ? bundledBinary : nil
+    }
+
+    func loadDeviceKey() {
+        runBundledClientCommand(["--show-device-key"]) { [weak self] success, output in
+            if success && !output.isEmpty {
+                self?.devicePublicKey = output
+            }
+        }
     }
 
     private func runBundledClientCommand(_ args: [String], completion: ((Bool, String) -> Void)? = nil) {
@@ -344,7 +358,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
             if let response = response, response.status == "ok" {
@@ -367,7 +381,7 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveMode: Bool = false) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil, killSwitch: Bool = false) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -397,7 +411,9 @@ class VPNManager: ObservableObject {
             service: nil,
             mtlsCertPath: mtlsCertPath,
             excludeRoutes: excludeRoutes,
-            adaptiveMode: adaptiveMode
+            adaptiveLevel: adaptiveLevel > 0 ? adaptiveLevel : nil,
+            dnsProxy: dnsProxy.flatMap { $0.isEmpty ? nil : $0 },
+            killSwitch: killSwitch ? true : nil
         )
 
         sendToHelper(request) { [weak self] response in
@@ -555,7 +571,7 @@ class VPNManager: ObservableObject {
             return
         }
 
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil)
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil)
         let disconnectGen = connectGeneration
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
@@ -645,7 +661,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
             guard response.status == "ok" else { return }
@@ -777,28 +793,28 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveMode: nil),                     timeoutSeconds: 1.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,
                   response.status == "ok" else {
                 return
             }
             
-            // Response message contains "sent:X,received:Y"
+            // Response message contains "sent:X,received:Y,quality:Z"
             let parts = response.message.components(separatedBy: ",")
             for part in parts {
                 let kv = part.components(separatedBy: ":")
                 if kv.count == 2 {
-                    if let value = Int64(kv[1]) {
-                        if kv[0] == "sent" {
-                            DispatchQueue.main.async {
-                                self.bytesSent = value
-                            }
-                        } else if kv[0] == "received" {
-                            DispatchQueue.main.async {
-                                self.bytesReceived = value
-                            }
-                        }
+                    let key = kv[0]
+                    let valStr = kv[1]
+                    if key == "sent", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesSent = value }
+                    } else if key == "received", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesReceived = value }
+                    } else if key == "quality", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.qualityScore = value }
+                    } else if key == "adaptive", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.serverAdaptiveLevel = value }
                     }
                 }
             }

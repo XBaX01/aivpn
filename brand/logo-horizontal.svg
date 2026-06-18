@@ -1,0 +1,26 @@
+<svg width="1200" height="500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg-h" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1A0D3D"/>
+      <stop offset="100%" stop-color="#0D0820"/>
+    </linearGradient>
+    <filter id="g-o"><feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="g-m"><feGaussianBlur stdDeviation="9" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="1200" height="500" fill="url(#bg-h)"/>
+
+  <!-- Mark centered at 250,250 -->
+  <circle cx="250" cy="250" r="190" fill="none" stroke="#E8FF6B" stroke-width="2" opacity="0.65" filter="url(#g-o)"/>
+  <circle cx="250" cy="250" r="133" fill="none" stroke="#7B61FF" stroke-width="5" opacity="0.9" filter="url(#g-m)"/>
+  <circle cx="250" cy="250" r="76"  fill="none" stroke="#9B85FF" stroke-width="3.5" opacity="0.8"/>
+  <circle cx="250" cy="250" r="16"  fill="#7B61FF" opacity="0.5" filter="url(#g-m)"/>
+  <circle cx="250" cy="250" r="9"   fill="#FFFFFF" opacity="0.95"/>
+
+  <!-- Wordmark -->
+  <text x="530" y="290" font-family="'Arial Black','Helvetica Neue',sans-serif"
+        font-size="168" font-weight="900" fill="white" letter-spacing="-3" text-anchor="start">AIVPN</text>
+  <text x="534" y="338" font-family="'Arial','Helvetica Neue',sans-serif"
+        font-size="19" font-weight="400" fill="#9B85FF" letter-spacing="5.5" text-anchor="start">ADAPTIVE INTELLIGENCE VPN</text>
+</svg>

@@ -82,6 +82,10 @@ pub struct ClientArgs {
     #[arg(long, default_value_t = false)]
     pub no_fallback: bool,
 
+    /// Print this device's X25519 public key (base64) and exit. Used by GUI clients.
+    #[arg(long, default_value_t = false)]
+    pub show_device_key: bool,
+
     /// Run as SOCKS5 proxy on this address instead of a TUN device (no root required).
     /// Example: --proxy-listen 127.0.0.1:1080
     #[arg(long, value_name = "HOST:PORT")]
@@ -120,6 +124,20 @@ pub struct ClientArgs {
     /// Enable adaptive mode — automatically adjusts MTU and keepalive on packet loss.
     #[arg(long, default_value_t = false)]
     pub adaptive: bool,
+
+    /// Adaptive mode level: 0=Off, 1=Light (6s), 2=Aggressive (4s), 3=Satellite (15s).
+    /// Overrides --adaptive when set. Passed by GUI clients.
+    #[arg(long, value_name = "N")]
+    pub adaptive_level: Option<u8>,
+
+    /// Start a local DNS proxy on this address to prevent DNS leaks (e.g. 127.0.0.1:5300).
+    /// Point /etc/resolv.conf at this address after connecting.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub dns_proxy: Option<String>,
+
+    /// Upstream DNS resolver used by --dns-proxy (default: 1.1.1.1:53).
+    #[arg(long, value_name = "HOST:PORT", default_value = "1.1.1.1:53")]
+    pub dns_upstream: String,
 
     #[command(subcommand)]
     pub command: Option<ClientCommand>,
@@ -245,6 +263,20 @@ async fn main() {
     // Parse arguments
     let args = ClientArgs::parse();
 
+    // Device key query — must run before anything else (no root, no network needed)
+    if args.show_device_key {
+        match aivpn_client::client::device_public_key_b64() {
+            Some(key) => {
+                println!("{}", key);
+            }
+            None => {
+                error!("Failed to load or generate device key");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Handle subcommands
     if let Some(command) = args.command {
         match command {
@@ -304,23 +336,31 @@ async fn main() {
                 match action {
                     RecordAction::Start { service } => {
                         aivpn_client::record_cmd::handle_recording_status(true, Some(&service));
-                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                        socket
-                            .send_to(
-                                format!("record_start:{}", service).as_bytes(),
+                        match std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| {
+                            s.send_to(
+                                format!("record_start:{service}").as_bytes(),
                                 "127.0.0.1:44301",
                             )
-                            .unwrap();
-                        println!("Recording start requested for '{}'.", service);
-                        println!("Run 'aivpn-client record status' to inspect progress.");
+                            .map(|_| s)
+                        }) {
+                            Ok(_) => {
+                                println!("Recording start requested for '{service}'.");
+                                println!("Run 'aivpn-client record status' to inspect progress.");
+                            }
+                            Err(e) => eprintln!("Failed to send record command: {e}"),
+                        }
                     }
                     RecordAction::Stop => {
                         let prior = aivpn_client::record_cmd::read_local_status();
                         aivpn_client::record_cmd::mark_recording_stop_requested(
                             prior.as_ref().and_then(|status| status.service.as_deref()),
                         );
-                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                        socket.send_to(b"record_stop", "127.0.0.1:44301").unwrap();
+                        match std::net::UdpSocket::bind("127.0.0.1:0")
+                            .and_then(|s| s.send_to(b"record_stop", "127.0.0.1:44301").map(|_| s))
+                        {
+                            Ok(_) => {}
+                            Err(e) => eprintln!("Failed to send record command: {e}"),
+                        }
                         println!("Recording stop requested.");
                         println!("Run 'aivpn-client record status' to inspect progress.");
                     }
@@ -525,17 +565,23 @@ async fn main() {
         info!("Server pool active: {} node(s)", pool.node_count());
     }
 
+    // Resolve effective adaptive flag: --adaptive-level N overrides bool --adaptive.
+    let adaptive_on = args
+        .adaptive_level
+        .unwrap_or(if args.adaptive { 1 } else { 0 })
+        > 0;
+
     // Adaptive mode monitor
     let adaptive_monitor = AdaptiveMonitor::new(AdaptiveConfig {
-        enabled: args.adaptive,
+        enabled: adaptive_on,
         ..AdaptiveConfig::default()
     });
-    if args.adaptive {
+    if adaptive_on {
         info!("Adaptive mode enabled (auto MTU/keepalive tuning)");
     }
     // Lower initial MTU for restrictive mobile networks (MTS, Megafon) when adaptive is on.
     // The AdaptiveMonitor will step it down further if packet loss is detected.
-    let network_config = if args.adaptive {
+    let network_config = if adaptive_on {
         aivpn_common::network_config::ClientNetworkConfig {
             mtu: network_config.mtu.min(1200),
             ..network_config
@@ -756,6 +802,18 @@ async fn main() {
             proxy_listen,
             mtls_cert: mtls_cert.clone(),
         };
+
+        // Start DNS proxy before connecting so it is ready as soon as the tunnel is up.
+        let _dns_proxy_handle = args.dns_proxy.as_deref().and_then(|bind_str| {
+            let bind_addr = bind_str.parse::<std::net::SocketAddr>().ok()?;
+            let upstream_addr = args.dns_upstream.parse::<std::net::SocketAddr>().ok()?;
+            Some(aivpn_client::dns_proxy::spawn_dns_proxy(
+                aivpn_client::dns_proxy::DnsProxyConfig {
+                    listen_addr: bind_addr,
+                    upstream_addr,
+                },
+            ))
+        });
 
         match AivpnClient::new(config) {
             Ok(mut client) => {

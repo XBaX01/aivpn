@@ -78,6 +78,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         // Keys
         (Lang::En, "keys") => "Connection Keys",
         (Lang::Ru, "keys") => "Ключи подключения",
+        (Lang::En, "device_key") => "Device Public Key",
+        (Lang::Ru, "device_key") => "Публичный ключ устройства",
+        (Lang::En, "copy") => "Copy",
+        (Lang::Ru, "copy") => "Копировать",
         (Lang::En, "add_key") => "Add Key",
         (Lang::Ru, "add_key") => "Добавить ключ",
         (Lang::En, "key_name") => "Name",
@@ -156,6 +160,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         // Kill-switch
         (Lang::En, "kill_switch") => "Kill Switch (block traffic if VPN drops)",
         (Lang::Ru, "kill_switch") => "Kill Switch (блок трафика при разрыве VPN)",
+
+        // DNS proxy
+        (Lang::En, "dns_proxy") => "DNS Proxy (leave empty to disable)",
+        (Lang::Ru, "dns_proxy") => "DNS-прокси (пусто — отключено)",
 
         // Adaptive / diagnostics
         (Lang::En, "adaptive_mode") => "Adaptive Mode",

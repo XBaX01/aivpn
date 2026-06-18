@@ -36,7 +36,9 @@ struct HelperRequest: Codable {
     let service: String?     // service name (for record_start)
     let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
     let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
-    let adaptiveMode: Bool?   // true = lower MTU (1200) for restrictive mobile networks
+    let adaptiveLevel: Int?   // 0=Off, 1=Light, 2=Aggressive, 3=Satellite; nil treated as 0
+    let dnsProxy: String?      // local bind address for DNS proxy (e.g. "127.0.0.1:5300")
+    let killSwitch: Bool?      // block all non-VPN traffic when true
 }
 
 struct HelperResponse: Codable {
@@ -155,7 +157,7 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveMode: Bool = false) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil, killSwitch: Bool = false) -> HelperResponse {
     killExistingClient()
 
     // Resolve the requested path; fall back to default
@@ -208,8 +210,25 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPat
         args.append("--mtls-cert")
         args.append(certPath)
     }
-    if adaptiveMode {
-        args.append("--adaptive")
+    if adaptiveLevel > 0 {
+        args.append("--adaptive-level")
+        args.append("\(adaptiveLevel)")
+    }
+    if killSwitch {
+        args.append("--kill-switch")
+    }
+    if let proxy = dnsProxy, !proxy.isEmpty {
+        // Validate HOST:PORT — character whitelist + port range 1–65535.
+        let proxyCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:.[]-")
+        guard proxy.unicodeScalars.allSatisfy({ proxyCharset.contains($0) }),
+              let colonIdx = proxy.lastIndex(of: ":"),
+              let port = Int(proxy[proxy.index(after: colonIdx)...]),
+              (1...65535).contains(port) else {
+            log("ERROR: invalid dnsProxy '\(proxy)' — rejected")
+            return HelperResponse(status: "error", message: "Invalid dns-proxy value")
+        }
+        args.append("--dns-proxy")
+        args.append(proxy)
     }
     if let routes = excludeRoutes {
         // Validate: each token must look like a CIDR (digits, dots, colons, slash).
@@ -424,6 +443,15 @@ func getLog() -> HelperResponse {
                           log: recent)
 }
 
+private func readQualityScore() -> String {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/var/run/aivpn/quality.json")),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let q = json["quality"] as? Int else { return "" }
+    var result = ",quality:\(q)"
+    if let a = json["adaptive"] as? Int { result += ",adaptive:\(a)" }
+    return result
+}
+
 /// Get traffic statistics
 func getTrafficStats() -> HelperResponse {
     // Try to read stats file first
@@ -432,7 +460,7 @@ func getTrafficStats() -> HelperResponse {
         // Format: "sent:X,received:Y"
         let trimmed = statsContent.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.contains("sent:") && trimmed.contains("received:") {
-            return HelperResponse(status: "ok", message: trimmed)
+            return HelperResponse(status: "ok", message: trimmed + readQualityScore())
         }
     }
     
@@ -476,7 +504,7 @@ func getTrafficStats() -> HelperResponse {
         try? trimmed.write(toFile: LOG_PATH, atomically: true, encoding: .utf8)
     }
     
-    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)")
+    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)\(readQualityScore())")
 }
 
 func getRecordingInfo() -> HelperResponse {
@@ -611,7 +639,9 @@ func handleConnection(_ clientFD: Int32) {
                                binaryPath: request.binaryPath,
                                mtlsCertPath: request.mtlsCertPath,
                                excludeRoutes: request.excludeRoutes,
-                               adaptiveMode: request.adaptiveMode ?? false)
+                               adaptiveLevel: request.adaptiveLevel ?? 0,
+                               dnsProxy: request.dnsProxy,
+                               killSwitch: request.killSwitch ?? false)
 
     case "disconnect":
         response = stopClient()
@@ -637,6 +667,9 @@ func handleConnection(_ clientFD: Int32) {
 
     case "record_stop":
         response = runClientCommand(args: ["record", "stop"], binaryPath: request.binaryPath)
+
+    case "device_key":
+        response = runClientCommand(args: ["--show-device-key"], binaryPath: request.binaryPath)
 
     case "record_info":
         response = getRecordingInfo()

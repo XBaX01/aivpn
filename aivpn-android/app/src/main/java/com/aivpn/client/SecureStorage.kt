@@ -114,6 +114,26 @@ object SecureStorage {
         return loadString(context, "active_profile_id")
     }
 
+    // ──────────── Device binding key (JIT enrollment) ────────────
+
+    private const val KEY_DEVICE_PRIVKEY = "device_privkey_v1"
+
+    fun saveDeviceKey(context: Context, keyBytes: ByteArray) {
+        val b64 = android.util.Base64.encodeToString(keyBytes, android.util.Base64.DEFAULT)
+        saveString(context, KEY_DEVICE_PRIVKEY, b64)
+    }
+
+    fun loadDeviceKey(context: Context): ByteArray? {
+        val b64 = loadString(context, KEY_DEVICE_PRIVKEY)
+        if (b64.isEmpty()) return null
+        return try {
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            if (bytes.size == 32) bytes else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     // ──────────── Split tunneling ────────────
 
     private const val KEY_ALLOWED_APPS = "split_tunnel_allowed_apps"

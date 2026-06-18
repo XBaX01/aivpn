@@ -17,7 +17,7 @@ WORKDIR /app
 
 # Copy prebuilt Linux server binary from releases/
 COPY releases/aivpn-server-linux-x86_64 /usr/local/bin/aivpn-server
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/aivpn-server
 
 # Create config directory, mask directory and TUN device node

@@ -48,13 +48,19 @@
 
     <!-- Адаптивный режим / диагностика -->
     <string name="adaptive_mode">Адаптивный режим</string>
-    <string name="adaptive_mode_desc">Автоматически адаптирует MTU и keepalive при нестабильном соединении</string>
+    <string name="adaptive_mode_desc">Автоматически адаптирует keepalive и FEC при нестабильном соединении</string>
     <string name="adaptive_enabled">Адаптивный: ВКЛ</string>
     <string name="adaptive_disabled">Адаптивный: ВЫКЛ</string>
+    <string name="adaptive_off">Выкл</string>
+    <string name="adaptive_light">Лёгкий (keepalive 6с)</string>
+    <string name="adaptive_aggressive">Агрессивный (keepalive 4с)</string>
+    <string name="adaptive_satellite">Спутник (keepalive 15с)</string>
     <string name="diagnostics">Диагностика</string>
     <string name="run_benchmark">Запустить тест</string>
     <string name="bench_running">Тест запущен…</string>
     <string name="bench_result">P50: %1$dмс  P95: %2$dмс  Потери: %3$.1f%%  Качество: %4$d/100</string>
+    <string name="quality_score_live">Качество (live): %1$d/100</string>
+    <string name="quality_score_no_data">Качество: нет данных (ожидание keepalive)</string>
 
     <!-- Раздельный туннель -->
     <string name="btn_split_tunnel">Раздельный туннель</string>
@@ -84,4 +90,12 @@
     <string name="export_logs_collecting">Сбор логов…</string>
     <string name="export_logs_empty">Логи не собраны</string>
     <string name="export_logs_error">Не удалось собрать логи</string>
+    <string name="recording">Запись трафика</string>
+    <string name="recording_service_hint">Имя сервиса (например: zoom, https)</string>
+    <string name="recording_start">Начать запись</string>
+    <string name="recording_stop">Остановить запись</string>
+    <string name="recording_started">Запись начата</string>
+    <string name="recording_stopped">Запись остановлена</string>
+    <string name="recording_no_session">Нет активного сеанса</string>
+    <string name="os_kill_switch">Настройки Kill Switch ОС</string>
 </resources>

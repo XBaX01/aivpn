@@ -27,6 +27,8 @@ pub enum InnerType {
     Control = 0x0002,
     Fragment = 0x0003,
     Ack = 0x0004,
+    /// FEC repair packet — XOR of N preceding data packets
+    FecRepair = 0x0005,
 }
 
 impl InnerType {
@@ -36,6 +38,7 @@ impl InnerType {
             0x0002 => Some(Self::Control),
             0x0003 => Some(Self::Fragment),
             0x0004 => Some(Self::Ack),
+            0x0005 => Some(Self::FecRepair),
             _ => None,
         }
     }
@@ -71,6 +74,14 @@ pub enum ControlSubtype {
     ClientCert = 0x15,
     /// Server notification that a ClientCert was rejected (0x16)
     CertRejected = 0x16,
+    /// Device enrollment — client proves static X25519 key ownership via DH (0x17)
+    DeviceEnrollment = 0x17,
+    /// Server echoes keepalive timestamp for RTT measurement (0x18)
+    KeepaliveAck = 0x18,
+    /// Quality metrics report (0x19)
+    QualityReport = 0x19,
+    /// Server hints client to change adaptive mode level (0x1A)
+    AdaptiveHint = 0x1A,
 }
 
 impl ControlSubtype {
@@ -98,6 +109,10 @@ impl ControlSubtype {
             0x14 => Some(Self::ChainForward),
             0x15 => Some(Self::ClientCert),
             0x16 => Some(Self::CertRejected),
+            0x17 => Some(Self::DeviceEnrollment),
+            0x18 => Some(Self::KeepaliveAck),
+            0x19 => Some(Self::QualityReport),
+            0x1A => Some(Self::AdaptiveHint),
             _ => None,
         }
     }
@@ -257,7 +272,9 @@ pub enum ControlPayload {
         #[serde(with = "serde_bytes")]
         signature: [u8; 64],
     },
-    Keepalive,
+    Keepalive {
+        send_ts: u64,
+    },
     TelemetryRequest {
         metric_flags: u8,
     },
@@ -334,6 +351,34 @@ pub enum ControlPayload {
     },
     /// Server rejection of a ClientCert — client should re-provision its certificate.
     CertRejected {},
+    /// Device enrollment — client proves ownership of its static X25519 keypair.
+    /// Sent by client after ServerHello using ratcheted session keys.
+    /// `dh_proof` = X25519(static_priv, server_static_pub) — proves private key possession.
+    DeviceEnrollment {
+        static_pub: [u8; 32],
+        dh_proof: [u8; 32],
+    },
+    /// Server echoes client's keepalive timestamp for RTT measurement.
+    KeepaliveAck {
+        /// Echo of the timestamp sent by client in the keepalive
+        echo_ts: u64,
+    },
+    /// Quality metrics report sent by client or server.
+    QualityReport {
+        /// 0–100 composite quality score
+        quality: u8,
+        /// Round-trip time (EWMA) in milliseconds
+        rtt_ms: u16,
+        /// Packet loss in parts-per-million
+        loss_ppm: u32,
+        /// Jitter (EWMA) in milliseconds
+        jitter_ms: u16,
+    },
+    /// Server instructs client to switch adaptive mode level.
+    AdaptiveHint {
+        /// 0=Off, 1=Light, 2=Aggressive, 3=Satellite
+        level: u8,
+    },
 }
 
 impl ControlPayload {
@@ -356,8 +401,9 @@ impl ControlPayload {
                 buf.extend_from_slice(mask_data);
                 buf.extend_from_slice(signature);
             }
-            Self::Keepalive => {
+            Self::Keepalive { send_ts } => {
                 buf.push(ControlSubtype::Keepalive as u8);
+                buf.extend_from_slice(&send_ts.to_le_bytes());
             }
             Self::TelemetryRequest { metric_flags } => {
                 buf.push(ControlSubtype::TelemetryRequest as u8);
@@ -492,6 +538,34 @@ impl ControlPayload {
             Self::CertRejected {} => {
                 buf.push(ControlSubtype::CertRejected as u8);
             }
+            Self::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
+                buf.push(ControlSubtype::DeviceEnrollment as u8);
+                buf.extend_from_slice(static_pub);
+                buf.extend_from_slice(dh_proof);
+            }
+            Self::KeepaliveAck { echo_ts } => {
+                buf.push(ControlSubtype::KeepaliveAck as u8);
+                buf.extend_from_slice(&echo_ts.to_le_bytes());
+            }
+            Self::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
+                buf.push(ControlSubtype::QualityReport as u8);
+                buf.push(*quality);
+                buf.extend_from_slice(&rtt_ms.to_le_bytes());
+                buf.extend_from_slice(&loss_ppm.to_le_bytes());
+                buf.extend_from_slice(&jitter_ms.to_le_bytes());
+            }
+            Self::AdaptiveHint { level } => {
+                buf.push(ControlSubtype::AdaptiveHint as u8);
+                buf.push(*level);
+            }
         }
 
         Ok(buf)
@@ -534,7 +608,14 @@ impl ControlPayload {
                     signature,
                 })
             }
-            ControlSubtype::Keepalive => Ok(Self::Keepalive),
+            ControlSubtype::Keepalive => {
+                let send_ts = if data.len() >= 9 {
+                    u64::from_le_bytes(data[1..9].try_into().unwrap())
+                } else {
+                    0
+                };
+                Ok(Self::Keepalive { send_ts })
+            }
             ControlSubtype::TelemetryRequest => {
                 if data.len() < 2 {
                     return Err(Error::InvalidPacket("TelemetryRequest too short"));
@@ -763,6 +844,43 @@ impl ControlPayload {
                 })
             }
             ControlSubtype::CertRejected => Ok(Self::CertRejected {}),
+            ControlSubtype::DeviceEnrollment => {
+                if data.len() < 65 {
+                    return Err(Error::InvalidPacket("DeviceEnrollment too short"));
+                }
+                let mut static_pub = [0u8; 32];
+                let mut dh_proof = [0u8; 32];
+                static_pub.copy_from_slice(&data[1..33]);
+                dh_proof.copy_from_slice(&data[33..65]);
+                Ok(Self::DeviceEnrollment {
+                    static_pub,
+                    dh_proof,
+                })
+            }
+            ControlSubtype::KeepaliveAck => {
+                if data.len() < 9 {
+                    return Err(Error::InvalidPacket("KeepaliveAck too short"));
+                }
+                let echo_ts = u64::from_le_bytes(data[1..9].try_into().unwrap());
+                Ok(Self::KeepaliveAck { echo_ts })
+            }
+            ControlSubtype::QualityReport => {
+                if data.len() < 10 {
+                    return Err(Error::InvalidPacket("QualityReport too short"));
+                }
+                Ok(Self::QualityReport {
+                    quality: data[1],
+                    rtt_ms: u16::from_le_bytes([data[2], data[3]]),
+                    loss_ppm: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+                    jitter_ms: u16::from_le_bytes([data[8], data[9]]),
+                })
+            }
+            ControlSubtype::AdaptiveHint => {
+                if data.len() < 2 {
+                    return Err(Error::InvalidPacket("AdaptiveHint too short"));
+                }
+                Ok(Self::AdaptiveHint { level: data[1] })
+            }
         }
     }
 }

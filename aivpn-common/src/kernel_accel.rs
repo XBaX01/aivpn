@@ -109,8 +109,8 @@ impl KernelAccel {
     }
 
     pub fn api_version(&self) -> io::Result<u32> {
-        let mut v: u32 = 0;
-        ioctl_ref(self.fd(), IOC_GET_VERSION, &mut v)?;
+        let v: u32 = 0;
+        ioctl_ref(self.fd(), IOC_GET_VERSION, &v)?;
         Ok(v)
     }
 
@@ -234,10 +234,7 @@ pub fn xdp_attach(ifname: &str, port: u16, window_ms: u64) -> io::Result<()> {
         ])
         .status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "ip link xdp attach failed",
-        ));
+        return Err(io::Error::other("ip link xdp attach failed"));
     }
 
     // Update BPF map: key 0 = VPN port, key 1 = acceptance window (ms)

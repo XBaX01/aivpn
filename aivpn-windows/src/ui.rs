@@ -51,14 +51,21 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
 
     ui.add_space(4.0);
 
+    // Device public key
+    draw_device_key_section(ui, app);
+
+    ui.add_space(4.0);
+
     // Adaptive mode toggle
     draw_adaptive_section(ui, app);
 
     ui.add_space(4.0);
 
-    // Kill-switch toggle (only when disconnected)
+    // Kill-switch toggle + DNS proxy (only when disconnected)
     if !app.vpn.is_connected() {
         draw_kill_switch(ui, app);
+        ui.add_space(4.0);
+        draw_dns_proxy(ui, app);
         ui.add_space(4.0);
     }
 
@@ -186,6 +193,33 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                         .color(Color32::WHITE)
                         .strong(),
                 );
+
+                if stats.quality_score > 0 {
+                    ui.add_space(32.0);
+                    let q = stats.quality_score;
+                    let q_color = if q >= 80 {
+                        GREEN
+                    } else if q >= 50 {
+                        Color32::YELLOW
+                    } else {
+                        Color32::RED
+                    };
+                    ui.label(
+                        RichText::new(format!("Q: {}/100", q))
+                            .size(13.0)
+                            .color(q_color),
+                    );
+                }
+                if stats.server_adaptive_level > 0 {
+                    ui.add_space(8.0);
+                    let label = match stats.server_adaptive_level {
+                        1 => "A: Light",
+                        2 => "A: Aggressive",
+                        3 => "A: Satellite",
+                        _ => "A: Off",
+                    };
+                    ui.label(RichText::new(label).size(13.0).color(Color32::LIGHT_BLUE));
+                }
             });
         });
 }
@@ -411,6 +445,47 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
         });
 }
 
+fn draw_device_key_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    ui.label(
+        RichText::new(t(app.lang, "device_key"))
+            .size(13.0)
+            .color(DIM),
+    );
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| match &app.device_public_key {
+                Some(key) => {
+                    let short = if key.len() > 20 {
+                        format!("{}…{}", &key[..8], &key[key.len() - 8..])
+                    } else {
+                        key.clone()
+                    };
+                    ui.label(
+                        RichText::new(&short)
+                            .size(11.0)
+                            .color(Color32::LIGHT_GRAY)
+                            .monospace(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let full = key.clone();
+                        if ui
+                            .button(RichText::new(t(app.lang, "copy")).size(11.0))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(full);
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new("—").size(11.0).color(DIM));
+                }
+            });
+        });
+}
+
 enum KeyAction {
     Select(usize),
     Delete(usize),
@@ -598,6 +673,26 @@ fn draw_kill_switch(ui: &mut egui::Ui, app: &mut AivpnApp) {
         });
 }
 
+fn draw_dns_proxy(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(t(app.lang, "dns_proxy"))
+                    .size(11.0)
+                    .color(DIM),
+            );
+            ui.add_space(2.0);
+            egui::TextEdit::singleline(&mut app.dns_proxy)
+                .hint_text("127.0.0.1:5300")
+                .desired_width(ui.available_width())
+                .font(egui::TextStyle::Monospace)
+                .show(ui);
+        });
+}
+
 fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
     let is_connected = app.vpn.is_connected();
     let is_busy = app.vpn.is_busy();
@@ -638,6 +733,12 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             mtls_cert_path.as_deref(),
                             &exclude_routes,
                             kill_switch,
+                            app.adaptive_level,
+                            if app.dns_proxy.is_empty() {
+                                None
+                            } else {
+                                Some(app.dns_proxy.as_str())
+                            },
                         ) {
                             app.set_error(e);
                         }
@@ -782,13 +883,20 @@ fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         .color(DIM),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if app.adaptive_enabled {
-                        RichText::new("ON").size(12.0).color(GREEN).strong()
-                    } else {
-                        RichText::new("OFF").size(12.0).color(DIM)
-                    };
-                    if ui.button(label).clicked() {
-                        app.adaptive_enabled = !app.adaptive_enabled;
+                    let levels: &[(&str, u8)] =
+                        &[("Off", 0), ("Light", 1), ("Aggr.", 2), ("Sat.", 3)];
+                    for (label, lvl) in levels.iter().rev() {
+                        let selected = app.adaptive_level == *lvl;
+                        let btn = egui::Button::new(
+                            RichText::new(*label).size(11.0).color(if selected {
+                                GREEN
+                            } else {
+                                DIM
+                            }),
+                        );
+                        if ui.add(btn).clicked() {
+                            app.adaptive_level = *lvl;
+                        }
                     }
                     if app.vpn.is_connected() {
                         ui.add_space(8.0);

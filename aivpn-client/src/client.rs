@@ -28,13 +28,14 @@ use aivpn_common::error::{Error, Result};
 use aivpn_common::mask::{BootstrapDescriptor, MaskProfile};
 use aivpn_common::network_config::{ClientNetworkConfig, DEFAULT_KEEPALIVE_SECS};
 use aivpn_common::protocol::{ControlPayload, InnerType, MAX_PACKET_SIZE};
+use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 use crate::bootstrap_cache;
-use crate::mimicry::MimicryEngine;
 use crate::tunnel::{Tunnel, TunnelConfig};
 #[cfg(target_os = "linux")]
 use aivpn_common::kernel_accel::{xdp_attach, xdp_default_iface, xdp_detach, KernelAccel};
+use aivpn_common::mimicry::MimicryEngine;
 #[cfg(target_os = "linux")]
 use libc;
 
@@ -126,6 +127,14 @@ pub struct AivpnClient {
     /// Local UDP port used on last successful connect — reused on reconnect to
     /// preserve CGNAT inbound mapping (port-preserving carriers like MTS).
     last_local_port: Option<u16>,
+    /// Static X25519 keypair — persisted across reconnects for device binding (0.9.0+).
+    static_keypair: Option<KeyPair>,
+    /// Connection quality tracker — RTT, jitter, loss → 0–100 score (0.9.0+).
+    quality_tracker: QualityTracker,
+    /// Current adaptive mode level — adjusted from quality score (0.9.0+).
+    adaptive_level: AdaptiveLevel,
+    /// Epoch-ms timestamp of last outbound keepalive — shared with upload task for RTT.
+    keepalive_sent_ms: Arc<AtomicU64>,
     /// Kernel-module accelerator (Linux only, auto-detected via /dev/aivpn).
     #[cfg(target_os = "linux")]
     kernel_accel: Option<Arc<KernelAccel>>,
@@ -142,6 +151,8 @@ impl AivpnClient {
         let recv_mdh_len = packet_mdh_len_for_mask(&config.initial_mask);
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
+
+        let static_keypair = load_or_generate_static_keypair();
 
         Ok(Self {
             config,
@@ -176,6 +187,10 @@ impl AivpnClient {
             active_recording_session: None,
             keepalive_interval: Duration::from_secs(DEFAULT_KEEPALIVE_SECS as u64),
             last_local_port: None,
+            static_keypair,
+            quality_tracker: QualityTracker::new(),
+            adaptive_level: AdaptiveLevel::Off,
+            keepalive_sent_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -639,6 +654,8 @@ impl AivpnClient {
             upload_bytes_sent,
             upload_pending_mask,
             self.keepalive_interval,
+            self.keepalive_sent_ms.clone(),
+            self.adaptive_level.fec_n(),
         ));
 
         // Main loop: download + shutdown + upload health
@@ -756,6 +773,8 @@ impl AivpnClient {
         bytes_sent: Arc<AtomicU64>,
         pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
         keepalive_interval: Duration,
+        keepalive_sent_ms: Arc<AtomicU64>,
+        fec_n: u8,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
@@ -763,6 +782,9 @@ impl AivpnClient {
             upload_state: Arc<Mutex<UploadCryptoState>>,
             bytes_sent: Arc<AtomicU64>,
             pending_mask: Arc<Mutex<Option<aivpn_common::mask::MaskProfile>>>,
+            keepalive_sent_ms: Arc<AtomicU64>,
+            fec_encoder: Option<aivpn_common::fec::FecEncoder>,
+            pending_fec: Option<Vec<u8>>,
         }
 
         impl MimicryEncryptor {
@@ -784,7 +806,28 @@ impl AivpnClient {
                     .engine
                     .build_packet(&inner, &keys, &mut state.counter, None)?;
                 self.engine.update_fsm();
+
+                // FEC: feed payload; if group complete, pre-encrypt repair datagram
+                if let Some(fec) = self.fec_encoder.as_mut() {
+                    if let Some(repair) = fec.feed(payload) {
+                        let repair_payload = repair.encode();
+                        let repair_inner =
+                            build_inner_packet(InnerType::FecRepair, state.seq, &repair_payload);
+                        state.seq = state.seq.wrapping_add(1);
+                        if let Ok(enc_repair) =
+                            self.engine
+                                .build_packet(&repair_inner, &keys, &mut state.counter, None)
+                        {
+                            self.pending_fec = Some(enc_repair);
+                        }
+                    }
+                }
+
                 Ok(pkt)
+            }
+
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.pending_fec.take()
             }
 
             fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
@@ -800,8 +843,14 @@ impl AivpnClient {
 
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
                 self.check_mask();
+                // Record send time for RTT measurement via KeepaliveAck.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                self.keepalive_sent_ms.store(now_ms, Ordering::Relaxed);
                 let mut state = self.upload_state.lock().unwrap_or_else(|e| e.into_inner());
-                let keepalive = ControlPayload::Keepalive.encode()?;
+                let keepalive = ControlPayload::Keepalive { send_ts: now_ms }.encode()?;
                 let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
                 state.seq = state.seq.wrapping_add(1);
                 let keys = state.keys.clone();
@@ -820,6 +869,13 @@ impl AivpnClient {
             upload_state,
             bytes_sent,
             pending_mask,
+            keepalive_sent_ms,
+            fec_encoder: if fec_n > 0 {
+                Some(aivpn_common::fec::FecEncoder::new(fec_n, 1500))
+            } else {
+                None
+            },
+            pending_fec: None,
         };
         let config = UploadConfig {
             keepalive_interval,
@@ -1124,10 +1180,29 @@ impl AivpnClient {
                 // that delay updating the entry even after local-port reuse.
                 for _ in 0..4u8 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    let _ = self.send_control(&ControlPayload::Keepalive).await;
+                    let _ = self
+                        .send_control(&ControlPayload::Keepalive { send_ts: 0 })
+                        .await;
+                }
+
+                // Device enrollment: prove static key ownership to server.
+                // Sent after ratchet so it is protected by PFS session keys.
+                if let Some(ref skp) = self.static_keypair {
+                    match skp.compute_shared(&self.config.server_public_key) {
+                        Ok(dh_proof) => {
+                            let enrollment = ControlPayload::DeviceEnrollment {
+                                static_pub: skp.public_key_bytes(),
+                                dh_proof,
+                            };
+                            if let Err(e) = self.send_control(&enrollment).await {
+                                warn!("DeviceEnrollment send failed: {}", e);
+                            }
+                        }
+                        Err(e) => warn!("DeviceEnrollment DH failed: {}", e),
+                    }
                 }
             }
-            ControlPayload::Keepalive => {
+            ControlPayload::Keepalive { .. } => {
                 debug!("Keepalive from server");
             }
             ControlPayload::TimeSync { server_ts_ms } => {
@@ -1136,6 +1211,7 @@ impl AivpnClient {
             ControlPayload::Shutdown { reason } => {
                 info!("Server requested shutdown (reason: {})", reason);
                 self.disconnect().await;
+                return Err(Error::Session(format!("server shutdown: {}", reason)));
             }
             ControlPayload::RecordingAck { session_id, status } => {
                 if status == "started" {
@@ -1166,6 +1242,57 @@ impl AivpnClient {
             ControlPayload::CertRejected {} => {
                 warn!("mTLS: server rejected the certificate — re-provision your mTLS cert");
             }
+            ControlPayload::KeepaliveAck { echo_ts } => {
+                // Use echoed client timestamp for RTT when available (server ≥ 0.9.0),
+                // fall back to the stored send-time for older servers.
+                let sent_ms = if echo_ts > 0 {
+                    echo_ts
+                } else {
+                    self.keepalive_sent_ms.load(Ordering::Relaxed)
+                };
+                if sent_ms > 0 {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let rtt_us = now_ms.saturating_sub(sent_ms).saturating_mul(1000);
+                    self.quality_tracker.record_rtt(rtt_us);
+                    let score = self.quality_tracker.score();
+                    Self::write_quality_file(
+                        score,
+                        self.quality_tracker.rtt_ms(),
+                        self.quality_tracker.jitter_ms(),
+                        self.adaptive_level as u8,
+                    );
+                    let new_level = AdaptiveLevel::suggest(score);
+                    if new_level != self.adaptive_level {
+                        self.adaptive_level = new_level;
+                        self.keepalive_interval = Duration::from_secs(new_level.keepalive_secs());
+                        info!(
+                            "Adaptive level → {:?} (score={}), keepalive={}s",
+                            new_level,
+                            score,
+                            new_level.keepalive_secs()
+                        );
+                    }
+                    let _ = self
+                        .send_control(&ControlPayload::QualityReport {
+                            quality: score,
+                            rtt_ms: self.quality_tracker.rtt_ms(),
+                            loss_ppm: self.quality_tracker.loss_ppm(),
+                            jitter_ms: self.quality_tracker.jitter_ms(),
+                        })
+                        .await;
+                }
+            }
+            ControlPayload::AdaptiveHint { level } => {
+                let new_level = AdaptiveLevel::from_u8(level);
+                if new_level != self.adaptive_level {
+                    self.adaptive_level = new_level;
+                    self.keepalive_interval = Duration::from_secs(new_level.keepalive_secs());
+                    info!("Server adaptive hint → {:?}", new_level);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1184,7 +1311,7 @@ impl AivpnClient {
             .ok_or(Error::Session("No mimicry engine".into()))?;
 
         // Build keepalive control as init payload
-        let keepalive = ControlPayload::Keepalive;
+        let keepalive = ControlPayload::Keepalive { send_ts: 0 };
         let encoded = keepalive.encode()?;
         let seq_num = self.send_seq as u16;
         self.send_seq = self.send_seq.wrapping_add(1);
@@ -1212,9 +1339,9 @@ impl AivpnClient {
 
     async fn send_control(&mut self, payload: &ControlPayload) -> Result<()> {
         if let Some(tx) = &self.control_tx {
-            if let Err(e) = tx.send(payload.clone()).await {
-                error!("Failed to send control message to upload task: {}", e);
-            }
+            tx.send(payload.clone())
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
         } else {
             warn!("control_tx not initialized, dropping control message");
         }
@@ -1257,6 +1384,26 @@ impl AivpnClient {
     pub fn bytes_received(&self) -> u64 {
         self.bytes_received.load(Ordering::Relaxed)
     }
+
+    fn write_quality_file(score: u8, rtt_ms: u16, jitter_ms: u16, adaptive_level: u8) {
+        #[cfg(windows)]
+        let path = std::env::temp_dir().join("aivpn-quality.json");
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from("/var/run/aivpn/quality.json");
+        #[cfg(not(windows))]
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(
+            &path,
+            format!(
+                r#"{{"quality":{},"rtt_ms":{},"jitter_ms":{},"adaptive":{}}}"#,
+                score, rtt_ms, jitter_ms, adaptive_level
+            ),
+        ) {
+            debug!("quality file write failed: {e}");
+        }
+    }
 }
 
 impl Drop for AivpnClient {
@@ -1264,4 +1411,88 @@ impl Drop for AivpnClient {
         // Zeroize sensitive data
         self.session_keys = None;
     }
+}
+
+/// Load static X25519 keypair from `~/.config/aivpn/device.key` or generate and save a new one.
+/// Returns None when HOME is unset or on unrecoverable I/O errors — device binding is optional.
+fn load_or_generate_static_keypair() -> Option<KeyPair> {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = dirs_home()?; // skip persistence when HOME is unset
+    let dir = home.join(".config").join("aivpn");
+    let path = dir.join("device.key");
+
+    if path.exists() {
+        match fs::read(&path) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                return Some(KeyPair::from_private_key(arr));
+            }
+            Ok(_) => {
+                warn!("device.key has wrong size — regenerating");
+            }
+            Err(e) => {
+                warn!("Cannot read device.key: {}", e);
+                return None;
+            }
+        }
+    }
+
+    // Generate new keypair and persist atomically with correct permissions from the start.
+    let kp = KeyPair::generate();
+    let priv_bytes = kp.export_private_key();
+
+    if let Err(e) = fs::create_dir_all(&dir) {
+        warn!("Cannot create ~/.config/aivpn: {}", e);
+        return Some(kp); // proceed without persistence
+    }
+    // Tighten directory to owner-only (700) so siblings are not enumerable.
+    #[cfg(unix)]
+    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+
+    // Write to a temp sibling atomically, then rename.
+    let tmp_path = path.with_extension("tmp");
+    let write_result = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.write_all(&priv_bytes)?;
+            f.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        fs::write(&tmp_path, &priv_bytes)?;
+        fs::rename(&tmp_path, &path)
+    })();
+
+    match write_result {
+        Ok(()) => info!("New device keypair generated and saved to {:?}", path),
+        Err(e) => {
+            warn!("Cannot write device.key: {}", e);
+            let _ = fs::remove_file(&tmp_path);
+        }
+    }
+    Some(kp)
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    return std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Load or generate the static device keypair and return the base64-encoded public key.
+pub fn device_public_key_b64() -> Option<String> {
+    use base64::Engine;
+    let kp = load_or_generate_static_keypair()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(kp.public_key_bytes()))
 }

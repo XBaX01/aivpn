@@ -266,7 +266,8 @@ struct ContentView: View {
     @EnvironmentObject var loc: LocalizationManager
 
     @State private var fullTunnel: Bool = true
-    @AppStorage("adaptiveMode") private var adaptiveMode: Bool = false
+    @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
+    @AppStorage("killSwitch") private var killSwitch: Bool = false
     @State private var showDiagnostics: Bool = false
     @State private var benchRunning: Bool = false
     @State private var benchP50: Int = 0
@@ -452,9 +453,17 @@ struct ContentView: View {
             if !vpn.isConnected {
                 Toggle(loc.t("full_tunnel"), isOn: $fullTunnel)
                     .padding(.horizontal)
-                Toggle(loc.t("adaptive_mode"), isOn: $adaptiveMode)
+                Picker(loc.t("adaptive_mode"), selection: $adaptiveLevel) {
+                    Text(loc.t("adaptive_off")).tag(0)
+                    Text(loc.t("adaptive_light")).tag(1)
+                    Text(loc.t("adaptive_aggressive")).tag(2)
+                    Text(loc.t("adaptive_satellite")).tag(3)
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal)
+                .help(loc.t("adaptive_mode_help"))
+                Toggle(loc.t("kill_switch"), isOn: $killSwitch)
                     .padding(.horizontal)
-                    .help(loc.t("adaptive_mode_help"))
             }
             if vpn.isConnected {
                 Button {
@@ -520,7 +529,7 @@ struct ContentView: View {
                         vpn.disconnect()
                     } else {
                         guard let key = vpn.selectedKey else { return }
-                        vpn.connect(key: key, fullTunnel: fullTunnel, adaptiveMode: adaptiveMode)
+                        vpn.connect(key: key, fullTunnel: fullTunnel, adaptiveLevel: adaptiveLevel, killSwitch: killSwitch)
                     }
                 } label: {
                     Label(

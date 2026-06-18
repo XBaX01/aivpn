@@ -124,6 +124,8 @@ struct ServerFileConfig {
     #[cfg(feature = "dns")]
     #[serde(default)]
     dns: Option<DnsProxyConfig>,
+    #[serde(default)]
+    allow_peer_routing: Option<bool>,
 }
 
 #[tokio::main]
@@ -171,6 +173,14 @@ async fn main() {
     // Handle CLI management commands (no logging needed)
     if let Some(ref name) = args.add_client {
         handle_add_client(&client_db, name, &args);
+        return;
+    }
+    if let Some(ref name) = args.add_client_one_time {
+        handle_add_client_one_time(&client_db, name, &args);
+        return;
+    }
+    if let Some(ref name_or_id) = args.reset_device.clone() {
+        handle_reset_device(&client_db, &name_or_id);
         return;
     }
     if let Some(ref id) = args.remove_client {
@@ -363,6 +373,10 @@ async fn main() {
             .and_then(|c| c.pool.as_ref())
             .map_or(false, |p| p.exit_node_enabled.unwrap_or(false)),
         audit_log: audit_logger, // H-S-8: wire audit logger into gateway
+        allow_peer_routing: file_config
+            .as_ref()
+            .and_then(|c| c.allow_peer_routing)
+            .unwrap_or(args.allow_peer_routing),
     };
 
     // Spawn management API (Unix socket, optional)
@@ -583,6 +597,73 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
         }
         Err(e) => {
             eprintln!("❌ Failed to add client: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_add_client_one_time(db: &ClientDatabase, name: &str, args: &ServerArgs) {
+    match db.add_client_one_time(name) {
+        Ok(client) => {
+            use base64::Engine;
+            let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
+            let server_pub = load_server_public_key(args);
+            let client_network_config = db.network_config().client_config(client.vpn_ip).unwrap();
+
+            println!("✅ One-time enrollment client '{}' created!", name);
+            println!("   ID:     {}", client.id);
+            println!("   VPN IP: {}", client.vpn_ip);
+            println!("   Mode:   One-time (first device to connect will be bound)");
+            println!();
+
+            if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
+                let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
+                let conn_key = build_connection_key(
+                    args,
+                    server_ip,
+                    &pub_b64,
+                    &psk_b64,
+                    client_network_config,
+                );
+                println!("══ Connection Key (single-use — share with one device only) ══");
+                println!();
+                println!("{}", conn_key);
+                println!();
+            } else {
+                if server_pub.is_none() {
+                    eprintln!("⚠  --key-file not provided, cannot generate connection key");
+                }
+                if args.server_ip.is_none() {
+                    eprintln!("⚠  --server-ip not provided, cannot generate connection key");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to add one-time client: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_reset_device(db: &ClientDatabase, name_or_id: &str) {
+    let client = db
+        .list_clients()
+        .into_iter()
+        .find(|c| c.id == name_or_id || c.name == name_or_id);
+
+    match client {
+        Some(c) => match db.reset_device_binding(&c.id) {
+            Ok(()) => {
+                println!("✅ Device binding reset for '{}'.", name_or_id);
+                println!("   Next connecting device will be auto-bound (one-time enrollment).");
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to reset device binding: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => {
+            eprintln!("❌ Client '{}' not found.", name_or_id);
             std::process::exit(1);
         }
     }
@@ -1312,6 +1393,9 @@ mod tests {
             issue_cert: None,
             ca_key: None,
             days: 365,
+            add_client_one_time: None,
+            reset_device: None,
+            allow_peer_routing: false,
         }
     }
 
