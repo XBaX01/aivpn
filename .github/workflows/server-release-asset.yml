@@ -23,8 +23,8 @@ jobs:
 
       - name: Build Linux server asset via Docker builder stage
         run: |
-          chmod +x ./build-server-release.sh
-          ./build-server-release.sh
+          chmod +x ./scripts/build-server-release.sh
+          ./scripts/build-server-release.sh
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -148,8 +148,8 @@ jobs:
 
       - name: Build musl release artifact
         run: |
-          chmod +x ./build-musl-release.sh
-          ./build-musl-release.sh "${{ matrix.package_kind }}" "${{ matrix.target }}"
+          chmod +x ./scripts/build-musl-release.sh
+          ./scripts/build-musl-release.sh "${{ matrix.package_kind }}" "${{ matrix.target }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -188,8 +188,8 @@ jobs:
           CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
         run: |
           mkdir -p releases
-          chmod +x ./build-windows-gui.sh
-          ./build-windows-gui.sh
+          chmod +x ./scripts/build-windows-gui.sh
+          ./scripts/build-windows-gui.sh
           # Move zip package to releases directory
           mv aivpn-windows-gui.zip releases/
 
@@ -228,8 +228,8 @@ jobs:
 
       - name: Build iOS release asset
         run: |
-          chmod +x ./build-ios.sh
-          ./build-ios.sh
+          chmod +x ./scripts/build-ios.sh
+          ./scripts/build-ios.sh
 
       - name: Upload iOS workflow artifact
         uses: actions/upload-artifact@v4
