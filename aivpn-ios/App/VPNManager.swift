@@ -155,6 +155,7 @@ class VPNManager: ObservableObject {
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = bundleId
         proto.serverAddress = key.serverAddress ?? "aivpn"
+        proto.includeAllNetworks = killSwitch
         var providerConfig: [String: Any] = [
             "key": key.fullKey,
             "fullTunnel": fullTunnel,

@@ -269,7 +269,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                killSwitch: Bool = false) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
         settings.mtu = adaptiveLevel >= 2 ? 1200 : (adaptiveLevel == 1 ? 1300 : 1400)
-        settings.includeAllNetworks = killSwitch
 
         let ipv4 = NEIPv4Settings(addresses: [vpnIP], subnetMasks: ["255.255.255.0"])
         if fullTunnel {
