@@ -288,6 +288,8 @@ impl PacketEncryptor for MimicryEncryptor {
             .build_packet(&inner, &self.keys, &mut self.counter, None)
     }
 
+    /// Sends `send_ts: 0` — server echoes 0, so RTT cannot be measured from the KeepaliveAck.
+    /// Use `encrypt_keepalive_ts(current_timestamp_ms())` when RTT tracking is needed.
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
         self.encrypt_keepalive_ts(0)
     }

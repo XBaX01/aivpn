@@ -29,11 +29,7 @@ impl QualityTracker {
         if self.rtt_us == 0 {
             self.rtt_us = sample_us;
         } else {
-            let dev = if sample_us > self.rtt_us {
-                sample_us - self.rtt_us
-            } else {
-                self.rtt_us - sample_us
-            };
+            let dev = sample_us.abs_diff(self.rtt_us);
             self.jitter_us = (self.jitter_us * (EWMA_ALPHA_INV - 1) + dev) / EWMA_ALPHA_INV;
             self.rtt_us = (self.rtt_us * (EWMA_ALPHA_INV - 1) + sample_us) / EWMA_ALPHA_INV;
         }

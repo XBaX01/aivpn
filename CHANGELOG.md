@@ -12,6 +12,24 @@
 - **Client-to-Client Relay** — new `--allow-peer-routing` server flag (env `AIVPN_ALLOW_PEER_ROUTING`); when set, the TUN read loop forwards packets whose source IP belongs to a VPN client session directly to the destination VPN client session, enabling intra-VPN unicast routing. Disabled by default to preserve client isolation.
 - **Local DNS Proxy** — new `aivpn-client::dns_proxy` module; `--dns-proxy <bind_addr> --dns-upstream <resolver>` starts a lightweight UDP forwarder that tunnels all DNS queries through the active VPN path, preventing DNS leaks on platforms without per-app DNS routing.
 - **New protocol control subtypes** — `DeviceEnrollment` (0x17), `KeepaliveAck` (0x18), `QualityReport` (0x19), `AdaptiveHint` (0x1A) with full encode/decode in `protocol.rs`.
+- **Device Key display (CLI / Windows / macOS)** — `--show-device-key` CLI flag prints the device's X25519 public key (base64) and exits, enabling GUI clients to surface the key via subprocess. Windows GUI shows a truncated key in the Connection Keys panel with a copy button. macOS menu bar loads the key via helper action and displays it in the status view.
+- **Traffic Mimicry Engine for iOS and Android** — `MimicryEncryptor` from `aivpn-common` is now used on the upload path of both iOS (`aivpn-ios-core`) and Android (`aivpn-android-core`). A bootstrap mask is derived from the PSK via `bootstrap_mask_for_psk()` so the very first packet already uses traffic shaping; subsequent `MaskUpdate` messages hot-swap the active profile. Traffic Mimicry is now ✅ on all five platforms.
+- **Feature Capability Matrix** — formal table added after the Platform Support section in all three READMEs with verified ✅/❌ status for 13 features across 5 platforms.
+
+### Fixed
+
+- **iOS: `ControlPayload::Keepalive` used as unit variant** (critical) — three call sites in `ios_tunnel.rs` used `ControlPayload::Keepalive.encode()` which would fail to compile on iOS; corrected to `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
+- **Android: `transition_recv_win.reset()` discards in-flight window** — during inline PFS rekey the old receive window was cleared instead of moved to the transition slot; corrected to `std::mem::take(&mut recv_win)`.
+- **Android: dead load of `keepalive_sent_ms_rx`** — the `Arc` clone was only used in a discarded `load()` call in the `KeepaliveAck` handler; removed.
+- **iOS: quality tracker not updated when `echo_ts == 0`** — `record_received()` and score update were inside the `echo_ts > 0` guard; moved outside so quality tracks liveness even without RTT.
+- **`aivpn-common`: clippy `manual_abs_diff` in `quality.rs`** — manual branch replaced with `sample_us.abs_diff(self.rtt_us)`.
+- **`aivpn-common`: clippy warnings in `kernel_accel.rs`** — `ioctl_ref(&mut v)` corrected to `ioctl_ref(&v)`; `io::Error::new(Other, …)` replaced with `io::Error::other(…)`.
+- **`aivpn-client`: `send_control` silently swallowed upload channel errors** — send error was logged but `Ok(())` was returned; now propagates `Error::Channel(…)`.
+- **`aivpn-client`: `Shutdown` handler returned `Ok(())` after disconnect** — now returns `Err(Error::Session("server shutdown: …"))` to cleanly break the run loop.
+- **Windows: DNS proxy address validated with Unicode en-dash** — the allowlist `":.[]−-"` contained U+2212 instead of ASCII hyphen; replaced with `addr.parse::<SocketAddr>().is_err()`.
+- **Windows: manual JSON parsing in `read_quality_json`** — fragile comma-split parser replaced with `serde_json::from_str::<serde_json::Value>`.
+- **Windows: `child.kill()` without graceful wait** — `disconnect()` now polls `try_wait()` for up to 500 ms before force-killing.
+- **CLI: `unwrap()` in `record start`/`stop` subcommands** — `UdpSocket::bind` and `send_to` panics replaced with `eprintln!` error messages.
 
 ### Changed
 
@@ -31,6 +49,23 @@
 - **Маршрутизация клиент-клиент** — новый флаг сервера `--allow-peer-routing` (env `AIVPN_ALLOW_PEER_ROUTING`): TUN read loop перенаправляет пакеты, исходный IP которых принадлежит сессии VPN-клиента, напрямую к целевой клиентской сессии — без выхода в интернет. По умолчанию отключено для изоляции клиентов.
 - **Локальный DNS-прокси** — новый модуль `aivpn-client::dns_proxy`; флаги `--dns-proxy <адрес> --dns-upstream <резолвер>` запускают лёгкий UDP-форвардер, туннелирующий DNS-запросы через активный VPN-путь и предотвращающий DNS-утечки.
 - **Новые control subtype протокола** — `DeviceEnrollment` (0x17), `KeepaliveAck` (0x18), `QualityReport` (0x19), `AdaptiveHint` (0x1A) с полным encode/decode в `protocol.rs`.
+- **Отображение Device Key (CLI / Windows / macOS)** — флаг CLI `--show-device-key` выводит X25519-публичный ключ устройства в base64 и завершает работу; используется GUI-клиентами. Windows GUI показывает усечённый ключ в панели «Ключи подключения» с кнопкой копирования. macOS получает ключ через helper action и отображает его в статусном окне.
+- **Mimicry Engine для iOS и Android** — `MimicryEncryptor` из `aivpn-common` теперь используется на upload-пути iOS (`aivpn-ios-core`) и Android (`aivpn-android-core`). Начальная маска формируется из PSK через `bootstrap_mask_for_psk()`, поэтому первый пакет уже маскирован; `MaskUpdate` заменяет профиль без переподключения. Маскировка трафика теперь ✅ на всех пяти платформах.
+- **Таблица функциональных возможностей** — добавлена после раздела «Поддерживаемые платформы» во всех трёх README с проверенными статусами ✅/❌ для 13 функций на 5 платформах.
+
+### Исправлено
+
+- **iOS: `ControlPayload::Keepalive` использовался как unit-вариант** (критическое) — три точки в `ios_tunnel.rs` использовали `ControlPayload::Keepalive.encode()`, что не компилируется; исправлено на `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
+- **Android: `transition_recv_win.reset()` уничтожал окно в полёте** — при inline PFS rekey старое receive-окно очищалось вместо переноса в transition-слот; исправлено на `std::mem::take(&mut recv_win)`.
+- **Android: мёртвая загрузка `keepalive_sent_ms_rx`** — `Arc`-клон использовался только в выброшенном `load()` в обработчике `KeepaliveAck`; удалён.
+- **iOS: трекер качества не обновлялся при `echo_ts == 0`** — `record_received()` был внутри проверки `echo_ts > 0`; вынесен наружу.
+- **`aivpn-common`: clippy-предупреждения в `quality.rs` и `kernel_accel.rs`** — `manual_abs_diff`, `needless_pass_by_ref_mut`, `io_error_other` — все исправлены.
+- **`aivpn-client`: `send_control` молча проглатывал ошибки канала** — теперь пробрасывает `Error::Channel(…)`.
+- **`aivpn-client`: обработчик `Shutdown` возвращал `Ok(())` после отключения** — теперь возвращает `Err(Error::Session("server shutdown: …"))` для выхода из run loop.
+- **Windows: валидация адреса DNS-прокси с Unicode en-dash** — `":.[]−-"` содержал U+2212; заменено на `addr.parse::<SocketAddr>().is_err()`.
+- **Windows: ручной разбор JSON в `read_quality_json`** — хрупкий парсер заменён на `serde_json::from_str::<serde_json::Value>`.
+- **Windows: `child.kill()` без мягкого ожидания** — `disconnect()` опрашивает `try_wait()` до 500 мс перед `kill()`.
+- **CLI: `unwrap()` в подкомандах `record start`/`stop`** — заменены на вывод ошибки через `eprintln!`.
 
 ### Изменено
 

@@ -336,23 +336,31 @@ async fn main() {
                 match action {
                     RecordAction::Start { service } => {
                         aivpn_client::record_cmd::handle_recording_status(true, Some(&service));
-                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                        socket
-                            .send_to(
-                                format!("record_start:{}", service).as_bytes(),
+                        match std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| {
+                            s.send_to(
+                                format!("record_start:{service}").as_bytes(),
                                 "127.0.0.1:44301",
                             )
-                            .unwrap();
-                        println!("Recording start requested for '{}'.", service);
-                        println!("Run 'aivpn-client record status' to inspect progress.");
+                            .map(|_| s)
+                        }) {
+                            Ok(_) => {
+                                println!("Recording start requested for '{service}'.");
+                                println!("Run 'aivpn-client record status' to inspect progress.");
+                            }
+                            Err(e) => eprintln!("Failed to send record command: {e}"),
+                        }
                     }
                     RecordAction::Stop => {
                         let prior = aivpn_client::record_cmd::read_local_status();
                         aivpn_client::record_cmd::mark_recording_stop_requested(
                             prior.as_ref().and_then(|status| status.service.as_deref()),
                         );
-                        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                        socket.send_to(b"record_stop", "127.0.0.1:44301").unwrap();
+                        match std::net::UdpSocket::bind("127.0.0.1:0")
+                            .and_then(|s| s.send_to(b"record_stop", "127.0.0.1:44301").map(|_| s))
+                        {
+                            Ok(_) => {}
+                            Err(e) => eprintln!("Failed to send record command: {e}"),
+                        }
                         println!("Recording stop requested.");
                         println!("Run 'aivpn-client record status' to inspect progress.");
                     }

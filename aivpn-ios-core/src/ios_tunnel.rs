@@ -226,7 +226,7 @@ pub async fn run_tunnel_ios(
     let mdh_len = DEFAULT_MDH_LEN;
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    let keepalive = ControlPayload::Keepalive.encode()?;
+    let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
     {
         let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
         let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
@@ -307,7 +307,7 @@ pub async fn run_tunnel_ios(
     // Early keepalive: prevent CGNAT outbound mapping expiry between last
     // handshake packet and the first upload pipeline tick.
     {
-        let ka = ControlPayload::Keepalive.encode()?;
+        let ka = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
         let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
         if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
             send_seq = send_seq.wrapping_add(1);
@@ -331,7 +331,7 @@ pub async fn run_tunnel_ios(
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(ka) = ControlPayload::Keepalive.encode() {
+                if let Ok(ka) = ControlPayload::Keepalive { send_ts: 0 }.encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         send_seq = send_seq.wrapping_add(1);
@@ -561,13 +561,13 @@ pub async fn run_tunnel_ios(
                                         if now_ms >= echo_ts {
                                             let rtt_us = (now_ms - echo_ts) * 1_000;
                                             quality_tracker.record_rtt(rtt_us);
-                                            quality_tracker.record_received();
-                                            let score = quality_tracker.score();
-                                            ACTIVE_QUALITY_SCORE.store(score, Ordering::Relaxed);
-                                            log::debug!("aivpn: KeepaliveAck rtt={}ms quality={}/100",
-                                                quality_tracker.rtt_ms(), score);
                                         }
                                     }
+                                    quality_tracker.record_received();
+                                    let score = quality_tracker.score();
+                                    ACTIVE_QUALITY_SCORE.store(score, Ordering::Relaxed);
+                                    log::debug!("aivpn: KeepaliveAck rtt={}ms quality={}/100",
+                                        quality_tracker.rtt_ms(), score);
                                 }
                                 aivpn_common::protocol::ControlPayload::AdaptiveHint { level } => {
                                     ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);

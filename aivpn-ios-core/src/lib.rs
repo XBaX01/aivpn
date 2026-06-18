@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use aivpn_common::protocol::ControlPayload;
 use ios_tunnel::{
     get_active_download_bytes, get_active_upload_bytes, run_tunnel_ios, send_control_payload,
-    stop_active_tunnel, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE, OnReadyFn, SendCtx,
+    stop_active_tunnel, OnReadyFn, SendCtx, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE,
 };
 
 /// Runs the full VPN tunnel session on the calling thread.

@@ -73,6 +73,24 @@ Server-to-server client database synchronization uses `ControlPayload::PoolSync`
 | MikroTik RouterOS 7.6+ | — | ✅ | — | container veth + TUN |
 | Entware routers (ARMv7 / MIPSel) | — | ✅ | — | musl static binary |
 
+### Feature Capability Matrix
+
+| Feature | CLI | Win | Mac | Android | iOS |
+|---------|:---:|:---:|:---:|:-------:|:---:|
+| Traffic Mimicry | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Adaptive Mode (4 levels) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Live Quality Score | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Split Tunnel | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DNS Proxy | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Kill Switch | ✅ | ✅ | ✅ | ✅ | ✅ |
+| mTLS Certificate | ✅ | ✅ | ✅ | ✅ | ✅ |
+| FEC (forward error correction) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Traffic Recording | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Device Key / JIT | ✅ | ✅ | ✅ | ❌ | ❌ |
+| SOCKS5 Proxy | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Full Tunnel | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Diagnostics / Benchmark | ✅ | ✅ | ✅ | ✅ | ✅ |
+
 ---
 
 ## Quick Start

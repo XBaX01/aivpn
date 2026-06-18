@@ -1211,6 +1211,7 @@ impl AivpnClient {
             ControlPayload::Shutdown { reason } => {
                 info!("Server requested shutdown (reason: {})", reason);
                 self.disconnect().await;
+                return Err(Error::Session(format!("server shutdown: {}", reason)));
             }
             ControlPayload::RecordingAck { session_id, status } => {
                 if status == "started" {
@@ -1338,9 +1339,9 @@ impl AivpnClient {
 
     async fn send_control(&mut self, payload: &ControlPayload) -> Result<()> {
         if let Some(tx) = &self.control_tx {
-            if let Err(e) = tx.send(payload.clone()).await {
-                error!("Failed to send control message to upload task: {}", e);
-            }
+            tx.send(payload.clone())
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
         } else {
             warn!("control_tx not initialized, dropping control message");
         }

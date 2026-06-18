@@ -174,12 +174,7 @@ impl VpnManager {
 
         if let Some(addr) = dns_proxy {
             if !addr.is_empty() {
-                // Validate HOST:PORT — must contain a colon and only safe characters.
-                let valid = addr.contains(':')
-                    && addr
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || ":.[]−-".contains(c));
-                if !valid {
+                if addr.parse::<std::net::SocketAddr>().is_err() {
                     return Err(format!("Invalid dns-proxy address: {addr}"));
                 }
                 cmd.arg("--dns-proxy").arg(addr);
@@ -218,6 +213,12 @@ impl VpnManager {
         self.state = ConnectionState::Disconnecting;
 
         if let Some(ref mut child) = self.child {
+            for _ in 0..5 {
+                if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -509,21 +510,12 @@ impl VpnManager {
     fn read_quality_json() -> (u8, u8) {
         let path = std::env::temp_dir().join("aivpn-quality.json");
         let content = std::fs::read_to_string(path).unwrap_or_default();
-        let mut quality = 0u8;
-        let mut adaptive = 0u8;
-        for part in content.split(',') {
-            let kv = part.trim_matches(|c: char| c == '{' || c == '}' || c == ' ');
-            if let Some(val) = kv.strip_prefix("\"quality\":") {
-                if let Ok(v) = val.trim().parse::<u8>() {
-                    quality = v;
-                }
-            } else if let Some(val) = kv.strip_prefix("\"adaptive\":") {
-                if let Ok(v) = val.trim().parse::<u8>() {
-                    adaptive = v;
-                }
-            }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let quality = v["quality"].as_u64().unwrap_or(0) as u8;
+            let adaptive = v["adaptive"].as_u64().unwrap_or(0) as u8;
+            return (quality, adaptive);
         }
-        (quality, adaptive)
+        (0, 0)
     }
 
     fn parse_stats(content: &str) -> Option<(u64, u64)> {

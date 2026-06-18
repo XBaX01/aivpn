@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::client_wire::{build_inner_packet, build_random_mdh_packet, DEFAULT_MDH_LEN};
-use crate::fec::FecEncoder;
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
+use crate::fec::FecEncoder;
 use crate::protocol::{ControlPayload, InnerType};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -116,14 +116,19 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let inner = build_inner_packet(InnerType::Data, self.seq, payload);
         self.seq = self.seq.wrapping_add(1);
-        let pkt = build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)?;
+        let pkt =
+            build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)?;
         if let Some(fec) = self.fec_encoder.as_mut() {
             if let Some(repair) = fec.feed(payload) {
                 let repair_inner =
                     build_inner_packet(InnerType::FecRepair, self.seq, &repair.encode());
                 self.seq = self.seq.wrapping_add(1);
                 if let Ok(enc) = build_random_mdh_packet(
-                    &self.keys, &mut self.counter, &repair_inner, None, self.mdh_len,
+                    &self.keys,
+                    &mut self.counter,
+                    &repair_inner,
+                    None,
+                    self.mdh_len,
                 ) {
                     self.pending_fec = Some(enc);
                 }

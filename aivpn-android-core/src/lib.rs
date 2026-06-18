@@ -10,11 +10,11 @@
 mod android_tunnel;
 
 use aivpn_common::client_wire::DEFAULT_MDH_LEN;
+use aivpn_common::protocol::ControlPayload;
 use android_tunnel::{
     clear_pending_stop, get_active_download_bytes, get_active_upload_bytes, run_tunnel_android,
     send_control_payload, stop_active_tunnel, ACTIVE_ADAPTIVE_LEVEL, ACTIVE_QUALITY_SCORE,
 };
-use aivpn_common::protocol::ControlPayload;
 
 use std::sync::atomic::Ordering;
 
@@ -269,11 +269,10 @@ pub extern "system" fn Java_com_aivpn_client_AivpnJni_startRecording<'local>(
 
 /// Send a RecordingStop control message to the server.
 #[no_mangle]
-pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopRecording(
-    _env: JNIEnv,
-    _class: JClass,
-) {
-    send_control_payload(ControlPayload::RecordingStop { session_id: [0u8; 16] });
+pub extern "system" fn Java_com_aivpn_client_AivpnJni_stopRecording(_env: JNIEnv, _class: JClass) {
+    send_control_payload(ControlPayload::RecordingStop {
+        session_id: [0u8; 16],
+    });
 }
 
 // ──────────────────────────────────────────────────────────

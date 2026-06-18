@@ -525,7 +525,6 @@ pub async fn run_tunnel_android(
     });
 
     let keepalive_sent_ms = Arc::new(AtomicU64::new(0));
-    let keepalive_sent_ms_rx = keepalive_sent_ms.clone();
     let mut quality_tracker = QualityTracker::new();
 
     // Reset per-session hint so getAdaptiveLevelHint() returns 0 ("no hint yet") for this session.
@@ -722,7 +721,7 @@ pub async fn run_tunnel_android(
                                         transition_recv_keys = Some(keys.clone());
                                         transition_recv_deadline =
                                             Some(Instant::now() + Duration::from_secs(2));
-                                        transition_recv_win.reset();
+                                        transition_recv_win = std::mem::take(&mut recv_win);
                                         keys = new_keys;
                                         log::info!("aivpn: inline PFS rekey complete");
                                     }
@@ -758,7 +757,6 @@ pub async fn run_tunnel_android(
                                             );
                                         }
                                     }
-                                    let _ = keepalive_sent_ms_rx.load(Ordering::Relaxed);
                                 }
                                 ControlPayload::AdaptiveHint { level } => {
                                     ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
