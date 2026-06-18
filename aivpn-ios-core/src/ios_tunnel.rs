@@ -331,7 +331,7 @@ pub async fn run_tunnel_ios(
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if let Ok(ka) = ControlPayload::Keepalive { send_ts: 0 }.encode() {
+                if let Ok(ka) = (ControlPayload::Keepalive { send_ts: 0 }).encode() {
                     let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
                     if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
                         send_seq = send_seq.wrapping_add(1);
