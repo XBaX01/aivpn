@@ -18,6 +18,17 @@
 
 ### Fixed
 
+- **FEC: `FecEncoder` count overflow** — `count += 1` in hot path could panic on overflow in debug builds; replaced with `wrapping_add(1)`.
+- **FEC: stale XOR buffer injected after lost repair packet** — server FEC accumulator now tracks `group_seq`; when a new group begins before the previous repair arrived, the stale XOR buffer is detected and discarded instead of being applied to the new group.
+- **FEC: `FecDecoder::record` division by zero** — `FecRepair::decode` now returns `None` for `group_size == 0`; `FecDecoder` guards against malformed repair packets that would cause a div-by-zero panic.
+- **iOS FFI: `static_privkey_len` not validated** — `aivpn_run_tunnel` FFI entry point now checks `static_privkey_len == 32` before `from_raw_parts`; mismatched lengths are rejected with an error instead of causing undefined behavior.
+- **Keepalive RTT skew** — `ControlPayload::Keepalive` now carries `send_ts` (client's own monotonic clock); server echoes it in `KeepaliveAck`; RTT is computed without client/server clock synchronization.
+- **Server: non-IPv4 payload bypasses anti-spoof check** — the data handler now rejects non-IPv4 inner payloads before the source-address enforcement step, preventing clients from bypassing the VPN IP ownership check via crafted packets.
+- **Android: `CtrlTxGuard::drop` silent failure on poisoned mutex** — when the async control-tx channel mutex was poisoned, `drop()` silently skipped cleanup; now recovers from poison with `into_inner()` and completes the cleanup.
+- **Android: adaptive hint leaks across reconnects** — `ACTIVE_ADAPTIVE_LEVEL` was not reset at session start; the previous session's server-pushed level could influence the new session before the first `AdaptiveHint` arrived; reset to `0` on session entry.
+- **Android JNI: recording service name unbounded** — `startRecording` service name string was passed through JNI without length validation; capped to 128 UTF-8 bytes at the boundary to prevent allocation abuse.
+- **macOS helper: DNS proxy port range not validated** — `dnsProxy` value in helper requests was checked for HOST:PORT format but not for port in range 1–65535; added explicit range check.
+- **Security: quality sidecar written to world-readable `/tmp`** — `write_quality_file()` wrote `aivpn-quality.json` to `std::env::temp_dir()` which is world-readable; moved to `/var/run/aivpn/` (mode 0750, root:root) so other local users cannot read connection quality metrics.
 - **iOS: `ControlPayload::Keepalive` used as unit variant** (critical) — three call sites in `ios_tunnel.rs` used `ControlPayload::Keepalive.encode()` which would fail to compile on iOS; corrected to `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
 - **Android: `transition_recv_win.reset()` discards in-flight window** — during inline PFS rekey the old receive window was cleared instead of moved to the transition slot; corrected to `std::mem::take(&mut recv_win)`.
 - **Android: dead load of `keepalive_sent_ms_rx`** — the `Arc` clone was only used in a discarded `load()` call in the `KeepaliveAck` handler; removed.
@@ -55,6 +66,17 @@
 
 ### Исправлено
 
+- **FEC: переполнение счётчика `FecEncoder`** — `count += 1` в горячем пути мог вызвать панику в debug-сборке; заменено на `wrapping_add(1)`.
+- **FEC: устаревший XOR-буфер из потерянного repair-пакета** — FEC-аккумулятор сервера теперь отслеживает `group_seq`; когда новая группа начинается до получения repair-пакета предыдущей, устаревший XOR-буфер обнаруживается и отбрасывается вместо применения к новой группе.
+- **FEC: деление на ноль в `FecDecoder::record`** — `FecRepair::decode` теперь возвращает `None` при `group_size == 0`; добавлена защита от повреждённых repair-пакетов, вызывавших панику.
+- **iOS FFI: параметр `static_privkey_len` не валидировался** — точка входа FFI `aivpn_run_tunnel` теперь проверяет `static_privkey_len == 32` до `from_raw_parts`; несоответствие длины возвращает ошибку вместо неопределённого поведения.
+- **Keepalive: смещение RTT из-за рассинхронизации часов** — `ControlPayload::Keepalive` теперь несёт `send_ts` (монотонные часы клиента); сервер отражает его в `KeepaliveAck`; RTT вычисляется без синхронизации часов клиента и сервера.
+- **Сервер: не-IPv4 payload обходил проверку anti-spoof** — обработчик данных теперь отклоняет не-IPv4 внутренние payload до шага проверки владельца IP-адреса, предотвращая обход VPN IP ownership check через сформированные пакеты.
+- **Android: `CtrlTxGuard::drop` молчал при отравленном мьютексе** — когда мьютекс async control-tx канала был отравлен, `drop()` тихо пропускал очистку; теперь восстанавливается из отравления через `into_inner()` и завершает очистку.
+- **Android: утечка adaptive hint между переподключениями** — `ACTIVE_ADAPTIVE_LEVEL` не сбрасывался при начале сессии; уровень, заданный сервером в прошлой сессии, мог влиять на новую до прихода первого `AdaptiveHint`; сбрасывается в `0` при входе в сессию.
+- **Android JNI: имя сервиса записи не ограничено по длине** — строка имени в `startRecording` передавалась через JNI без проверки длины; ограничена 128 байтами UTF-8 на границе JNI.
+- **macOS helper: диапазон порта DNS-прокси не проверялся** — значение `dnsProxy` в запросах к helper проверялось на формат HOST:PORT, но не на диапазон порта 1–65535; добавлена явная проверка диапазона.
+- **Безопасность: quality sidecar записывался в мировой `/tmp`** — `write_quality_file()` писал `aivpn-quality.json` в `std::env::temp_dir()`, доступный всем локальным пользователям; перемещён в `/var/run/aivpn/` (режим 0750, root:root).
 - **iOS: `ControlPayload::Keepalive` использовался как unit-вариант** (критическое) — три точки в `ios_tunnel.rs` использовали `ControlPayload::Keepalive.encode()`, что не компилируется; исправлено на `ControlPayload::Keepalive { send_ts: 0 }.encode()`.
 - **Android: `transition_recv_win.reset()` уничтожал окно в полёте** — при inline PFS rekey старое receive-окно очищалось вместо переноса в transition-слот; исправлено на `std::mem::take(&mut recv_win)`.
 - **Android: мёртвая загрузка `keepalive_sent_ms_rx`** — `Arc`-клон использовался только в выброшенном `load()` в обработчике `KeepaliveAck`; удалён.

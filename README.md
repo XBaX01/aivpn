@@ -86,7 +86,7 @@ Server-to-server client database synchronization uses `ControlPayload::PoolSync`
 | mTLS Certificate | ✅ | ✅ | ✅ | ✅ | ✅ |
 | FEC (forward error correction) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traffic Recording | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Device Key / JIT | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Device Key / JIT | ✅ | ✅ | ✅ | ✅ | ✅ |
 | SOCKS5 Proxy | ✅ | ✅ | ✅ | ❌ | ❌ |
 | Full Tunnel | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Diagnostics / Benchmark | ✅ | ✅ | ✅ | ✅ | ✅ |
