@@ -34,7 +34,7 @@ impl Default for TunnelConfig {
         use rand::Rng;
         Self {
             tun_name: format!("tun{:04x}", rand::thread_rng().gen::<u16>()),
-            tun_addr: "10.0.0.2".to_string(),
+            tun_addr: "10.100.0.2".to_string(),
             server_vpn_ip: LEGACY_SERVER_VPN_IP.to_string(),
             tun_netmask: "255.255.255.0".to_string(),
             prefix_len: 24,

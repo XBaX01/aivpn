@@ -80,7 +80,7 @@ impl Default for GatewayConfig {
             listen_addr: "0.0.0.0:443".to_string(),
             per_ip_pps_limit: 1000,
             tun_name: "aivpn0".to_string(),
-            tun_addr: "10.0.0.1".to_string(),
+            tun_addr: "10.100.0.1".to_string(),
             tun_netmask: "255.255.255.0".to_string(),
             network_config: VpnNetworkConfig::default(),
             server_private_key: [0u8; 32],
@@ -1228,15 +1228,10 @@ impl Gateway {
             // NOTE: We intentionally do NOT drop packets from the same public IP
             // on a different port. Multiple clients behind the same NAT must be
             // able to handshake independently (different PSKs → different sessions).
-
-            // FIX Issue #42: Skip handshake if this IP already has a fresh
-            // ratcheted session on a different port (NAT rebind / stale packets).
-            if self.session_manager.has_recent_ratcheted_session_on_other_endpoint(
-                &client_addr,
-                Duration::from_secs(30),
-            ) {
-                return Err(Error::InvalidPacket("Active session exists on other port"));
-            }
+            //
+            // A valid new handshake for the same VPN IP will replace the old
+            // session below via cleanup_old_sessions_for_vpn_ip, allowing quick
+            // recovery after client reboots or NAT rebinds.
 
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.

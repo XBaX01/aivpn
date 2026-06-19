@@ -49,6 +49,10 @@ pub struct ServerArgs {
     #[arg(long, value_name = "ID")]
     pub show_client: Option<String>,
 
+    /// Generate a new server private key at --key-file and print the public key
+    #[arg(long)]
+    pub generate_key: bool,
+
     /// Public IP of this server (embedded into connection keys).
     /// Required when using --add-client or --show-client to generate connection keys.
     #[arg(long, env = "AIVPN_SERVER_IP")]

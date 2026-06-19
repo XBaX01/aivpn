@@ -44,7 +44,7 @@ pub struct ClientArgs {
     pub tun_name: Option<String>,
 
     /// TUN device address
-    #[arg(long, default_value = "10.0.0.2")]
+    #[arg(long, default_value = "10.100.0.2")]
     pub tun_addr: String,
 
     /// Route all traffic through VPN tunnel

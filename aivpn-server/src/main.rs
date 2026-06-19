@@ -57,6 +57,12 @@ async fn main() {
         }
     };
 
+    // Handle key generation before client DB load
+    if args.generate_key {
+        handle_generate_key(&args);
+        return;
+    }
+
     // Handle CLI management commands (no logging needed)
     if let Some(ref name) = args.add_client {
         handle_add_client(&client_db, name, &args);
@@ -79,8 +85,8 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("aivpn_server=debug".parse().unwrap())
-                .add_directive("aivpn_common=debug".parse().unwrap())
+                .add_directive("aivpn_server=trace".parse().unwrap())
+                .add_directive("aivpn_common=trace".parse().unwrap())
         )
         .init();
 
@@ -270,6 +276,23 @@ fn build_connection_server_addr(args: &ServerArgs, server_ip: &str) -> String {
         .unwrap_or(443);
 
     format!("{}:{}", server_ip, port)
+}
+
+fn handle_generate_key(args: &ServerArgs) {
+    use base64::Engine;
+    use rand::Rng;
+    let key_file = args.key_file.as_ref().expect("--key-file required for generate-key");
+    if std::path::Path::new(key_file).exists() {
+        eprintln!("❌ Key file already exists: {}", key_file);
+        std::process::exit(1);
+    }
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill(&mut key);
+    std::fs::write(key_file, &key).expect("Failed to write key file");
+    let kp = crypto::KeyPair::from_private_key(key);
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_bytes());
+    println!("✅ Server key generated: {}", key_file);
+    println!("   Server public key (base64): {}", pub_b64);
 }
 
 fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
