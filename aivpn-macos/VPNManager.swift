@@ -10,6 +10,11 @@ struct HelperRequest: Codable {
     let fullTunnel: Bool?
     let binaryPath: String?
     let service: String?
+    let mtlsCertPath: String?
+    let excludeRoutes: String?
+    let adaptiveLevel: Int?
+    let dnsProxy: String?
+    let killSwitch: Bool?
 }
 
 struct HelperResponse: Codable {
@@ -64,9 +69,13 @@ class VPNManager: ObservableObject {
 
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
+    private var connectGeneration: Int = 0
     @Published var lastError: String?
     @Published var bytesSent: Int64 = 0
     @Published var bytesReceived: Int64 = 0
+    @Published var qualityScore: Int = 0
+    @Published var serverAdaptiveLevel: Int = 0
+    @Published var devicePublicKey: String = ""
     @Published var savedKey: String = ""
     @Published var helperAvailable: Bool = false
     @Published var isCheckingHelper: Bool = true
@@ -82,10 +91,16 @@ class VPNManager: ObservableObject {
         get { KeychainStorage.shared.keys }
     }
 
+    @Published var isProxyMode: Bool = false
+
     private var statusPollTimer: Timer?
     private var trafficTimer: Timer?
     private var minimumRecordingStatusTimestamp: UInt64 = 0
     private var lastRecordingNotificationTimestamp: UInt64 = 0
+
+    private var proxyProcess: Process?
+    private var proxyPollTimer: Timer?
+    private let proxyLogPath = "/tmp/aivpn-proxy.log"
 
     private let socketPath = "/var/run/aivpn/helper.sock"
 
@@ -109,15 +124,24 @@ class VPNManager: ObservableObject {
             savedKey = keyValue
         }
 
-        // Check helper availability after a short delay
+        // Check helper availability and load device key after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.checkHelperAvailable()
+            self?.loadDeviceKey()
         }
     }
 
     private func helperClientBinaryPath() -> String? {
         let bundledBinary = Bundle.main.bundlePath + "/Contents/Resources/aivpn-client"
         return FileManager.default.isExecutableFile(atPath: bundledBinary) ? bundledBinary : nil
+    }
+
+    func loadDeviceKey() {
+        runBundledClientCommand(["--show-device-key"]) { [weak self] success, output in
+            if success && !output.isEmpty {
+                self?.devicePublicKey = output
+            }
+        }
     }
 
     private func runBundledClientCommand(_ args: [String], completion: ((Bool, String) -> Void)? = nil) {
@@ -192,12 +216,6 @@ class VPNManager: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    // MARK: - Key Storage (UserDefaults — no keychain prompts)
-
-    private func saveKey(_ key: String) {
-        defaults.set(key, forKey: "connection_key")
-    }
-    
     // MARK: - Key Management
     
     /// Выбрать ключ по ID
@@ -211,8 +229,8 @@ class VPNManager: ObservableObject {
     }
     
     /// Добавить новый ключ
-    func addKey(name: String, keyValue: String) -> Bool {
-        if let newKey = KeychainStorage.shared.addKey(name: name, keyValue: keyValue) {
+    func addKey(name: String, keyValue: String, mtlsCertPath: String? = nil) -> Bool {
+        if let newKey = KeychainStorage.shared.addKey(name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath) {
             KeychainStorage.shared.selectKey(id: newKey.id)
             selectedKeyId = newKey.id
             savedKey = newKey.keyValue
@@ -236,8 +254,8 @@ class VPNManager: ObservableObject {
     }
     
     /// Обновить ключ полностью
-    func updateKey(id: String, name: String, keyValue: String) -> Bool {
-        let updated = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue)
+    func updateKey(id: String, name: String, keyValue: String, mtlsCertPath: String? = nil) -> Bool {
+        let updated = KeychainStorage.shared.updateKey(id: id, name: name, keyValue: keyValue, mtlsCertPath: mtlsCertPath)
         if updated, selectedKeyId == id,
            let key = KeychainStorage.shared.keys.first(where: { $0.id == id }) {
             savedKey = key.keyValue
@@ -297,11 +315,18 @@ class VPNManager: ObservableObject {
                 return
             }
 
-            // Send request
-            if let requestData = try? JSONEncoder().encode(request),
-               let requestStr = String(data: requestData, encoding: .utf8) {
-                _ = requestStr.withCString { ptr in
-                    write(fd, ptr, Int(strlen(ptr)))
+            // Send request with 4-byte big-endian length prefix
+            if let requestData = try? JSONEncoder().encode(request) {
+                let payloadLen = requestData.count
+                var lenBuf: [UInt8] = [
+                    UInt8((payloadLen >> 24) & 0xFF),
+                    UInt8((payloadLen >> 16) & 0xFF),
+                    UInt8((payloadLen >>  8) & 0xFF),
+                    UInt8( payloadLen        & 0xFF),
+                ]
+                _ = write(fd, &lenBuf, 4)
+                _ = requestData.withUnsafeBytes { ptr in
+                    write(fd, ptr.baseAddress!, payloadLen)
                 }
             }
 
@@ -333,8 +358,7 @@ class VPNManager: ObservableObject {
     /// Check if the helper daemon is available
     func checkHelperAvailable() {
         isCheckingHelper = true
-        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
-                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "ping", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self else { return }
             self.isCheckingHelper = false
             if let response = response, response.status == "ok" {
@@ -357,15 +381,15 @@ class VPNManager: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
-    func connect(key: String, fullTunnel: Bool = false) {
+    func connect(key: String, fullTunnel: Bool = false, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil, killSwitch: Bool = false) {
         guard !isConnecting else { return }
 
         let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             .replacingOccurrences(of: "aivpn://", with: "")
 
         savedKey = normalizedKey
-        saveKey(normalizedKey)
 
+        connectGeneration += 1
         isConnecting = true
         lastError = nil
         bytesSent = 0
@@ -384,7 +408,12 @@ class VPNManager: ObservableObject {
             key: normalizedKey,
             fullTunnel: fullTunnel,
             binaryPath: binaryPath,
-            service: nil
+            service: nil,
+            mtlsCertPath: mtlsCertPath,
+            excludeRoutes: excludeRoutes,
+            adaptiveLevel: adaptiveLevel > 0 ? adaptiveLevel : nil,
+            dnsProxy: dnsProxy.flatMap { $0.isEmpty ? nil : $0 },
+            killSwitch: killSwitch ? true : nil
         )
 
         sendToHelper(request) { [weak self] response in
@@ -406,9 +435,144 @@ class VPNManager: ObservableObject {
         }
     }
 
-    func disconnect() {
-        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil)
+    // MARK: - Proxy Mode (no root required for ports > 1024)
 
+    /// Launch aivpn-client directly as current user in SOCKS5 proxy mode.
+    /// Does NOT go through the privileged helper — root is not needed for high ports.
+    func connectProxy(key: String, proxyPort: Int) {
+        guard !isConnecting else { return }
+
+        let normalizedKey = key.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            .replacingOccurrences(of: "aivpn://", with: "")
+
+        savedKey = normalizedKey
+
+        // Warn if an mTLS cert is configured — it is silently ignored in proxy mode
+        if let certPath = selectedKey?.mtlsCertPath, !certPath.isEmpty {
+            print("Warning: mTLS certificate '\(certPath)' is not used in SOCKS5 proxy mode")
+        }
+
+        isConnecting = true
+        isProxyMode = true
+        lastError = nil
+        bytesSent = 0
+        bytesReceived = 0
+
+        guard let binaryPath = helperClientBinaryPath(),
+              FileManager.default.isExecutableFile(atPath: binaryPath) else {
+            isConnecting = false
+            isProxyMode = false
+            lastError = "aivpn-client binary not found"
+            return
+        }
+
+        // Clear log file
+        FileManager.default.createFile(atPath: proxyLogPath, contents: nil)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = ["-k", normalizedKey, "--proxy-listen", "127.0.0.1:\(proxyPort)"]
+        var env = ProcessInfo.processInfo.environment
+        env["RUST_LOG"] = "info"
+        process.environment = env
+
+        if let fh = FileHandle(forWritingAtPath: proxyLogPath) {
+            process.standardOutput = fh
+            process.standardError = fh
+        }
+
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, self.isProxyMode else { return }
+                self.stopProxyPoll()
+                self.proxyProcess = nil
+                self.isConnected = false
+                self.isConnecting = false
+                self.isProxyMode = false
+            }
+        }
+
+        do {
+            try process.run()
+            proxyProcess = process
+            startProxyPoll()
+        } catch {
+            isConnecting = false
+            isProxyMode = false
+            lastError = "Failed to start proxy: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopProxyMode() {
+        proxyProcess?.terminate()
+        proxyProcess = nil
+        stopProxyPoll()
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.isConnecting = false
+            self.isProxyMode = false
+        }
+    }
+
+    private func startProxyPoll() {
+        proxyPollTimer?.invalidate()
+        proxyPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollProxyLog()
+        }
+    }
+
+    private func stopProxyPoll() {
+        proxyPollTimer?.invalidate()
+        proxyPollTimer = nil
+    }
+
+    private func pollProxyLog() {
+        guard let log = try? String(contentsOfFile: proxyLogPath, encoding: .utf8) else { return }
+        if log.contains("SOCKS5 proxy listening") {
+            stopProxyPoll()
+            DispatchQueue.main.async {
+                self.isConnected = true
+                self.isConnecting = false
+            }
+        } else if log.contains("ERROR") || log.contains("error") {
+            let lines = log.components(separatedBy: "\n").filter { !$0.isEmpty }
+            if let last = lines.last {
+                DispatchQueue.main.async {
+                    self.lastError = String(last.prefix(200))
+                }
+            }
+        }
+    }
+
+    /// Run `aivpn-client bench --server <addr> --json` and return parsed result.
+    /// Calls completion on the main thread; passes nil on failure.
+    func runBench(serverAddr: String, completion: @escaping (BenchDisplayResult?) -> Void) {
+        runBundledClientCommand(["bench", "--server", serverAddr, "--json"]) { success, output in
+            guard success,
+                  let data = output.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(nil)
+                return
+            }
+            let result = BenchDisplayResult(
+                p50: json["latency_p50_ms"] as? Double ?? 0,
+                p95: json["latency_p95_ms"] as? Double ?? 0,
+                p99: json["latency_p99_ms"] as? Double ?? 0,
+                lossPct: json["packet_loss_pct"] as? Double ?? 0,
+                qualityScore: json["quality_score"] as? Int ?? 0
+            )
+            completion(result)
+        }
+    }
+
+    func disconnect() {
+        if isProxyMode {
+            stopProxyMode()
+            return
+        }
+
+        let request = HelperRequest(action: "disconnect", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil)
+        let disconnectGen = connectGeneration
         sendToHelper(request) { [weak self] _ in
             guard let self = self else { return }
             self.stopStatusPolling()
@@ -421,6 +585,9 @@ class VPNManager: ObservableObject {
             self.minimumRecordingStatusTimestamp = 0
 
             DispatchQueue.main.async {
+                // Guard: skip state reset if connect() was called again before this
+                // callback fired (stale disconnect clobbering new connection state).
+                guard self.connectGeneration == disconnectGen else { return }
                 self.isConnecting = false
                 self.isConnected = false
             }
@@ -494,8 +661,7 @@ class VPNManager: ObservableObject {
     }
 
     private func pollStatus() {
-        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
-                     timeoutSeconds: 2.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "status", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 2.0) { [weak self] response in
             guard let self = self, let response = response else { return }
 
             guard response.status == "ok" else { return }
@@ -627,36 +793,32 @@ class VPNManager: ObservableObject {
     /// Update traffic statistics from helper logs
     private func updateTrafficStats() {
         // Get log from helper and parse traffic stats
-        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil),
-                     timeoutSeconds: 1.0) { [weak self] response in
+        sendToHelper(HelperRequest(action: "traffic", key: nil, fullTunnel: nil, binaryPath: nil, service: nil, mtlsCertPath: nil, excludeRoutes: nil, adaptiveLevel: nil, dnsProxy: nil, killSwitch: nil),                     timeoutSeconds: 1.0) { [weak self] response in
             guard let self = self,
                   let response = response,
                   response.status == "ok" else {
                 return
             }
             
-            // Response message contains "sent:X,received:Y"
+            // Response message contains "sent:X,received:Y,quality:Z"
             let parts = response.message.components(separatedBy: ",")
             for part in parts {
                 let kv = part.components(separatedBy: ":")
                 if kv.count == 2 {
-                    if let value = Int64(kv[1]) {
-                        if kv[0] == "sent" {
-                            DispatchQueue.main.async {
-                                self.bytesSent = value
-                            }
-                        } else if kv[0] == "received" {
-                            DispatchQueue.main.async {
-                                self.bytesReceived = value
-                            }
-                        }
+                    let key = kv[0]
+                    let valStr = kv[1]
+                    if key == "sent", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesSent = value }
+                    } else if key == "received", let value = Int64(valStr) {
+                        DispatchQueue.main.async { self.bytesReceived = value }
+                    } else if key == "quality", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.qualityScore = value }
+                    } else if key == "adaptive", let value = Int(valStr) {
+                        DispatchQueue.main.async { self.serverAdaptiveLevel = value }
                     }
                 }
             }
         }
     }
 
-    deinit {
-        disconnect()
-    }
 }

@@ -2,11 +2,11 @@
 //!
 //! Dark theme, compact, 360×480 window.
 
-use eframe::egui::{self, Color32, CornerRadius, RichText, Vec2};
-use crate::vpn_manager::{ConnectionState, RecordingState, format_bytes};
-use crate::localization::{Lang, t};
+use crate::localization::{t, Lang};
+use crate::vpn_manager::{format_bytes, ConnectionState, RecordingState};
 use crate::AivpnApp;
 use crate::APP_VERSION;
+use eframe::egui::{self, Color32, CornerRadius, RichText, Vec2};
 
 // Color palette
 const GREEN: Color32 = Color32::from_rgb(0x4C, 0xD9, 0x64);
@@ -41,10 +41,7 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
     draw_recording_result(ui, app);
 
     // Recording section (when connected and recording capable)
-    if app.vpn.is_connected()
-        && app.vpn.recording_capability_known
-        && app.vpn.can_record_masks
-    {
+    if app.vpn.is_connected() && app.vpn.recording_capability_known && app.vpn.can_record_masks {
         draw_recording_section(ui, app);
         ui.add_space(4.0);
     }
@@ -53,6 +50,24 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
     draw_keys_section(ui, app);
 
     ui.add_space(4.0);
+
+    // Device public key
+    draw_device_key_section(ui, app);
+
+    ui.add_space(4.0);
+
+    // Adaptive mode toggle
+    draw_adaptive_section(ui, app);
+
+    ui.add_space(4.0);
+
+    // Kill-switch toggle + DNS proxy (only when disconnected)
+    if !app.vpn.is_connected() {
+        draw_kill_switch(ui, app);
+        ui.add_space(4.0);
+        draw_dns_proxy(ui, app);
+        ui.add_space(4.0);
+    }
 
     // Connect/Disconnect button
     draw_connect_button(ui, app);
@@ -92,11 +107,7 @@ fn draw_header(ui: &mut egui::Ui, app: &mut AivpnApp) {
         ui.label(RichText::new("AIVPN").size(20.0).strong().color(PURPLE));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let lang_btn = ui.button(
-                RichText::new(app.lang.label())
-                    .size(12.0)
-                    .color(BLUE),
-            );
+            let lang_btn = ui.button(RichText::new(app.lang.label()).size(12.0).color(BLUE));
             if lang_btn.clicked() {
                 app.lang.toggle();
             }
@@ -146,35 +157,23 @@ fn draw_status_card(ui: &mut egui::Ui, app: &AivpnApp) {
 fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
     let stats = app.vpn.stats();
     let up_to_date = stats.bytes_sent > 0 || stats.bytes_received > 0;
-    
+
     egui::Frame::new()
         .fill(CARD_BG)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(12.0)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t(app.lang, "traffic"))
-                        .size(13.0)
-                        .color(DIM),
-                );
+                ui.label(RichText::new(t(app.lang, "traffic")).size(13.0).color(DIM));
                 if !up_to_date {
                     ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("waiting...")
-                            .size(11.0)
-                            .color(DIM),
-                    );
+                    ui.label(RichText::new("waiting...").size(11.0).color(DIM));
                 }
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 // Download - smooth arrow
-                ui.label(
-                    RichText::new("⬇")
-                        .size(18.0)
-                        .color(GREEN),
-                );
+                ui.label(RichText::new("⬇").size(18.0).color(GREEN));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format_bytes(stats.bytes_received))
@@ -182,15 +181,11 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                         .color(Color32::WHITE)
                         .strong(),
                 );
-                
+
                 ui.add_space(32.0);
-                
+
                 // Upload - smooth arrow
-                ui.label(
-                    RichText::new("⬆")
-                        .size(18.0)
-                        .color(BLUE),
-                );
+                ui.label(RichText::new("⬆").size(18.0).color(BLUE));
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format_bytes(stats.bytes_sent))
@@ -198,6 +193,33 @@ fn draw_traffic_stats(ui: &mut egui::Ui, app: &AivpnApp) {
                         .color(Color32::WHITE)
                         .strong(),
                 );
+
+                if stats.quality_score > 0 {
+                    ui.add_space(32.0);
+                    let q = stats.quality_score;
+                    let q_color = if q >= 80 {
+                        GREEN
+                    } else if q >= 50 {
+                        Color32::YELLOW
+                    } else {
+                        Color32::RED
+                    };
+                    ui.label(
+                        RichText::new(format!("Q: {}/100", q))
+                            .size(13.0)
+                            .color(q_color),
+                    );
+                }
+                if stats.server_adaptive_level > 0 {
+                    ui.add_space(8.0);
+                    let label = match stats.server_adaptive_level {
+                        1 => "A: Light",
+                        2 => "A: Aggressive",
+                        3 => "A: Satellite",
+                        _ => "A: Off",
+                    };
+                    ui.label(RichText::new(label).size(13.0).color(Color32::LIGHT_BLUE));
+                }
             });
         });
 }
@@ -234,23 +256,13 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                 ui.vertical(|ui| {
                     ui.allocate_ui(Vec2::new(ui.available_width(), 60.0), |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new("📋")
-                                    .size(28.0)
-                                    .color(DIM),
-                            );
+                            ui.label(RichText::new("📋").size(28.0).color(DIM));
                             ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(t(app.lang, "no_keys"))
-                                    .size(12.0)
-                                    .color(DIM),
-                            );
+                            ui.label(RichText::new(t(app.lang, "no_keys")).size(12.0).color(DIM));
                             ui.add_space(4.0);
                             if ui
                                 .button(
-                                    RichText::new(t(app.lang, "add_key"))
-                                        .size(12.0)
-                                        .color(BLUE),
+                                    RichText::new(t(app.lang, "add_key")).size(12.0).color(BLUE),
                                 )
                                 .clicked()
                             {
@@ -271,14 +283,14 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     .show(ui, |ui| {
                         for (idx, key) in app.keys.keys.iter().enumerate() {
                             let is_selected = selected == Some(idx);
-                            
+
                             // Allocate space for the row
                             let desired_height = if key.full_tunnel { 44.0 } else { 36.0 };
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), desired_height),
                                 egui::Sense::click(),
                             );
-                            
+
                             // Draw background
                             let connected = app.vpn.is_connected();
                             let bg_fill = if is_selected {
@@ -295,43 +307,75 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                                     bg_fill,
                                 );
                             }
-                            
+
                             // Handle click for selection (only when disconnected)
                             if response.clicked() && !app.vpn.is_connected() {
                                 action = Some(KeyAction::Select(idx));
                             }
-                            
+
                             // Draw content manually with painter
-                            let text_color = if is_selected { Color32::WHITE } else { Color32::from_rgb(0xC0, 0xC0, 0xC0) };
-                            let name_font_id = egui::FontId::new(13.0, egui::FontFamily::Proportional);
-                            let addr_font_id = egui::FontId::new(10.0, egui::FontFamily::Proportional);
-                            
+                            let text_color = if is_selected {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(0xC0, 0xC0, 0xC0)
+                            };
+                            let name_font_id =
+                                egui::FontId::new(13.0, egui::FontFamily::Proportional);
+                            let addr_font_id =
+                                egui::FontId::new(10.0, egui::FontFamily::Proportional);
+
                             // Key name
                             let name_pos = rect.left_top() + Vec2::new(8.0, 6.0);
-                            ui.painter().text(name_pos, egui::Align2::LEFT_TOP, &key.name, name_font_id, text_color);
-                            
+                            ui.painter().text(
+                                name_pos,
+                                egui::Align2::LEFT_TOP,
+                                &key.name,
+                                name_font_id,
+                                text_color,
+                            );
+
                             // Full tunnel indicator
                             if key.full_tunnel {
                                 let ft_pos = rect.left_top() + Vec2::new(8.0, 22.0);
-                                ui.painter().text(ft_pos, egui::Align2::LEFT_TOP, t(app.lang, "full_tunnel"), egui::FontId::new(9.0, egui::FontFamily::Proportional), GREEN);
+                                ui.painter().text(
+                                    ft_pos,
+                                    egui::Align2::LEFT_TOP,
+                                    t(app.lang, "full_tunnel"),
+                                    egui::FontId::new(9.0, egui::FontFamily::Proportional),
+                                    GREEN,
+                                );
                             }
-                            
+
                             // Server address
                             if !key.server_addr.is_empty() {
                                 let addr_y = if key.full_tunnel { 32.0 } else { 22.0 };
                                 let addr_pos = rect.left_top() + Vec2::new(8.0, addr_y);
-                                ui.painter().text(addr_pos, egui::Align2::LEFT_TOP, &key.server_addr, addr_font_id, DIM);
+                                ui.painter().text(
+                                    addr_pos,
+                                    egui::Align2::LEFT_TOP,
+                                    &key.server_addr,
+                                    addr_font_id,
+                                    DIM,
+                                );
                             }
-                            
+
                             // Edit button (right side)
                             let edit_text = t(app.lang, "edit");
                             let edit_btn_rect = egui::Rect::from_min_size(
                                 rect.right_top() - Vec2::new(80.0, 0.0),
                                 Vec2::new(36.0, 20.0),
                             );
-                            let edit_btn_response = ui.interact(edit_btn_rect, ui.id().with(("edit", idx)), egui::Sense::click());
+                            let edit_btn_response = ui.interact(
+                                edit_btn_rect,
+                                ui.id().with(("edit", idx)),
+                                egui::Sense::click(),
+                            );
                             if edit_btn_response.hovered() {
-                                ui.painter().rect_filled(edit_btn_rect, egui::CornerRadius::same(3), Color32::from_rgb(0x50, 0x50, 0x55));
+                                ui.painter().rect_filled(
+                                    edit_btn_rect,
+                                    egui::CornerRadius::same(3),
+                                    Color32::from_rgb(0x50, 0x50, 0x55),
+                                );
                             }
                             if edit_btn_response.clicked() {
                                 action = Some(KeyAction::Edit(idx));
@@ -343,16 +387,24 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                                 egui::FontId::new(11.0, egui::FontFamily::Proportional),
                                 ORANGE,
                             );
-                            
+
                             // Delete button
                             let del_text = t(app.lang, "delete");
                             let del_btn_rect = egui::Rect::from_min_size(
                                 rect.right_top() - Vec2::new(40.0, 0.0),
                                 Vec2::new(36.0, 20.0),
                             );
-                            let del_btn_response = ui.interact(del_btn_rect, ui.id().with(("del", idx)), egui::Sense::click());
+                            let del_btn_response = ui.interact(
+                                del_btn_rect,
+                                ui.id().with(("del", idx)),
+                                egui::Sense::click(),
+                            );
                             if del_btn_response.hovered() {
-                                ui.painter().rect_filled(del_btn_rect, egui::CornerRadius::same(3), Color32::from_rgb(0x50, 0x30, 0x30));
+                                ui.painter().rect_filled(
+                                    del_btn_rect,
+                                    egui::CornerRadius::same(3),
+                                    Color32::from_rgb(0x50, 0x30, 0x30),
+                                );
                             }
                             if del_btn_response.clicked() {
                                 action = Some(KeyAction::Delete(idx));
@@ -381,12 +433,56 @@ fn draw_keys_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
                         app.new_key_name = key.name.clone();
                         app.new_key_value = key.key.clone();
                         app.new_key_full_tunnel = key.full_tunnel;
+                        app.new_key_use_proxy = key.proxy_listen.is_some();
+                        app.new_key_proxy_listen = key.proxy_listen.clone().unwrap_or_default();
+                        app.new_key_mtls_cert = key.mtls_cert_path.clone().unwrap_or_default();
                         app.editing_key_idx = Some(idx);
                         app.show_add_key = true;
                     }
                     None => {}
                 }
             }
+        });
+}
+
+fn draw_device_key_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    ui.label(
+        RichText::new(t(app.lang, "device_key"))
+            .size(13.0)
+            .color(DIM),
+    );
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| match &app.device_public_key {
+                Some(key) => {
+                    let short = if key.len() > 20 {
+                        format!("{}…{}", &key[..8], &key[key.len() - 8..])
+                    } else {
+                        key.clone()
+                    };
+                    ui.label(
+                        RichText::new(&short)
+                            .size(11.0)
+                            .color(Color32::LIGHT_GRAY)
+                            .monospace(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let full = key.clone();
+                        if ui
+                            .button(RichText::new(t(app.lang, "copy")).size(11.0))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(full);
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new("—").size(11.0).color(DIM));
+                }
+            });
         });
 }
 
@@ -410,7 +506,11 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
             );
 
             ui.add_space(4.0);
-            ui.label(RichText::new(t(app.lang, "key_value")).size(11.0).color(DIM));
+            ui.label(
+                RichText::new(t(app.lang, "key_value"))
+                    .size(11.0)
+                    .color(DIM),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut app.new_key_value)
                     .desired_width(f32::INFINITY)
@@ -420,8 +520,62 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut app.new_key_full_tunnel, "");
-                ui.label(RichText::new(t(app.lang, "full_tunnel")).size(12.0).color(Color32::from_rgb(0x90, 0xEE, 0x90)));
+                ui.label(
+                    RichText::new(t(app.lang, "full_tunnel"))
+                        .size(12.0)
+                        .color(Color32::from_rgb(0x90, 0xEE, 0x90)),
+                );
             });
+            if app.new_key_full_tunnel {
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(t(app.lang, "exclude_routes"))
+                        .size(11.0)
+                        .color(DIM),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(&mut app.new_key_exclude_routes)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(2)
+                        .hint_text(t(app.lang, "exclude_routes_hint")),
+                );
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut app.new_key_use_proxy, "");
+                ui.label(
+                    RichText::new(t(app.lang, "proxy_mode"))
+                        .size(12.0)
+                        .color(Color32::from_rgb(0x87, 0xCE, 0xFA)),
+                );
+            });
+            if app.new_key_use_proxy {
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(t(app.lang, "proxy_addr"))
+                        .size(11.0)
+                        .color(DIM),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_key_proxy_listen)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("127.0.0.1:1080"),
+                );
+            }
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("mTLS cert (optional path to .cert file)")
+                    .size(11.0)
+                    .color(DIM),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.new_key_mtls_cert)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("C:\\path\\to\\client.cert"),
+            );
+
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let save_clicked = ui
@@ -435,10 +589,42 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     let name = app.new_key_name.clone();
                     let value = app.new_key_value.clone();
                     let full_tunnel = app.new_key_full_tunnel;
-                    let result = if let Some(idx) = app.editing_key_idx {
-                        app.keys.update_key(idx, &name, &value, full_tunnel)
+                    let exclude_routes: Vec<String> = app
+                        .new_key_exclude_routes
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    let proxy_listen =
+                        if app.new_key_use_proxy && !app.new_key_proxy_listen.is_empty() {
+                            Some(app.new_key_proxy_listen.clone())
+                        } else {
+                            None
+                        };
+                    let mtls_cert_path = if app.new_key_mtls_cert.is_empty() {
+                        None
                     } else {
-                        app.keys.add_key(&name, &value, full_tunnel)
+                        Some(app.new_key_mtls_cert.clone())
+                    };
+                    let result = if let Some(idx) = app.editing_key_idx {
+                        app.keys.update_key(
+                            idx,
+                            &name,
+                            &value,
+                            full_tunnel,
+                            proxy_listen,
+                            mtls_cert_path,
+                            exclude_routes,
+                        )
+                    } else {
+                        app.keys.add_key(
+                            &name,
+                            &value,
+                            full_tunnel,
+                            proxy_listen,
+                            mtls_cert_path,
+                            exclude_routes,
+                        )
                     };
                     match result {
                         Ok(()) => {
@@ -447,6 +633,10 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                             app.new_key_name.clear();
                             app.new_key_value.clear();
                             app.new_key_full_tunnel = false;
+                            app.new_key_exclude_routes.clear();
+                            app.new_key_use_proxy = false;
+                            app.new_key_proxy_listen.clear();
+                            app.new_key_mtls_cert.clear();
                         }
                         Err(e) => app.set_error(e),
                     }
@@ -457,8 +647,49 @@ fn draw_key_form(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     app.new_key_name.clear();
                     app.new_key_value.clear();
                     app.new_key_full_tunnel = false;
+                    app.new_key_exclude_routes.clear();
+                    app.new_key_use_proxy = false;
+                    app.new_key_proxy_listen.clear();
+                    app.new_key_mtls_cert.clear();
                 }
             });
+        });
+}
+
+fn draw_kill_switch(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut app.kill_switch, "");
+                ui.label(
+                    RichText::new(t(app.lang, "kill_switch"))
+                        .size(12.0)
+                        .color(if app.kill_switch { RED } else { DIM }),
+                );
+            });
+        });
+}
+
+fn draw_dns_proxy(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(t(app.lang, "dns_proxy"))
+                    .size(11.0)
+                    .color(DIM),
+            );
+            ui.add_space(2.0);
+            egui::TextEdit::singleline(&mut app.dns_proxy)
+                .hint_text("127.0.0.1:5300")
+                .desired_width(ui.available_width())
+                .font(egui::TextStyle::Monospace)
+                .show(ui);
         });
 }
 
@@ -491,7 +722,24 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
                     Some(key) => {
                         let key_str = key.key.clone();
                         let full_tunnel = key.full_tunnel;
-                        if let Err(e) = app.vpn.connect(&key_str, full_tunnel) {
+                        let proxy_listen = key.proxy_listen.clone();
+                        let mtls_cert_path = key.mtls_cert_path.clone();
+                        let exclude_routes = key.exclude_routes.clone();
+                        let kill_switch = app.kill_switch;
+                        if let Err(e) = app.vpn.connect(
+                            &key_str,
+                            full_tunnel,
+                            proxy_listen.as_deref(),
+                            mtls_cert_path.as_deref(),
+                            &exclude_routes,
+                            kill_switch,
+                            app.adaptive_level,
+                            if app.dns_proxy.is_empty() {
+                                None
+                            } else {
+                                Some(app.dns_proxy.as_str())
+                            },
+                        ) {
                             app.set_error(e);
                         }
                     }
@@ -560,7 +808,11 @@ fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(6.0);
 
             // Service name input
-            ui.label(RichText::new(t(app.lang, "record_service_name")).size(11.0).color(DIM));
+            ui.label(
+                RichText::new(t(app.lang, "record_service_name"))
+                    .size(11.0)
+                    .color(DIM),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut app.recording_service_name)
                     .desired_width(f32::INFINITY)
@@ -612,8 +864,161 @@ fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
             ui.add_space(4.0);
 
             // Status text
-            let (status_text, status_color) = recording_status_display(&app.vpn.recording_state, app.lang);
+            let (status_text, status_color) =
+                recording_status_display(&app.vpn.recording_state, app.lang);
             ui.label(RichText::new(status_text).size(11.0).color(status_color));
+        });
+}
+
+fn draw_adaptive_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t(app.lang, "adaptive_mode"))
+                        .size(13.0)
+                        .color(DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let levels: &[(&str, u8)] =
+                        &[("Off", 0), ("Light", 1), ("Aggr.", 2), ("Sat.", 3)];
+                    for (label, lvl) in levels.iter().rev() {
+                        let selected = app.adaptive_level == *lvl;
+                        let btn = egui::Button::new(
+                            RichText::new(*label).size(11.0).color(if selected {
+                                GREEN
+                            } else {
+                                DIM
+                            }),
+                        );
+                        if ui.add(btn).clicked() {
+                            app.adaptive_level = *lvl;
+                        }
+                    }
+                    if app.vpn.is_connected() {
+                        ui.add_space(8.0);
+                        if ui
+                            .small_button(RichText::new("Diagnostics").size(11.0).color(BLUE))
+                            .clicked()
+                        {
+                            app.show_diagnostics = !app.show_diagnostics;
+                        }
+                    }
+                });
+            });
+        });
+
+    if app.show_diagnostics && app.vpn.is_connected() {
+        ui.add_space(4.0);
+        draw_diagnostics_section(ui, app);
+    }
+}
+
+fn draw_diagnostics_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    // Poll bench background thread for results each frame
+    if app.bench_running {
+        if let Some(ref rx) = app.bench_rx {
+            if let Ok(result) = rx.try_recv() {
+                if let Some(r) = result {
+                    app.bench_p50 = Some(r.latency_p50_ms);
+                    app.bench_p95 = Some(r.latency_p95_ms);
+                    app.bench_p99 = Some(r.latency_p99_ms);
+                    app.bench_loss = Some(r.packet_loss_pct);
+                    app.bench_quality = Some(r.quality_score);
+                }
+                app.bench_running = false;
+                app.bench_rx = None;
+            }
+        }
+    }
+
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(egui::Stroke::new(1.0, BLUE))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Diagnostics").size(13.0).color(BLUE).strong());
+            ui.add_space(6.0);
+
+            if app.bench_running {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Running benchmark…").size(11.0).color(DIM));
+                });
+            } else if app.bench_p50.is_some() {
+                let p50 = app.bench_p50.unwrap_or(0.0);
+                let p95 = app.bench_p95.unwrap_or(0.0);
+                let p99 = app.bench_p99.unwrap_or(0.0);
+                let loss = app.bench_loss.unwrap_or(0.0);
+                let quality = app.bench_quality.unwrap_or(0);
+
+                let quality_color = match quality {
+                    80..=100 => GREEN,
+                    50..=79 => ORANGE,
+                    _ => RED,
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Quality: {}/100", quality))
+                            .size(14.0)
+                            .color(quality_color)
+                            .strong(),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "P50: {:.0}ms  P95: {:.0}ms  P99: {:.0}ms",
+                        p50, p95, p99
+                    ))
+                    .size(11.0)
+                    .color(DIM),
+                );
+                ui.label(
+                    RichText::new(format!("Loss: {:.1}%", loss))
+                        .size(11.0)
+                        .color(if loss > 5.0 { RED } else { DIM }),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Run a benchmark to see latency & quality.")
+                        .size(11.0)
+                        .color(DIM),
+                );
+            }
+
+            ui.add_space(6.0);
+            let btn_label = if app.bench_running {
+                "Cancel"
+            } else {
+                "Run Benchmark"
+            };
+            if ui
+                .add_enabled(
+                    !app.bench_running,
+                    egui::Button::new(RichText::new(btn_label).size(12.0).color(Color32::WHITE))
+                        .fill(BLUE)
+                        .corner_radius(CornerRadius::same(5))
+                        .min_size(Vec2::new(ui.available_width(), 28.0)),
+                )
+                .clicked()
+            {
+                let server_addr = app.vpn.server_addr.clone().unwrap_or_default();
+                let binary = app.vpn.client_binary.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                app.bench_rx = Some(rx);
+                app.bench_running = true;
+                std::thread::spawn(move || {
+                    let result =
+                        crate::vpn_manager::VpnManager::run_bench_blocking(&binary, &server_addr);
+                    let _ = tx.send(result);
+                });
+            }
         });
 }
 

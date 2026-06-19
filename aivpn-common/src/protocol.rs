@@ -1,5 +1,5 @@
 //! AIVPN Wire Protocol
-//! 
+//!
 //! Implements packet format, inner payload encoding, and control messages
 
 use bytes::{BufMut, BytesMut};
@@ -27,6 +27,8 @@ pub enum InnerType {
     Control = 0x0002,
     Fragment = 0x0003,
     Ack = 0x0004,
+    /// FEC repair packet — XOR of N preceding data packets
+    FecRepair = 0x0005,
 }
 
 impl InnerType {
@@ -36,6 +38,7 @@ impl InnerType {
             0x0002 => Some(Self::Control),
             0x0003 => Some(Self::Fragment),
             0x0004 => Some(Self::Ack),
+            0x0005 => Some(Self::FecRepair),
             _ => None,
         }
     }
@@ -62,6 +65,23 @@ pub enum ControlSubtype {
     RecordingStatusRequest = 0x0F,
     RecordingStatus = 0x10,
     BootstrapDescriptorUpdate = 0x11,
+    PoolSync = 0x12,
+    /// Site-to-site subnet advertisement (0x13)
+    RouteSync = 0x13,
+    /// Multi-hop forwarded data packet (0x14)
+    ChainForward = 0x14,
+    /// Client mTLS certificate presentation (0x15)
+    ClientCert = 0x15,
+    /// Server notification that a ClientCert was rejected (0x16)
+    CertRejected = 0x16,
+    /// Device enrollment — client proves static X25519 key ownership via DH (0x17)
+    DeviceEnrollment = 0x17,
+    /// Server echoes keepalive timestamp for RTT measurement (0x18)
+    KeepaliveAck = 0x18,
+    /// Quality metrics report (0x19)
+    QualityReport = 0x19,
+    /// Server hints client to change adaptive mode level (0x1A)
+    AdaptiveHint = 0x1A,
 }
 
 impl ControlSubtype {
@@ -84,6 +104,15 @@ impl ControlSubtype {
             0x0F => Some(Self::RecordingStatusRequest),
             0x10 => Some(Self::RecordingStatus),
             0x11 => Some(Self::BootstrapDescriptorUpdate),
+            0x12 => Some(Self::PoolSync),
+            0x13 => Some(Self::RouteSync),
+            0x14 => Some(Self::ChainForward),
+            0x15 => Some(Self::ClientCert),
+            0x16 => Some(Self::CertRejected),
+            0x17 => Some(Self::DeviceEnrollment),
+            0x18 => Some(Self::KeepaliveAck),
+            0x19 => Some(Self::QualityReport),
+            0x1A => Some(Self::AdaptiveHint),
             _ => None,
         }
     }
@@ -111,7 +140,10 @@ impl InnerHeader {
         let inner_type = InnerType::from_u16(u16::from_le_bytes([data[0], data[1]]))
             .ok_or(Error::InvalidPacket("Unknown inner type"))?;
         let seq_num = u16::from_le_bytes([data[2], data[3]]);
-        Ok(Self { inner_type, seq_num })
+        Ok(Self {
+            inner_type,
+            seq_num,
+        })
     }
 }
 
@@ -147,12 +179,12 @@ impl AivpnPacket {
 
     /// Serialize packet to bytes
     pub fn to_bytes(&self) -> BytesMut {
-        let total_len = TAG_SIZE 
-            + self.mask_dependent_header.len() 
+        let total_len = TAG_SIZE
+            + self.mask_dependent_header.len()
             + 2 // pad_len
-            + self.encrypted_payload.len() 
+            + self.encrypted_payload.len()
             + self.random_padding.len();
-        
+
         let mut buf = BytesMut::with_capacity(total_len);
         buf.put_slice(&self.resonance_tag);
         buf.put_slice(&self.mask_dependent_header);
@@ -180,7 +212,7 @@ impl AivpnPacket {
         // For now, we'll parse it in the server/client with mask context
         // Return raw data for upper layers to parse
         let _remaining = &data[cursor..];
-        
+
         Ok(Self {
             resonance_tag,
             mask_dependent_header: Vec::new(),
@@ -240,7 +272,9 @@ pub enum ControlPayload {
         #[serde(with = "serde_bytes")]
         signature: [u8; 64],
     },
-    Keepalive,
+    Keepalive {
+        send_ts: u64,
+    },
     TelemetryRequest {
         metric_flags: u8,
     },
@@ -299,12 +333,58 @@ pub enum ControlPayload {
     BootstrapDescriptorUpdate {
         descriptor_data: Vec<u8>,
     },
+    /// Carries a full clients.json snapshot for pool-node synchronization.
+    PoolSync {
+        clients_json: Vec<u8>,
+    },
+    /// Site-to-site subnet advertisement — JSON array of CIDR strings.
+    RouteSync {
+        subnets_json: Vec<u8>,
+    },
+    /// Multi-hop chain-forward — raw inner IP payload to NAT-forward at exit node.
+    ChainForward {
+        payload: Vec<u8>,
+    },
+    /// Client mTLS certificate — 104-byte SimpleCert sent after session setup.
+    ClientCert {
+        cert_bytes: Vec<u8>,
+    },
+    /// Server rejection of a ClientCert — client should re-provision its certificate.
+    CertRejected {},
+    /// Device enrollment — client proves ownership of its static X25519 keypair.
+    /// Sent by client after ServerHello using ratcheted session keys.
+    /// `dh_proof` = X25519(static_priv, server_static_pub) — proves private key possession.
+    DeviceEnrollment {
+        static_pub: [u8; 32],
+        dh_proof: [u8; 32],
+    },
+    /// Server echoes client's keepalive timestamp for RTT measurement.
+    KeepaliveAck {
+        /// Echo of the timestamp sent by client in the keepalive
+        echo_ts: u64,
+    },
+    /// Quality metrics report sent by client or server.
+    QualityReport {
+        /// 0–100 composite quality score
+        quality: u8,
+        /// Round-trip time (EWMA) in milliseconds
+        rtt_ms: u16,
+        /// Packet loss in parts-per-million
+        loss_ppm: u32,
+        /// Jitter (EWMA) in milliseconds
+        jitter_ms: u16,
+    },
+    /// Server instructs client to switch adaptive mode level.
+    AdaptiveHint {
+        /// 0=Off, 1=Light, 2=Aggressive, 3=Satellite
+        level: u8,
+    },
 }
 
 impl ControlPayload {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
-        
+
         match self {
             Self::KeyRotate { new_eph_pub } => {
                 buf.push(ControlSubtype::KeyRotate as u8);
@@ -312,20 +392,29 @@ impl ControlPayload {
                 buf.extend_from_slice(&(new_eph_pub.len() as u16).to_le_bytes());
                 buf.extend_from_slice(new_eph_pub);
             }
-            Self::MaskUpdate { mask_data, signature } => {
+            Self::MaskUpdate {
+                mask_data,
+                signature,
+            } => {
                 buf.push(ControlSubtype::MaskUpdate as u8);
                 buf.extend_from_slice(&(mask_data.len() as u16).to_le_bytes());
                 buf.extend_from_slice(mask_data);
                 buf.extend_from_slice(signature);
             }
-            Self::Keepalive => {
+            Self::Keepalive { send_ts } => {
                 buf.push(ControlSubtype::Keepalive as u8);
+                buf.extend_from_slice(&send_ts.to_le_bytes());
             }
             Self::TelemetryRequest { metric_flags } => {
                 buf.push(ControlSubtype::TelemetryRequest as u8);
                 buf.push(*metric_flags);
             }
-            Self::TelemetryResponse { packet_loss, rtt_ms, jitter_ms, buffer_pct } => {
+            Self::TelemetryResponse {
+                packet_loss,
+                rtt_ms,
+                jitter_ms,
+                buffer_pct,
+            } => {
                 buf.push(ControlSubtype::TelemetryResponse as u8);
                 buf.push(0); // flags
                 buf.extend_from_slice(&packet_loss.to_le_bytes());
@@ -342,12 +431,19 @@ impl ControlPayload {
                 buf.push(ControlSubtype::Shutdown as u8);
                 buf.push(*reason);
             }
-            Self::ControlAck { ack_seq, ack_for_subtype } => {
+            Self::ControlAck {
+                ack_seq,
+                ack_for_subtype,
+            } => {
                 buf.push(ControlSubtype::ControlAck as u8);
                 buf.extend_from_slice(&ack_seq.to_le_bytes());
                 buf.push(*ack_for_subtype);
             }
-            Self::ServerHello { server_eph_pub, signature, network_config } => {
+            Self::ServerHello {
+                server_eph_pub,
+                signature,
+                network_config,
+            } => {
                 buf.push(ControlSubtype::ServerHello as u8);
                 buf.extend_from_slice(server_eph_pub);
                 buf.extend_from_slice(signature);
@@ -372,7 +468,11 @@ impl ControlPayload {
                 buf.push(ControlSubtype::RecordingStop as u8);
                 buf.extend_from_slice(session_id);
             }
-            Self::RecordingComplete { service, mask_id, confidence } => {
+            Self::RecordingComplete {
+                service,
+                mask_id,
+                confidence,
+            } => {
                 buf.push(ControlSubtype::RecordingComplete as u8);
                 let service_bytes = service.as_bytes();
                 buf.extend_from_slice(&(service_bytes.len() as u16).to_le_bytes());
@@ -391,7 +491,10 @@ impl ControlPayload {
             Self::RecordingStatusRequest => {
                 buf.push(ControlSubtype::RecordingStatusRequest as u8);
             }
-            Self::RecordingStatus { can_record, active_service } => {
+            Self::RecordingStatus {
+                can_record,
+                active_service,
+            } => {
                 buf.push(ControlSubtype::RecordingStatus as u8);
                 let mut flags = 0u8;
                 if *can_record {
@@ -412,8 +515,59 @@ impl ControlPayload {
                 buf.extend_from_slice(&(descriptor_data.len() as u16).to_le_bytes());
                 buf.extend_from_slice(descriptor_data);
             }
+            Self::PoolSync { clients_json } => {
+                buf.push(ControlSubtype::PoolSync as u8);
+                buf.extend_from_slice(&(clients_json.len() as u32).to_le_bytes());
+                buf.extend_from_slice(clients_json);
+            }
+            Self::RouteSync { subnets_json } => {
+                buf.push(ControlSubtype::RouteSync as u8);
+                buf.extend_from_slice(&(subnets_json.len() as u32).to_le_bytes());
+                buf.extend_from_slice(subnets_json);
+            }
+            Self::ChainForward { payload } => {
+                buf.push(ControlSubtype::ChainForward as u8);
+                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                buf.extend_from_slice(payload);
+            }
+            Self::ClientCert { cert_bytes } => {
+                buf.push(ControlSubtype::ClientCert as u8);
+                buf.extend_from_slice(&(cert_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(cert_bytes);
+            }
+            Self::CertRejected {} => {
+                buf.push(ControlSubtype::CertRejected as u8);
+            }
+            Self::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
+                buf.push(ControlSubtype::DeviceEnrollment as u8);
+                buf.extend_from_slice(static_pub);
+                buf.extend_from_slice(dh_proof);
+            }
+            Self::KeepaliveAck { echo_ts } => {
+                buf.push(ControlSubtype::KeepaliveAck as u8);
+                buf.extend_from_slice(&echo_ts.to_le_bytes());
+            }
+            Self::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
+                buf.push(ControlSubtype::QualityReport as u8);
+                buf.push(*quality);
+                buf.extend_from_slice(&rtt_ms.to_le_bytes());
+                buf.extend_from_slice(&loss_ppm.to_le_bytes());
+                buf.extend_from_slice(&jitter_ms.to_le_bytes());
+            }
+            Self::AdaptiveHint { level } => {
+                buf.push(ControlSubtype::AdaptiveHint as u8);
+                buf.push(*level);
+            }
         }
-        
+
         Ok(buf)
     }
 
@@ -449,14 +603,26 @@ impl ControlPayload {
                 let mask_data = data[3..3 + mask_len].to_vec();
                 let mut signature = [0u8; 64];
                 signature.copy_from_slice(&data[3 + mask_len..3 + mask_len + 64]);
-                Ok(Self::MaskUpdate { mask_data, signature })
+                Ok(Self::MaskUpdate {
+                    mask_data,
+                    signature,
+                })
             }
-            ControlSubtype::Keepalive => Ok(Self::Keepalive),
+            ControlSubtype::Keepalive => {
+                let send_ts = if data.len() >= 9 {
+                    u64::from_le_bytes(data[1..9].try_into().unwrap())
+                } else {
+                    0
+                };
+                Ok(Self::Keepalive { send_ts })
+            }
             ControlSubtype::TelemetryRequest => {
                 if data.len() < 2 {
                     return Err(Error::InvalidPacket("TelemetryRequest too short"));
                 }
-                Ok(Self::TelemetryRequest { metric_flags: data[1] })
+                Ok(Self::TelemetryRequest {
+                    metric_flags: data[1],
+                })
             }
             ControlSubtype::TelemetryResponse => {
                 if data.len() < 12 {
@@ -473,8 +639,8 @@ impl ControlPayload {
                 if data.len() < 9 {
                     return Err(Error::InvalidPacket("TimeSync too short"));
                 }
-                Ok(Self::TimeSync { 
-                    server_ts_ms: u64::from_le_bytes(data[1..9].try_into().unwrap()) 
+                Ok(Self::TimeSync {
+                    server_ts_ms: u64::from_le_bytes(data[1..9].try_into().unwrap()),
                 })
             }
             ControlSubtype::Shutdown => {
@@ -500,10 +666,9 @@ impl ControlPayload {
                 server_eph_pub.copy_from_slice(&data[1..33]);
                 let mut signature = [0u8; 64];
                 signature.copy_from_slice(&data[33..97]);
-                let network_config = if data.len() >= 97 + ClientNetworkConfig::WIRE_SIZE {
-                    Some(ClientNetworkConfig::decode_wire(
-                        &data[97..97 + ClientNetworkConfig::WIRE_SIZE],
-                    )?)
+                let network_config = if data.len() >= 97 + 12 {
+                    let end = (97 + ClientNetworkConfig::WIRE_SIZE).min(data.len());
+                    Some(ClientNetworkConfig::decode_wire(&data[97..end])?)
                 } else {
                     None
                 };
@@ -565,9 +730,16 @@ impl ControlPayload {
                 let mask_id = String::from_utf8_lossy(&data[cursor..cursor + mid_len]).to_string();
                 cursor += mid_len;
                 let confidence = f32::from_le_bytes([
-                    data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3],
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
                 ]);
-                Ok(Self::RecordingComplete { service, mask_id, confidence })
+                Ok(Self::RecordingComplete {
+                    service,
+                    mask_id,
+                    confidence,
+                })
             }
             ControlSubtype::RecordingFailed => {
                 if data.len() < 3 {
@@ -590,17 +762,24 @@ impl ControlPayload {
                 let has_service = (flags & 0x02) != 0;
                 let active_service = if has_service {
                     if data.len() < 4 {
-                        return Err(Error::InvalidPacket("RecordingStatus missing service length"));
+                        return Err(Error::InvalidPacket(
+                            "RecordingStatus missing service length",
+                        ));
                     }
                     let service_len = u16::from_le_bytes([data[2], data[3]]) as usize;
                     if data.len() < 4 + service_len {
-                        return Err(Error::InvalidPacket("RecordingStatus invalid service length"));
+                        return Err(Error::InvalidPacket(
+                            "RecordingStatus invalid service length",
+                        ));
                     }
                     Some(String::from_utf8_lossy(&data[4..4 + service_len]).to_string())
                 } else {
                     None
                 };
-                Ok(Self::RecordingStatus { can_record, active_service })
+                Ok(Self::RecordingStatus {
+                    can_record,
+                    active_service,
+                })
             }
             ControlSubtype::BootstrapDescriptorUpdate => {
                 if data.len() < 3 {
@@ -608,11 +787,99 @@ impl ControlPayload {
                 }
                 let descriptor_len = u16::from_le_bytes([data[1], data[2]]) as usize;
                 if data.len() < 3 + descriptor_len {
-                    return Err(Error::InvalidPacket("BootstrapDescriptorUpdate invalid length"));
+                    return Err(Error::InvalidPacket(
+                        "BootstrapDescriptorUpdate invalid length",
+                    ));
                 }
                 Ok(Self::BootstrapDescriptorUpdate {
                     descriptor_data: data[3..3 + descriptor_len].to_vec(),
                 })
+            }
+            ControlSubtype::PoolSync => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("PoolSync too short"));
+                }
+                let payload_len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + payload_len {
+                    return Err(Error::InvalidPacket("PoolSync invalid length"));
+                }
+                Ok(Self::PoolSync {
+                    clients_json: data[5..5 + payload_len].to_vec(),
+                })
+            }
+            ControlSubtype::RouteSync => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("RouteSync too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("RouteSync invalid length"));
+                }
+                Ok(Self::RouteSync {
+                    subnets_json: data[5..5 + len].to_vec(),
+                })
+            }
+            ControlSubtype::ChainForward => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("ChainForward too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("ChainForward invalid length"));
+                }
+                Ok(Self::ChainForward {
+                    payload: data[5..5 + len].to_vec(),
+                })
+            }
+            ControlSubtype::ClientCert => {
+                if data.len() < 5 {
+                    return Err(Error::InvalidPacket("ClientCert too short"));
+                }
+                let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                if data.len() < 5 + len {
+                    return Err(Error::InvalidPacket("ClientCert invalid length"));
+                }
+                Ok(Self::ClientCert {
+                    cert_bytes: data[5..5 + len].to_vec(),
+                })
+            }
+            ControlSubtype::CertRejected => Ok(Self::CertRejected {}),
+            ControlSubtype::DeviceEnrollment => {
+                if data.len() < 65 {
+                    return Err(Error::InvalidPacket("DeviceEnrollment too short"));
+                }
+                let mut static_pub = [0u8; 32];
+                let mut dh_proof = [0u8; 32];
+                static_pub.copy_from_slice(&data[1..33]);
+                dh_proof.copy_from_slice(&data[33..65]);
+                Ok(Self::DeviceEnrollment {
+                    static_pub,
+                    dh_proof,
+                })
+            }
+            ControlSubtype::KeepaliveAck => {
+                if data.len() < 9 {
+                    return Err(Error::InvalidPacket("KeepaliveAck too short"));
+                }
+                let echo_ts = u64::from_le_bytes(data[1..9].try_into().unwrap());
+                Ok(Self::KeepaliveAck { echo_ts })
+            }
+            ControlSubtype::QualityReport => {
+                if data.len() < 10 {
+                    return Err(Error::InvalidPacket("QualityReport too short"));
+                }
+                Ok(Self::QualityReport {
+                    quality: data[1],
+                    rtt_ms: u16::from_le_bytes([data[2], data[3]]),
+                    loss_ppm: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+                    jitter_ms: u16::from_le_bytes([data[8], data[9]]),
+                })
+            }
+            ControlSubtype::AdaptiveHint => {
+                if data.len() < 2 {
+                    return Err(Error::InvalidPacket("AdaptiveHint too short"));
+                }
+                Ok(Self::AdaptiveHint { level: data[1] })
             }
         }
     }
@@ -628,7 +895,11 @@ pub struct AckPacket {
 
 impl AckPacket {
     pub fn new(ack_seq: u16, ack_base: u16, bitmap: Vec<u8>) -> Self {
-        Self { ack_seq, ack_base, bitmap }
+        Self {
+            ack_seq,
+            ack_base,
+            bitmap,
+        }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -652,6 +923,10 @@ impl AckPacket {
             return Err(Error::InvalidPacket("ACK invalid length"));
         }
         let bitmap = data[7..7 + bitmap_len].to_vec();
-        Ok(Self { ack_seq, ack_base, bitmap })
+        Ok(Self {
+            ack_seq,
+            ack_base,
+            bitmap,
+        })
     }
 }

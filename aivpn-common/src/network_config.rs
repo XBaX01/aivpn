@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 pub const DEFAULT_VPN_MTU: u16 = 1346;
+pub const DEFAULT_KEEPALIVE_SECS: u8 = 8;
 pub const LEGACY_VPN_PREFIX_LEN: u8 = 24;
 pub const LEGACY_SERVER_VPN_IP: Ipv4Addr = Ipv4Addr::new(10, 100, 0, 1);
 
@@ -20,7 +21,11 @@ fn default_mtu() -> u16 {
     DEFAULT_VPN_MTU
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+fn default_ipv6_prefix() -> String {
+    "fd10:cafe::/48".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnNetworkConfig {
     #[serde(default = "default_server_vpn_ip")]
     pub server_vpn_ip: Ipv4Addr,
@@ -28,6 +33,16 @@ pub struct VpnNetworkConfig {
     pub prefix_len: u8,
     #[serde(default = "default_mtu")]
     pub mtu: u16,
+    /// Keepalive interval pushed to clients in ServerHello. None = client uses its default (8s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u8>,
+    /// Enable IPv6 dual-stack (NAT66). When true, the server will configure
+    /// ip6tables/nftables masquerading and assign IPv6 addresses to clients.
+    #[serde(default)]
+    pub ipv6_enabled: bool,
+    /// IPv6 ULA prefix allocated to VPN clients. Must be a /48.
+    #[serde(default = "default_ipv6_prefix")]
+    pub ipv6_prefix: String,
 }
 
 impl Default for VpnNetworkConfig {
@@ -36,6 +51,9 @@ impl Default for VpnNetworkConfig {
             server_vpn_ip: default_server_vpn_ip(),
             prefix_len: default_prefix_len(),
             mtu: default_mtu(),
+            keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: default_ipv6_prefix(),
         }
     }
 }
@@ -43,10 +61,15 @@ impl Default for VpnNetworkConfig {
 impl VpnNetworkConfig {
     pub fn validate(&self) -> Result<()> {
         if !(1..=30).contains(&self.prefix_len) {
-            return Err(Error::InvalidPacket("VPN prefix length must be in range 1..=30"));
+            return Err(Error::InvalidPacket(
+                "VPN prefix length must be in range 1..=30",
+            ));
         }
-        if self.server_vpn_ip == self.network_addr() || self.server_vpn_ip == self.broadcast_addr() {
-            return Err(Error::InvalidPacket("Server VPN IP must be a usable host address"));
+        if self.server_vpn_ip == self.network_addr() || self.server_vpn_ip == self.broadcast_addr()
+        {
+            return Err(Error::InvalidPacket(
+                "Server VPN IP must be a usable host address",
+            ));
         }
         Ok(())
     }
@@ -101,10 +124,14 @@ impl VpnNetworkConfig {
 
     pub fn client_config(&self, client_ip: Ipv4Addr) -> Result<ClientNetworkConfig> {
         if !self.is_usable_host(client_ip) {
-            return Err(Error::InvalidPacket("Client VPN IP is outside configured VPN subnet"));
+            return Err(Error::InvalidPacket(
+                "Client VPN IP is outside configured VPN subnet",
+            ));
         }
         if client_ip == self.server_vpn_ip {
-            return Err(Error::InvalidPacket("Client VPN IP cannot equal server VPN IP"));
+            return Err(Error::InvalidPacket(
+                "Client VPN IP cannot equal server VPN IP",
+            ));
         }
         Ok(ClientNetworkConfig {
             client_ip,
@@ -112,6 +139,8 @@ impl VpnNetworkConfig {
             prefix_len: self.prefix_len,
             mtu: self.mtu,
             mdh_len: default_mdh_len(),
+            keepalive_secs: self.keepalive_secs,
+            ipv6_address: None,
         })
     }
 
@@ -128,7 +157,7 @@ impl VpnNetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientNetworkConfig {
     pub client_ip: Ipv4Addr,
     pub server_vpn_ip: Ipv4Addr,
@@ -140,12 +169,22 @@ pub struct ClientNetworkConfig {
     /// Defaults to 20 (STUN/WebRTC mask) for backward compatibility.
     #[serde(default = "default_mdh_len")]
     pub mdh_len: u16,
+    /// Keepalive interval in seconds. None = use client default (8s).
+    /// Sent by server in ServerHello to override per-network settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u8>,
+    /// Assigned IPv6 address for this client (e.g. "fd10:cafe::2").
+    /// None when the server has IPv6 disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_address: Option<String>,
 }
 
-fn default_mdh_len() -> u16 { 20 }
+fn default_mdh_len() -> u16 {
+    20
+}
 
 impl ClientNetworkConfig {
-    pub const WIRE_SIZE: usize = 12;
+    pub const WIRE_SIZE: usize = 13;
     const WIRE_VERSION: u8 = 1;
 
     pub fn validate(&self) -> Result<()> {
@@ -153,6 +192,9 @@ impl ClientNetworkConfig {
             server_vpn_ip: self.server_vpn_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
+            keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: default_ipv6_prefix(),
         }
         .client_config(self.client_ip)
         .map(|_| ())
@@ -177,16 +219,28 @@ impl ClientNetworkConfig {
         buf[2..4].copy_from_slice(&self.mtu.to_le_bytes());
         buf[4..8].copy_from_slice(&self.server_vpn_ip.octets());
         buf[8..12].copy_from_slice(&self.client_ip.octets());
+        buf[12] = self.keepalive_secs.unwrap_or(0);
         buf
     }
 
     pub fn decode_wire(data: &[u8]) -> Result<Self> {
-        if data.len() != Self::WIRE_SIZE {
-            return Err(Error::InvalidPacket("Client network config has invalid wire length"));
+        // Accept both old (12-byte) and new (13-byte) wire format
+        if data.len() < 12 {
+            return Err(Error::InvalidPacket(
+                "Client network config has invalid wire length",
+            ));
         }
         if data[0] != Self::WIRE_VERSION {
-            return Err(Error::InvalidPacket("Unsupported client network config wire version"));
+            return Err(Error::InvalidPacket(
+                "Unsupported client network config wire version",
+            ));
         }
+
+        let keepalive_secs = if data.len() >= 13 && data[12] > 0 {
+            Some(data[12])
+        } else {
+            None
+        };
 
         let config = Self {
             prefix_len: data[1],
@@ -194,6 +248,8 @@ impl ClientNetworkConfig {
             server_vpn_ip: Ipv4Addr::new(data[4], data[5], data[6], data[7]),
             client_ip: Ipv4Addr::new(data[8], data[9], data[10], data[11]),
             mdh_len: default_mdh_len(),
+            keepalive_secs,
+            ipv6_address: None,
         };
         config.validate()?;
         Ok(config)
@@ -238,10 +294,29 @@ mod tests {
             prefix_len: 24,
             mtu: 1346,
             mdh_len: 20,
+            keepalive_secs: Some(4),
+            ipv6_address: None,
         };
 
         let decoded = ClientNetworkConfig::decode_wire(&config.encode_wire()).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn wire_decode_old_12_byte_format_backward_compat() {
+        // Old 12-byte wire format must decode cleanly with keepalive_secs = None
+        let old_wire: [u8; 12] = {
+            let mut buf = [0u8; 12];
+            buf[0] = 1; // version
+            buf[1] = 24; // prefix_len
+            buf[2..4].copy_from_slice(&1346u16.to_le_bytes());
+            buf[4..8].copy_from_slice(&Ipv4Addr::new(10, 150, 0, 1).octets());
+            buf[8..12].copy_from_slice(&Ipv4Addr::new(10, 150, 0, 2).octets());
+            buf
+        };
+        let decoded = ClientNetworkConfig::decode_wire(&old_wire).unwrap();
+        assert_eq!(decoded.keepalive_secs, None);
+        assert_eq!(decoded.mtu, 1346);
     }
 
     #[test]
@@ -250,6 +325,9 @@ mod tests {
             server_vpn_ip: Ipv4Addr::new(10, 150, 0, 1),
             prefix_len: 24,
             mtu: 1346,
+            keepalive_secs: None,
+            ipv6_enabled: false,
+            ipv6_prefix: "fd10:cafe::/48".to_string(),
         };
 
         assert_eq!(config.network_addr(), Ipv4Addr::new(10, 150, 0, 0));

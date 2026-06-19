@@ -35,6 +35,20 @@ pub struct ClientConfig {
     pub created_at: DateTime<Utc>,
     /// Traffic and connection statistics
     pub stats: ClientStats,
+    /// Per-client QoS / bandwidth settings (0.8.0+, optional for backward compat)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<crate::qos::ClientQos>,
+    /// Static X25519 device public key bound to this client (0.9.0+).
+    /// None = any device may connect; Some = only the enrolled device may connect.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_base64_bytes"
+    )]
+    pub device_pubkey: Option<[u8; 32]>,
+    /// When true, the first connecting device's static key is auto-bound (one-time enrollment).
+    #[serde(default)]
+    pub one_time: bool,
 }
 
 /// Per-client traffic statistics
@@ -90,9 +104,7 @@ impl ClientDatabase {
             ClientDbFile::default()
         };
 
-        let last_mtime = Mutex::new(
-            std::fs::metadata(file_path).and_then(|m| m.modified()).ok()
-        );
+        let last_mtime = Mutex::new(std::fs::metadata(file_path).and_then(|m| m.modified()).ok());
 
         Ok(Self {
             data: RwLock::new(data),
@@ -141,7 +153,10 @@ impl ClientDatabase {
         chacha20poly1305::aead::OsRng.fill_bytes(&mut id_bytes);
         chacha20poly1305::aead::OsRng.fill_bytes(&mut psk);
 
-        let id = id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let id = id_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
         let client = ClientConfig {
             id,
@@ -151,6 +166,9 @@ impl ClientDatabase {
             enabled: true,
             created_at: Utc::now(),
             stats: ClientStats::default(),
+            qos: None,
+            device_pubkey: None,
+            one_time: false,
         };
 
         data.clients.push(client.clone());
@@ -160,8 +178,77 @@ impl ClientDatabase {
         Ok(client)
     }
 
+    /// Add a new one-time enrollment client — the first device to connect will be auto-bound.
+    pub fn add_client_one_time(&self, name: &str) -> Result<ClientConfig> {
+        let mut client = self.add_client(name)?;
+        {
+            let mut data = self.data.write();
+            if let Some(c) = data.clients.iter_mut().find(|c| c.id == client.id) {
+                c.one_time = true;
+                client.one_time = true;
+            }
+        }
+        self.save()?;
+        Ok(client)
+    }
+
+    /// Find client by human-readable name.
+    pub fn find_by_name(&self, name: &str) -> Option<ClientConfig> {
+        let data = self.data.read();
+        data.clients.iter().find(|c| c.name == name).cloned()
+    }
+
+    /// Enroll or verify a device public key for `client_id`.
+    ///
+    /// Returns `Ok(true)` if the key was newly bound (one-time enrollment completed).
+    /// Returns `Ok(false)` if the key was already bound and matches.
+    /// Returns `Err` if there is an existing binding that does not match the presented key.
+    pub fn enroll_device(&self, client_id: &str, static_pub: &[u8; 32]) -> Result<bool> {
+        let mut data = self.data.write();
+        let client = data
+            .clients
+            .iter_mut()
+            .find(|c| c.id == client_id)
+            .ok_or_else(|| Error::Session(format!("Client '{}' not found", client_id)))?;
+
+        match client.device_pubkey {
+            None => {
+                client.device_pubkey = Some(*static_pub);
+                client.one_time = false;
+                drop(data);
+                self.save()?;
+                Ok(true)
+            }
+            Some(ref bound) => {
+                use subtle::ConstantTimeEq;
+                if bound.ct_eq(static_pub).into() {
+                    Ok(false)
+                } else {
+                    Err(Error::Session(format!(
+                        "Device binding mismatch for client '{}'",
+                        client_id
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Reset device binding — clears the bound key and re-enables one-time enrollment.
+    pub fn reset_device_binding(&self, client_id: &str) -> Result<()> {
+        let mut data = self.data.write();
+        let client = data
+            .clients
+            .iter_mut()
+            .find(|c| c.id == client_id)
+            .ok_or_else(|| Error::Session(format!("Client '{}' not found", client_id)))?;
+        client.device_pubkey = None;
+        client.one_time = true;
+        drop(data);
+        self.save()
+    }
+
     pub fn network_config(&self) -> VpnNetworkConfig {
-        self.network_config
+        self.network_config.clone()
     }
 
     /// Remove a client by ID
@@ -251,7 +338,10 @@ impl ClientDatabase {
             Ok(changed) => {
                 *self.last_mtime.lock() = current_mtime;
                 if changed {
-                    info!("Client database reloaded from disk ({} clients)", self.list_clients().len());
+                    info!(
+                        "Client database reloaded from disk ({} clients)",
+                        self.list_clients().len()
+                    );
                 }
                 changed
             }
@@ -275,14 +365,17 @@ impl ClientDatabase {
         // Check if anything actually changed in the client configuration.
         // PSK must be part of the signature so secret rotation takes effect
         // without requiring a full server restart.
-        let old_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = data.clients
+        let old_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = data
+            .clients
             .iter()
             .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
             .collect();
-        let new_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> = new_data.clients
-            .iter()
-            .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
-            .collect();
+        let new_sig: std::collections::HashSet<(String, String, [u8; 32], Ipv4Addr, bool)> =
+            new_data
+                .clients
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone(), c.psk, c.vpn_ip, c.enabled))
+                .collect();
         let changed = old_sig != new_sig;
 
         if !changed {
@@ -290,27 +383,97 @@ impl ClientDatabase {
         }
 
         // Build a map of existing stats by client ID
-        let mut stats_map: std::collections::HashMap<String, ClientStats> = std::collections::HashMap::new();
+        let mut stats_map: std::collections::HashMap<String, ClientStats> =
+            std::collections::HashMap::new();
         for client in &data.clients {
             stats_map.insert(client.id.clone(), client.stats.clone());
         }
 
         // Replace clients list, preserving stats for existing clients
-        data.clients = new_data.clients.into_iter().map(|mut c| {
-            if let Some(saved_stats) = stats_map.get(&c.id) {
-                c.stats = saved_stats.clone();
-            }
-            c
-        }).collect();
+        data.clients = new_data
+            .clients
+            .into_iter()
+            .map(|mut c| {
+                if let Some(saved_stats) = stats_map.get(&c.id) {
+                    c.stats = saved_stats.clone();
+                }
+                c
+            })
+            .collect();
         data.next_host_offset = new_data.next_host_offset;
 
         Ok(true)
     }
 
+    /// Merge clients received from a pool peer into the local database.
+    /// Upserts by client ID — adds new clients, updates existing ones if PSK matches.
+    /// Returns the number of clients merged.
+    pub fn merge_from_json(&self, json: &str) -> Result<usize> {
+        let incoming: Vec<ClientConfig> = serde_json::from_str(json)
+            .map_err(|e| Error::Session(format!("merge_from_json parse: {}", e)))?;
+        let mut data = self.data.write();
+        let mut merged = 0usize;
+        for inc in incoming {
+            if let Some(existing) = data.clients.iter_mut().find(|c| c.id == inc.id) {
+                // Only update if PSK matches (same logical client)
+                if existing.psk == inc.psk {
+                    existing.name = inc.name;
+                    existing.enabled = inc.enabled;
+                    existing.qos = inc.qos;
+                    merged += 1;
+                }
+            } else {
+                // H-S-2: Reject incoming records whose vpn_ip is already
+                // assigned to a *different* client — prevents pool sync from
+                // overwriting IP assignments and causing routing collisions.
+                let ip_conflict = data
+                    .clients
+                    .iter()
+                    .any(|c| c.vpn_ip == inc.vpn_ip && c.id != inc.id);
+                if ip_conflict {
+                    warn!(
+                        "merge_from_json: skipping client '{}' — vpn_ip {} already assigned to another client",
+                        inc.id, inc.vpn_ip
+                    );
+                    continue;
+                }
+                data.clients.push(inc);
+                merged += 1;
+            }
+        }
+        drop(data);
+        if merged > 0 {
+            self.save()?;
+        }
+        Ok(merged)
+    }
+
+    /// Export the full client list as JSON (for pool sync or backup).
+    pub fn export_json(&self) -> Result<String> {
+        let data = self.data.read();
+        serde_json::to_string(&data.clients)
+            .map_err(|e| Error::Session(format!("export_json: {}", e)))
+    }
+
+    /// Update QoS settings for a specific client.
+    pub fn set_client_qos(&self, client_id: &str, qos: crate::qos::ClientQos) -> Result<()> {
+        let mut data = self.data.write();
+        match data.clients.iter_mut().find(|c| c.id == client_id) {
+            Some(client) => {
+                client.qos = Some(qos);
+                drop(data);
+                self.save()
+            }
+            None => Err(Error::Session(format!("Client '{}' not found", client_id))),
+        }
+    }
+
     fn allocate_vpn_ip(&self, data: &mut ClientDbFile) -> Result<Ipv4Addr> {
         let max_host_offset = self.network_config.max_host_offset();
         if max_host_offset < 1 {
-            return Err(Error::Session("Configured VPN subnet has no usable host addresses".into()));
+            return Err(Error::Session(
+                "Configured VPN subnet has no usable host addresses".into(),
+            ));
         }
 
         let mut candidate_offset = if data.next_host_offset == 0 {
@@ -321,7 +484,10 @@ impl ClientDatabase {
 
         for _ in 0..max_host_offset {
             if let Some(candidate_ip) = self.network_config.ip_for_host_offset(candidate_offset) {
-                let already_used = data.clients.iter().any(|client| client.vpn_ip == candidate_ip);
+                let already_used = data
+                    .clients
+                    .iter()
+                    .any(|client| client.vpn_ip == candidate_ip);
                 if candidate_ip != self.network_config.server_vpn_ip && !already_used {
                     data.next_host_offset = if candidate_offset >= max_host_offset {
                         1
@@ -339,7 +505,52 @@ impl ClientDatabase {
             };
         }
 
-        Err(Error::Session("No more VPN IPs available in configured subnet".into()))
+        Err(Error::Session(
+            "No more VPN IPs available in configured subnet".into(),
+        ))
+    }
+}
+
+/// Custom serde for Option<[u8; 32]> as base64 string or null
+mod opt_base64_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        bytes: &Option<[u8; 32]>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use base64::Engine;
+        match bytes {
+            Some(b) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(b);
+                b64.serialize(serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<[u8; 32]>, D::Error> {
+        use base64::Engine;
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(s) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&s)
+                    .map_err(serde::de::Error::custom)?;
+                if bytes.len() != 32 {
+                    return Err(serde::de::Error::custom(format!(
+                        "device_pubkey must be 32 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+        }
     }
 }
 
@@ -347,13 +558,18 @@ impl ClientDatabase {
 mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8; 32], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        bytes: &[u8; 32],
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         b64.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<[u8; 32], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<[u8; 32], D::Error> {
         use base64::Engine;
         let s = String::deserialize(deserializer)?;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -381,6 +597,8 @@ mod tests {
             server_vpn_ip: Ipv4Addr::new(10, 99, 0, 1),
             prefix_len: 24,
             mtu: 1400,
+            keepalive_secs: None,
+            ..Default::default()
         }
     }
 
@@ -395,10 +613,8 @@ mod tests {
 
         db.record_traffic(&client.id, 111, 222);
 
-        let mut on_disk: ClientDbFile = serde_json::from_str(
-            &std::fs::read_to_string(&db_path).unwrap(),
-        )
-        .unwrap();
+        let mut on_disk: ClientDbFile =
+            serde_json::from_str(&std::fs::read_to_string(&db_path).unwrap()).unwrap();
         let new_psk = [0xAB; 32];
         on_disk.clients[0].psk = new_psk;
 
@@ -414,12 +630,20 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(60));
         }
-        assert!(mtime_changed, "test setup failed to advance client DB mtime");
+        assert!(
+            mtime_changed,
+            "test setup failed to advance client DB mtime"
+        );
 
         assert!(db.reload_if_changed(), "PSK rotation must trigger reload");
-        assert!(db.find_by_psk(&old_psk).is_none(), "old PSK must stop authenticating after reload");
+        assert!(
+            db.find_by_psk(&old_psk).is_none(),
+            "old PSK must stop authenticating after reload"
+        );
 
-        let reloaded = db.find_by_psk(&new_psk).expect("new PSK must authenticate after reload");
+        let reloaded = db
+            .find_by_psk(&new_psk)
+            .expect("new PSK must authenticate after reload");
         assert_eq!(reloaded.id, client.id);
         assert_eq!(reloaded.stats.bytes_in, 111);
         assert_eq!(reloaded.stats.bytes_out, 222);

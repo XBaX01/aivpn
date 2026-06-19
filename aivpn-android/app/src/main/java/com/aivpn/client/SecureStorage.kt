@@ -68,7 +68,8 @@ object SecureStorage {
     data class ConnectionProfile(
         val id: String,
         val name: String,
-        val key: String
+        val key: String,
+        val mtlsCertBase64: String? = null,
     )
 
     fun saveProfiles(context: Context, profiles: List<ConnectionProfile>) {
@@ -78,6 +79,7 @@ object SecureStorage {
                 put("id", p.id)
                 put("name", p.name)
                 put("key", p.key)
+                if (p.mtlsCertBase64 != null) put("mtlsCertBase64", p.mtlsCertBase64)
             })
         }
         saveString(context, "profiles", arr.toString())
@@ -94,7 +96,8 @@ object SecureStorage {
                 result.add(ConnectionProfile(
                     id = obj.getString("id"),
                     name = obj.getString("name"),
-                    key = obj.getString("key")
+                    key = obj.getString("key"),
+                    mtlsCertBase64 = obj.optString("mtlsCertBase64").ifEmpty { null },
                 ))
             }
             result
@@ -109,6 +112,26 @@ object SecureStorage {
 
     fun loadActiveProfileId(context: Context): String {
         return loadString(context, "active_profile_id")
+    }
+
+    // ──────────── Device binding key (JIT enrollment) ────────────
+
+    private const val KEY_DEVICE_PRIVKEY = "device_privkey_v1"
+
+    fun saveDeviceKey(context: Context, keyBytes: ByteArray) {
+        val b64 = android.util.Base64.encodeToString(keyBytes, android.util.Base64.DEFAULT)
+        saveString(context, KEY_DEVICE_PRIVKEY, b64)
+    }
+
+    fun loadDeviceKey(context: Context): ByteArray? {
+        val b64 = loadString(context, KEY_DEVICE_PRIVKEY)
+        if (b64.isEmpty()) return null
+        return try {
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            if (bytes.size == 32) bytes else null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // ──────────── Split tunneling ────────────

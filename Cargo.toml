@@ -4,7 +4,9 @@ members = [
     "aivpn-client",
     "aivpn-server",
     "aivpn-android-core",
+    "aivpn-ios-core",
     "aivpn-windows",
+    "aivpn-linux",
 ]
 default-members = [
     "aivpn-common",
@@ -14,10 +16,12 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT"
 authors = ["AIVPN Team"]
+description = "AIVPN - AI-powered VPN designed for censorship circumvention"
+repository = "https://github.com/infosave2007/aivpn"
 
 [workspace.dependencies]
 # Crypto

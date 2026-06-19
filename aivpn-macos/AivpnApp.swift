@@ -4,7 +4,6 @@ import UserNotifications
 @main
 struct AivpnApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var vpnManager = VPNManager()
     @StateObject private var localization = LocalizationManager()
 
     var body: some Scene {
@@ -51,22 +50,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check helper daemon on launch
         VPNManager.shared.checkHelperAvailable()
-        
-        // Start polling for connection status changes
-        startStatusPolling()
-    }
-    
-    var statusPollTimer: Timer?
-    
-    func startStatusPolling() {
-        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.checkConnectionStatus()
-        }
-    }
-    
-    func checkConnectionStatus() {
-        let connected = VPNManager.shared.isConnected
-        updateStatusIcon(connected: connected)
     }
 
     @objc func togglePopover(_ sender: Any?) {

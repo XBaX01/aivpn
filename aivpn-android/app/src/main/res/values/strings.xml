@@ -24,7 +24,7 @@
     <string name="label_upload">Upload</string>
     <string name="label_download">Download</string>
     <string name="label_duration">Duration</string>
-    <string name="version_footer">v0.5.0 · AI-powered DPI evasion</string>
+    <string name="version_tagline">AI-powered DPI evasion</string>
     <string name="notification_channel">AIVPN Tunnel</string>
     <string name="notification_channel_desc">Active VPN tunnel status</string>
     <string name="notification_connecting">Connecting…</string>
@@ -46,6 +46,22 @@
     <string name="confirm_delete_profile">Delete "%s"?</string>
     <string name="no_profiles">No saved keys. Tap + Add to create one.</string>
 
+    <!-- Adaptive mode / diagnostics -->
+    <string name="adaptive_mode">Adaptive Mode</string>
+    <string name="adaptive_mode_desc">Auto-adjusts keepalive and FEC on unstable connections</string>
+    <string name="adaptive_enabled">Adaptive: ON</string>
+    <string name="adaptive_disabled">Adaptive: OFF</string>
+    <string name="adaptive_off">Off</string>
+    <string name="adaptive_light">Light (6s keepalive)</string>
+    <string name="adaptive_aggressive">Aggressive (4s keepalive)</string>
+    <string name="adaptive_satellite">Satellite (15s keepalive)</string>
+    <string name="diagnostics">Diagnostics</string>
+    <string name="run_benchmark">Run Benchmark</string>
+    <string name="bench_running">Benchmark running…</string>
+    <string name="bench_result">P50: %1$dms  P95: %2$dms  Loss: %3$.1f%%  Quality: %4$d/100</string>
+    <string name="quality_score_live">Live quality: %1$d/100</string>
+    <string name="quality_score_no_data">Quality: no data yet (waiting for keepalive)</string>
+
     <!-- Split tunneling -->
     <string name="btn_split_tunnel">Split Tunneling</string>
     <string name="split_tunnel_title">Split Tunneling</string>
@@ -62,6 +78,24 @@
     <string name="split_tunnel_hint_combined">%1$s via VPN, %2$s bypass VPN</string>
     <string name="split_tunnel_add_domain">Enter domain…</string>
     <string name="split_tunnel_domain_hint">Traffic to these domains will bypass VPN</string>
+    <string name="split_tunnel_domain_note">IPs are resolved at connect time. Requires Android 13+. CDN addresses may change.</string>
+    <string name="split_tunnel_apps_unavailable">App list unavailable — QUERY_ALL_PACKAGES permission denied</string>
     <string name="split_tunnel_domain_invalid">Invalid domain format</string>
     <string name="split_tunnel_domain_exists">Domain already added</string>
+    <string name="options">Options</string>
+    <string name="mtls_cert">mTLS Certificate</string>
+    <string name="mtls_cert_hint">Paste base64 cert (leave empty to disable)</string>
+    <string name="mtls_cert_invalid">Invalid mTLS certificate (must be 104 bytes when decoded)</string>
+    <string name="export_logs">Export Logs</string>
+    <string name="export_logs_collecting">Collecting logs…</string>
+    <string name="export_logs_empty">No logs collected</string>
+    <string name="export_logs_error">Failed to collect logs</string>
+    <string name="recording">Recording</string>
+    <string name="recording_service_hint">Service name (e.g. zoom, https)</string>
+    <string name="recording_start">Start Recording</string>
+    <string name="recording_stop">Stop Recording</string>
+    <string name="recording_started">Recording started</string>
+    <string name="recording_stopped">Recording stopped</string>
+    <string name="recording_no_session">No active session</string>
+    <string name="os_kill_switch">OS Kill Switch Settings</string>
 </resources>

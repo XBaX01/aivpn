@@ -39,6 +39,18 @@ class LocalizationManager: ObservableObject {
             "en": "Route all system traffic through VPN",
             "ru": "Направить весь системный трафик через VPN"
         ],
+        "proxy_mode": [
+            "en": "Proxy mode (SOCKS5, no root required)",
+            "ru": "Режим прокси (SOCKS5, без прав root)"
+        ],
+        "proxy_mode_help": [
+            "en": "Run as local SOCKS5 proxy — no root required. Set your apps or system proxy to 127.0.0.1:<port>.",
+            "ru": "Запуск как локальный SOCKS5-прокси — без прав root. Укажите прокси 127.0.0.1:<порт> в настройках приложений."
+        ],
+        "proxy_port": [
+            "en": "Port:",
+            "ru": "Порт:"
+        ],
         "connect": [
             "en": "Connect",
             "ru": "Подключить"
@@ -190,6 +202,86 @@ class LocalizationManager: ObservableObject {
         "dismiss": [
             "en": "Dismiss",
             "ru": "Скрыть"
+        ],
+        "adaptive_mode": [
+            "en": "Adaptive Mode",
+            "ru": "Адаптивный режим"
+        ],
+        "adaptive_off": [
+            "en": "Off",
+            "ru": "Выкл"
+        ],
+        "adaptive_light": [
+            "en": "Light (6s)",
+            "ru": "Лёгкий (6с)"
+        ],
+        "adaptive_aggressive": [
+            "en": "Aggressive (4s)",
+            "ru": "Агрессивный (4с)"
+        ],
+        "adaptive_satellite": [
+            "en": "Satellite (15s)",
+            "ru": "Спутник (15с)"
+        ],
+        "adaptive_mode_help": [
+            "en": "Automatically adjusts MTU and keepalive on unstable connections",
+            "ru": "Автоматически адаптирует MTU и keepalive при нестабильном соединении"
+        ],
+        "diagnostics": [
+            "en": "Diagnostics",
+            "ru": "Диагностика"
+        ],
+        "run_benchmark": [
+            "en": "Run Benchmark",
+            "ru": "Запустить тест"
+        ],
+        "bench_running": [
+            "en": "Running benchmark…",
+            "ru": "Тест запущен…"
+        ],
+        "bench_idle": [
+            "en": "Run a benchmark to check connection quality.",
+            "ru": "Запустите тест для оценки качества соединения."
+        ],
+        "mtls_cert_path": [
+            "en": "mTLS cert path (optional)",
+            "ru": "Путь к mTLS-сертификату (необязательно)"
+        ],
+        "mtls_cert_path_help": [
+            "en": "Path to client certificate file for mutual TLS authentication. Leave empty to disable.",
+            "ru": "Путь к файлу клиентского сертификата для взаимной TLS-аутентификации. Оставьте пустым для отключения."
+        ],
+        "dns_proxy_placeholder": [
+            "en": "DNS proxy (e.g. 127.0.0.1:5300)",
+            "ru": "DNS-прокси (например 127.0.0.1:5300)"
+        ],
+        "dns_proxy_help": [
+            "en": "Local address for DNS leak prevention proxy. Leave empty to disable. Point your resolver here after connecting.",
+            "ru": "Локальный адрес DNS-прокси для предотвращения утечек. Оставьте пустым для отключения. После подключения укажите эот адрес в настройках резолвера."
+        ],
+        "exclude_routes_label": [
+            "en": "Exclude routes (split tunnel)",
+            "ru": "Исключить маршруты (split tunnel)"
+        ],
+        "exclude_routes_placeholder": [
+            "en": "192.168.1.0/24, 10.0.0.0/8",
+            "ru": "192.168.1.0/24, 10.0.0.0/8"
+        ],
+        "exclude_routes_help": [
+            "en": "Comma-separated CIDRs to bypass the VPN. Use with Full Tunnel to carve out local subnets.",
+            "ru": "CIDRы через запятую, которые не будут направлены через VPN. Используйте вместе с полным туннелем для исключения локальных подсетей."
+        ],
+        "mtls_ignored_in_proxy_mode": [
+            "en": "mTLS certificate is not used in SOCKS5 proxy mode",
+            "ru": "mTLS-сертификат не применяется в режиме SOCKS5-прокси"
+        ],
+        "kill_switch": [
+            "en": "Kill Switch (block traffic if VPN drops)",
+            "ru": "Kill Switch (блок трафика при разрыве VPN)"
+        ],
+        "kill_switch_help": [
+            "en": "Block all non-VPN traffic while connected. Rules persist after unexpected process death.",
+            "ru": "Блокировать весь трафик вне VPN. Правила сохраняются после аварийного завершения."
         ],
     ]
 

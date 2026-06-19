@@ -1,9 +1,9 @@
 use rand::RngCore;
 
 use crate::crypto::{
-    self, current_timestamp_ms, compute_time_window, decrypt_payload, derive_session_keys,
-    encrypt_payload, generate_resonance_tag, KeyPair, SessionKeys, DEFAULT_WINDOW_MS,
-    NONCE_SIZE, TAG_SIZE,
+    self, compute_time_window, current_timestamp_ms, decrypt_payload, derive_session_keys,
+    encrypt_payload, generate_resonance_tag, KeyPair, SessionKeys, DEFAULT_WINDOW_MS, NONCE_SIZE,
+    TAG_SIZE,
 };
 use crate::error::{Error, Result};
 use crate::protocol::{ControlPayload, InnerHeader, InnerType};
@@ -233,7 +233,13 @@ pub fn build_zero_mdh_packet(
     inner: &[u8],
     obfuscated_eph_pub: Option<&[u8; 32]>,
 ) -> Result<Vec<u8>> {
-    build_random_mdh_packet(keys, counter, inner, obfuscated_eph_pub, DEFAULT_ZERO_MDH.len())
+    build_random_mdh_packet(
+        keys,
+        counter,
+        inner,
+        obfuscated_eph_pub,
+        DEFAULT_ZERO_MDH.len(),
+    )
 }
 
 pub fn decode_packet_with_mdh_len(
@@ -293,30 +299,33 @@ pub fn process_server_hello_with_mdh_len(
     recv_window: &mut RecvWindow,
     send_counter: &mut u64,
     mdh_len: usize,
-) -> Result<()> {
+) -> Result<Option<crate::network_config::ClientNetworkConfig>> {
     let decoded = decode_packet_with_mdh_len(packet, keys, recv_window, mdh_len)?;
 
     if decoded.header.inner_type != InnerType::Control {
-        return Err(Error::InvalidPacket("Expected control packet for ServerHello"));
+        return Err(Error::InvalidPacket(
+            "Expected control packet for ServerHello",
+        ));
     }
 
     match ControlPayload::decode(&decoded.payload)? {
-        ControlPayload::ServerHello { server_eph_pub, .. } => {
+        ControlPayload::ServerHello {
+            server_eph_pub,
+            network_config,
+            ..
+        } => {
             let dh2 = keypair.compute_shared(&server_eph_pub)?;
             let old_session_key = keys.session_key;
             *keys = derive_session_keys(&dh2, Some(&old_session_key), &keypair.public_key_bytes());
             *send_counter = 0;
             recv_window.reset();
-            Ok(())
+            Ok(network_config)
         }
         _ => Err(Error::InvalidPacket("Expected ServerHello control payload")),
     }
 }
 
-pub fn obfuscate_client_eph_pub(
-    keypair: &KeyPair,
-    server_public_key: &[u8; 32],
-) -> [u8; 32] {
+pub fn obfuscate_client_eph_pub(keypair: &KeyPair, server_public_key: &[u8; 32]) -> [u8; 32] {
     let mut obfuscated = keypair.public_key_bytes();
     crypto::obfuscate_eph_pub(&mut obfuscated, server_public_key);
     obfuscated

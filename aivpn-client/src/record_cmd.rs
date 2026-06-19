@@ -125,7 +125,11 @@ pub fn handle_recording_status(can_record: bool, active_service: Option<&str>) {
     };
     write_status(&RecordingLocalStatus {
         can_record: Some(can_record),
-        state: if active_service.is_some() { "recording".into() } else { "idle".into() },
+        state: if active_service.is_some() {
+            "recording".into()
+        } else {
+            "idle".into()
+        },
         service: active_service.map(|value| value.to_string()),
         message: Some(message),
         mask_id: None,
@@ -148,11 +152,12 @@ pub fn mark_recording_stop_requested(service: Option<&str>) {
 
 /// Display recording acknowledgment from server
 pub fn handle_recording_ack(session_id: &[u8; 16], status: &str) {
-    let sid_hex = session_id.iter()
+    let sid_hex = session_id
+        .iter()
         .take(4)
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
-    
+
     match status {
         "started" => {
             info!("📹 Recording started (session: {}...)", sid_hex);

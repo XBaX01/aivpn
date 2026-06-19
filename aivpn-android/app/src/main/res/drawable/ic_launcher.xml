@@ -4,16 +4,42 @@
         <color android:color="@color/background" />
     </background>
     <foreground>
-        <inset android:inset="25%">
-            <vector
-                android:width="108dp"
-                android:height="108dp"
-                android:viewportWidth="24"
-                android:viewportHeight="24">
-                <path
-                    android:fillColor="@color/accent"
-                    android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1zM12,11.99h7c-0.53,4.12 -3.28,7.79 -7,8.94V12H5V6.3l7,-3.11V11.99z" />
-            </vector>
-        </inset>
+        <vector
+            xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+
+            <!-- Outer ring — lemon accent, thin -->
+            <path
+                android:pathData="M54,10 A44,44 0 1,1 53.999,10 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#E8FF6B"
+                android:strokeWidth="1.5"
+                android:strokeAlpha="0.65"/>
+
+            <!-- Mid ring — purple, main identity -->
+            <path
+                android:pathData="M54,23 A31,31 0 1,1 53.999,23 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#7B61FF"
+                android:strokeWidth="4"
+                android:strokeAlpha="0.9"/>
+
+            <!-- Inner ring — soft violet -->
+            <path
+                android:pathData="M54,38 A16,16 0 1,1 53.999,38 Z"
+                android:fillColor="#00000000"
+                android:strokeColor="#9B85FF"
+                android:strokeWidth="2.5"
+                android:strokeAlpha="0.8"/>
+
+            <!-- Center node — white -->
+            <path android:pathData="M49.5,54 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0"
+                android:fillColor="#7B61FF" android:fillAlpha="0.4"/>
+            <path android:pathData="M51.5,54 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0"
+                android:fillColor="#FFFFFF" android:fillAlpha="0.95"/>
+        </vector>
     </foreground>
 </adaptive-icon>

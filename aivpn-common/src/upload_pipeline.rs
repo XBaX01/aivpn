@@ -6,13 +6,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio::time;
 use crate::client_wire::{build_inner_packet, build_random_mdh_packet, DEFAULT_MDH_LEN};
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
+use crate::fec::FecEncoder;
 use crate::protocol::{ControlPayload, InnerType};
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::time;
 
 // ──────────── Configuration ────────────
 
@@ -51,6 +52,17 @@ pub trait PacketEncryptor: Send {
     /// Called after a data datagram has been successfully sent.
     /// Use this for stats tracking, FSM transitions, etc.
     fn on_data_sent(&mut self, payload_len: usize);
+    /// Return a pre-encrypted FEC repair datagram if one is ready, else None.
+    /// Called after every data send; default is a no-op.
+    fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    /// Encrypt a keepalive stamped with `send_ts` (milliseconds since UNIX epoch).
+    /// The server echoes `send_ts` in `KeepaliveAck` so the client can measure RTT.
+    /// Default delegates to `encrypt_keepalive()` with `send_ts = 0` (no RTT tracking).
+    fn encrypt_keepalive_ts(&mut self, _send_ts: u64) -> Result<Vec<u8>> {
+        self.encrypt_keepalive()
+    }
 }
 
 // ──────────── Ready-made encryptor: zero MDH ────────────
@@ -63,15 +75,40 @@ pub struct ZeroMdhEncryptor {
     counter: u64,
     seq: u16,
     mdh_len: usize,
+    fec_encoder: Option<FecEncoder>,
+    pending_fec: Option<Vec<u8>>,
 }
 
 impl ZeroMdhEncryptor {
     pub fn new(keys: SessionKeys, counter: u64, seq: u16) -> Self {
-        Self { keys, counter, seq, mdh_len: DEFAULT_MDH_LEN }
+        Self {
+            keys,
+            counter,
+            seq,
+            mdh_len: DEFAULT_MDH_LEN,
+            fec_encoder: None,
+            pending_fec: None,
+        }
     }
 
     pub fn with_mdh_len(keys: SessionKeys, counter: u64, seq: u16, mdh_len: usize) -> Self {
-        Self { keys, counter, seq, mdh_len }
+        Self {
+            keys,
+            counter,
+            seq,
+            mdh_len,
+            fec_encoder: None,
+            pending_fec: None,
+        }
+    }
+
+    /// Enable XOR FEC with the given group size. group_size=0 disables FEC.
+    pub fn set_fec_group(&mut self, group_size: u8) {
+        self.fec_encoder = if group_size > 0 {
+            Some(FecEncoder::new(group_size, 1500))
+        } else {
+            None
+        };
     }
 }
 
@@ -79,7 +116,25 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let inner = build_inner_packet(InnerType::Data, self.seq, payload);
         self.seq = self.seq.wrapping_add(1);
-        build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
+        let pkt =
+            build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)?;
+        if let Some(fec) = self.fec_encoder.as_mut() {
+            if let Some(repair) = fec.feed(payload) {
+                let repair_inner =
+                    build_inner_packet(InnerType::FecRepair, self.seq, &repair.encode());
+                self.seq = self.seq.wrapping_add(1);
+                if let Ok(enc) = build_random_mdh_packet(
+                    &self.keys,
+                    &mut self.counter,
+                    &repair_inner,
+                    None,
+                    self.mdh_len,
+                ) {
+                    self.pending_fec = Some(enc);
+                }
+            }
+        }
+        Ok(pkt)
     }
 
     fn encrypt_control(&mut self, payload: &ControlPayload) -> Result<Vec<u8>> {
@@ -90,13 +145,21 @@ impl PacketEncryptor for ZeroMdhEncryptor {
     }
 
     fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
-        let keepalive = ControlPayload::Keepalive.encode()?;
+        self.encrypt_keepalive_ts(0)
+    }
+
+    fn encrypt_keepalive_ts(&mut self, send_ts: u64) -> Result<Vec<u8>> {
+        let keepalive = ControlPayload::Keepalive { send_ts }.encode()?;
         let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
         self.seq = self.seq.wrapping_add(1);
         build_random_mdh_packet(&self.keys, &mut self.counter, &inner, None, self.mdh_len)
     }
 
     fn on_data_sent(&mut self, _payload_len: usize) {}
+
+    fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+        self.pending_fec.take()
+    }
 }
 
 // ──────────── The upload loop ────────────
@@ -138,9 +201,8 @@ pub async fn run_upload_loop(
     enc: &mut impl PacketEncryptor,
     config: &UploadConfig,
 ) -> Result<()> {
-    let mut ka_interval = time::interval(config.keepalive_interval);
+    let mut ka_interval = time::interval_at(tokio::time::Instant::now(), config.keepalive_interval);
     let mut data_packet_count: u64 = 0;
-    ka_interval.tick().await; // skip the immediate first tick
 
     loop {
         tokio::select! {
@@ -155,6 +217,9 @@ pub async fn run_upload_loop(
 
                 let encrypted = enc.encrypt_data(&pkt_data)?;
                 send_tolerant(udp, &encrypted).await?;
+                if let Some(repair) = enc.take_fec_repair() {
+                    send_tolerant(udp, &repair).await?;
+                }
                 data_packet_count = data_packet_count.wrapping_add(1);
                 enc.on_data_sent(pkt_data.len());
 
@@ -164,6 +229,9 @@ pub async fn run_upload_loop(
                         Ok(pkt) => {
                             let encrypted = enc.encrypt_data(&pkt)?;
                             send_tolerant(udp, &encrypted).await?;
+                            if let Some(repair) = enc.take_fec_repair() {
+                                send_tolerant(udp, &repair).await?;
+                            }
                             data_packet_count = data_packet_count.wrapping_add(1);
                             enc.on_data_sent(pkt.len());
                         }
@@ -173,6 +241,10 @@ pub async fn run_upload_loop(
                         }
                     }
                 }
+                // Suppress the next keepalive tick: a keepalive immediately after
+                // real data wastes bandwidth and the server's ACK resets the peer's
+                // rx-silence timer anyway.
+                ka_interval.reset();
             }
 
             // ── Keepalive (fires only when data path is idle) ──

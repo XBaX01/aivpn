@@ -3,6 +3,7 @@
 //! Launches the Rust client binary in the background (no console window),
 //! monitors its process state, reads traffic stats and recording status from file.
 
+use base64::Engine as _;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Instant;
@@ -18,6 +19,8 @@ pub enum ConnectionState {
 pub struct TrafficStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    pub quality_score: u8,
+    pub server_adaptive_level: u8,
 }
 
 // ── Recording ───────────────────────────────────────────────────────────────
@@ -29,8 +32,8 @@ pub enum RecordingState {
     Recording(String),
     Stopping(String),
     Analyzing(String),
-    Success(String, Option<String>),   // service, mask_id
-    Failed(String, String),            // service, reason
+    Success(String, Option<String>), // service, mask_id
+    Failed(String, String),          // service, reason
 }
 
 #[derive(Debug, Clone)]
@@ -39,12 +42,24 @@ pub struct RecordingResult {
     pub details: String,
 }
 
+/// Benchmark result parsed from `aivpn-client bench --json` output.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct BenchResult {
+    pub latency_p50_ms: f64,
+    pub latency_p95_ms: f64,
+    pub latency_p99_ms: f64,
+    pub packet_loss_pct: f64,
+    pub quality_score: u8,
+}
+
 pub struct VpnManager {
     state: ConnectionState,
     child: Option<Child>,
     stats: TrafficStats,
     last_poll: Option<Instant>,
-    client_binary: PathBuf,
+    pub client_binary: PathBuf,
+    /// Server address extracted from the connection key at connect time.
+    pub server_addr: Option<String>,
     // Recording
     pub recording_state: RecordingState,
     pub can_record_masks: bool,
@@ -62,9 +77,12 @@ impl VpnManager {
             stats: TrafficStats {
                 bytes_sent: 0,
                 bytes_received: 0,
+                quality_score: 0,
+                server_adaptive_level: 0,
             },
             last_poll: None,
             client_binary: Self::find_client_binary(),
+            server_addr: None,
             recording_state: RecordingState::Idle,
             can_record_masks: false,
             recording_capability_known: false,
@@ -94,7 +112,17 @@ impl VpnManager {
     }
 
     /// Connect using a connection key
-    pub fn connect(&mut self, connection_key: &str, full_tunnel: bool) -> Result<(), String> {
+    pub fn connect(
+        &mut self,
+        connection_key: &str,
+        full_tunnel: bool,
+        proxy_listen: Option<&str>,
+        mtls_cert_path: Option<&str>,
+        exclude_routes: &[String],
+        kill_switch: bool,
+        adaptive_level: u8,
+        dns_proxy: Option<&str>,
+    ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Already running".to_string());
         }
@@ -107,6 +135,7 @@ impl VpnManager {
         }
 
         self.state = ConnectionState::Connecting;
+        self.server_addr = extract_server_addr(connection_key);
         // Reset recording on new connection
         self.recording_state = RecordingState::Idle;
         self.can_record_masks = false;
@@ -121,6 +150,37 @@ impl VpnManager {
             cmd.arg("--full-tunnel");
         }
 
+        if let Some(addr) = proxy_listen {
+            cmd.arg("--proxy-listen").arg(addr);
+        }
+
+        if let Some(cert) = mtls_cert_path {
+            cmd.arg("--mtls-cert").arg(cert);
+        }
+
+        for route in exclude_routes {
+            if !route.trim().is_empty() {
+                cmd.arg("--exclude-routes").arg(route.trim());
+            }
+        }
+
+        if kill_switch {
+            cmd.arg("--kill-switch");
+        }
+
+        if adaptive_level > 0 {
+            cmd.arg("--adaptive-level").arg(adaptive_level.to_string());
+        }
+
+        if let Some(addr) = dns_proxy {
+            if !addr.is_empty() {
+                if addr.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(format!("Invalid dns-proxy address: {addr}"));
+                }
+                cmd.arg("--dns-proxy").arg(addr);
+            }
+        }
+
         // Hide console window on Windows
         #[cfg(windows)]
         {
@@ -132,7 +192,9 @@ impl VpnManager {
         match cmd.spawn() {
             Ok(child) => {
                 self.child = Some(child);
-                self.state = ConnectionState::Connected;
+                // Stay in Connecting — poll_status() transitions to Connected once
+                // the process survives its first liveness check, preventing the UI
+                // from briefly showing Connected before the TUN device is up.
                 self.stats.bytes_sent = 0;
                 self.stats.bytes_received = 0;
                 // Request initial recording status
@@ -151,6 +213,12 @@ impl VpnManager {
         self.state = ConnectionState::Disconnecting;
 
         if let Some(ref mut child) = self.child {
+            for _ in 0..5 {
+                if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -164,6 +232,43 @@ impl VpnManager {
         self.recording_capability_known = false;
         self.last_recording_result = None;
         self.minimum_recording_ts = 0;
+    }
+
+    /// Run a benchmark against the server using `aivpn-client bench --json`.
+    /// Blocks until the bench completes (call from a background thread).
+    pub fn run_bench_blocking(binary: &PathBuf, server_addr: &str) -> Option<BenchResult> {
+        if server_addr.is_empty() {
+            return None;
+        }
+        let out = Command::new(binary)
+            .args(["bench", "--server", server_addr, "--json"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    }
+
+    /// Run `aivpn-client --show-device-key` and return the base64-encoded device public key.
+    pub fn get_device_public_key(&self) -> Option<String> {
+        let out = Command::new(&self.client_binary)
+            .arg("--show-device-key")
+            .output()
+            .ok()?;
+        if out.status.success() {
+            String::from_utf8(out.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    }
+
+    /// Return the current server address (set when connect() was called).
+    pub fn server_addr(&self) -> Option<&str> {
+        self.server_addr.as_deref()
     }
 
     /// Poll process status and read traffic stats
@@ -329,7 +434,10 @@ impl VpnManager {
         self.recording_capability_known = snapshot.can_record.is_some();
         self.can_record_masks = snapshot.can_record.unwrap_or(false);
 
-        let service = snapshot.service.clone().unwrap_or_else(|| "mask".to_string());
+        let service = snapshot
+            .service
+            .clone()
+            .unwrap_or_else(|| "mask".to_string());
         match snapshot.state.as_str() {
             "recording" => {
                 self.recording_state = RecordingState::Recording(service);
@@ -341,8 +449,7 @@ impl VpnManager {
                 self.recording_state = RecordingState::Analyzing(service);
             }
             "success" => {
-                self.recording_state =
-                    RecordingState::Success(service, snapshot.mask_id.clone());
+                self.recording_state = RecordingState::Success(service, snapshot.mask_id.clone());
                 let details = if let Some(ref mask_id) = snapshot.mask_id {
                     format!("Mask saved. ID: {}", mask_id)
                 } else {
@@ -391,10 +498,24 @@ impl VpnManager {
                     if recv >= self.stats.bytes_received || self.stats.bytes_received == 0 {
                         self.stats.bytes_received = recv;
                     }
+                    let (qs, sal) = Self::read_quality_json();
+                    self.stats.quality_score = qs;
+                    self.stats.server_adaptive_level = sal;
                     return;
                 }
             }
         }
+    }
+
+    fn read_quality_json() -> (u8, u8) {
+        let path = std::env::temp_dir().join("aivpn-quality.json");
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let quality = v["quality"].as_u64().unwrap_or(0) as u8;
+            let adaptive = v["adaptive"].as_u64().unwrap_or(0) as u8;
+            return (quality, adaptive);
+        }
+        (0, 0)
     }
 
     fn parse_stats(content: &str) -> Option<(u64, u64)> {
@@ -473,6 +594,21 @@ struct RecordingSnapshot {
     #[allow(dead_code)]
     confidence: Option<f32>,
     updated_at_ms: u64,
+}
+
+/// Extract the server address from an `aivpn://` connection key.
+/// Connection key format: `aivpn://` + base64url(JSON) where JSON["s"] = "host:port".
+fn extract_server_addr(key: &str) -> Option<String> {
+    let b64 = key.strip_prefix("aivpn://")?;
+    // Try multiple Base64 formats just in case padding or standard charset is used
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(b64))
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(b64))
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json["s"].as_str().map(|s| s.to_string())
 }
 
 fn current_timestamp_ms() -> u64 {

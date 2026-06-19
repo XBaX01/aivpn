@@ -11,12 +11,17 @@ import android.net.Network
 import android.net.NetworkRequest
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.Inet4Address
+import java.net.InetAddress
 
 /**
  * Android VPN service — thin orchestrator over the Rust core (libaivpn_core.so).
@@ -39,16 +44,23 @@ class AivpnService : VpnService() {
         // Match the desktop client's WAN-safe TUN MTU so encrypted outer UDP
         // datagrams stay below the path-MTU ceiling on real networks.
         private const val DEFAULT_TUN_MTU = 1346
+        private const val ADAPTIVE_TUN_MTU = 1200
         private const val LEGACY_PREFIX_LEN = 24
         private const val INITIAL_RETRY_DELAY_MS = 500L
         private const val MAX_RETRY_DELAY_MS     = 8_000L
+        // Android reshuffles underlying network IDs for 5-10s after VPN comes up.
+        // 15s covers even slow devices without delaying genuine network-switch detection.
         private const val TAG = "AivpnService"
 
         @Volatile var statusCallback:  ((Boolean, String) -> Unit)? = null
         @Volatile var trafficCallback: ((Long, Long) -> Unit)?      = null
+        @Volatile var tileCallback:    (() -> Unit)?                = null
         @Volatile var isRunning     = false
         @Volatile var isServiceActive = false
         @Volatile var lastStatusText = ""
+
+        /** Weak reference to the live service instance, used for socket protection only. */
+        @Volatile var instance: AivpnService? = null
     }
 
     // TUN interface wrapper kept open across reconnects so Android does not tear down
@@ -56,7 +68,7 @@ class AivpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     // Coroutine lifecycle
-    private var serviceJob: Job? = null
+    @Volatile private var serviceJob: Job? = null
     private var restartJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val serviceLifecycleMutex = Mutex()
@@ -66,6 +78,7 @@ class AivpnService : VpnService() {
     @Volatile private var savedServerAddr: String? = null
     @Volatile private var savedServerKey: String?  = null
     @Volatile private var savedPsk: String?        = null
+    @Volatile private var savedMtlsCert: ByteArray? = null
     @Volatile private var savedVpnIp: String?      = null
     @Volatile private var savedServerVpnIp: String? = null
     @Volatile private var savedVpnPrefixLen: Int = LEGACY_PREFIX_LEN
@@ -84,22 +97,33 @@ class AivpnService : VpnService() {
     @Volatile private var currentUnderlyingNetwork: Network? = null
     @Volatile private var lastNetworkEventAtMs: Long = 0L
     private val NETWORK_EVENT_DEBOUNCE_MS = 1_000L
+    // Android reshuffles underlying network IDs when VPN comes up; ignore churn for this window.
+    @Volatile private var postConnectUntilMs: Long = 0L
+    private val POST_CONNECT_COOLDOWN_MS = 15_000L
 
     // ──────────── Service lifecycle ────────────
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val server    = intent.getStringExtra("server")     ?: return START_NOT_STICKY
-                val serverKey = intent.getStringExtra("server_key") ?: return START_NOT_STICKY
-                startVpn(server, serverKey,
-                    intent.getStringExtra("psk"),
-                    intent.getStringExtra("vpn_ip"),
-                    intent.getStringExtra("server_vpn_ip"),
-                    intent.getIntExtra("vpn_prefix_len", LEGACY_PREFIX_LEN),
-                    intent.getIntExtra("vpn_mtu", DEFAULT_TUN_MTU))
+                // Read only the profile ID from the Intent.  The actual server key
+                // and PSK are loaded from EncryptedSharedPreferences inside the
+                // service so they never travel through IPC as plaintext extras.
+                val profileId = intent.getStringExtra("profile_id") ?: return START_NOT_STICKY
+                loadAndStartVpnFromProfile(profileId)
             }
             ACTION_DISCONNECT -> stopVpn()
+            else -> {
+                // START_STICKY restart with null intent — OS restarted us after a kill.
+                // If no active session was in progress (e.g. we were killed while idle),
+                // stop immediately to avoid a zombie foreground service with no tunnel.
+                if (!isServiceActive) stopSelf()
+            }
         }
         return START_STICKY
     }
@@ -112,6 +136,7 @@ class AivpnService : VpnService() {
         serverVpnIp: String? = null,
         vpnPrefixLen: Int = LEGACY_PREFIX_LEN,
         vpnMtu: Int = DEFAULT_TUN_MTU,
+        mtlsCert: ByteArray? = null,
     ) {
         Log.d(TAG, "startVpn: server=$serverAddr")
 
@@ -125,7 +150,9 @@ class AivpnService : VpnService() {
             savedVpnIp == vpnIp &&
             savedServerVpnIp == serverVpnIp &&
             savedVpnPrefixLen == normalizedPrefixLen &&
-            savedVpnMtu == normalizedMtu
+            savedVpnMtu == normalizedMtu &&
+            (savedMtlsCert == null && mtlsCert == null ||
+             savedMtlsCert != null && mtlsCert != null && savedMtlsCert.contentEquals(mtlsCert))
         val startupInFlight = restartJob?.isActive == true
         val tunnelLoopActive = serviceJob?.isActive == true
         if (sameTarget && (startupInFlight || tunnelLoopActive)) {
@@ -136,6 +163,7 @@ class AivpnService : VpnService() {
         savedServerAddr  = serverAddr
         savedServerKey   = serverKeyBase64
         savedPsk         = pskBase64
+        savedMtlsCert    = mtlsCert
         savedVpnIp       = vpnIp
         savedServerVpnIp = serverVpnIp
         savedVpnPrefixLen = normalizedPrefixLen
@@ -147,8 +175,27 @@ class AivpnService : VpnService() {
         restartJob = serviceScope.launch {
             serviceLifecycleMutex.withLock {
                 AivpnJni.stopTunnel()
-                serviceJob?.cancelAndJoin()
+                // Increment before cancelAndJoin so that the old job's finally{}
+                // sees sessionId != mySessionId and does NOT call stopSelf().
+                val capturedSessionId = ++sessionId
+                // AivpnJni.runTunnel() is a blocking native call — Kotlin coroutine
+                // cancellation cannot interrupt it.  Give it 3 s to exit after
+                // stopTunnel() fired the eventfd; proceed regardless so the mutex is
+                // never held indefinitely.
+                withTimeoutOrNull(3_000L) { serviceJob?.cancelAndJoin() }
                 serviceJob = null
+                // If a manual disconnect arrived during the cancelAndJoin window, abort
+                // the restart so we don't launch a new session that immediately hangs
+                // for TX_WITHOUT_RX_TIMEOUT (~20 s) before the watchdog kills it.
+                if (manualDisconnect) {
+                    AivpnJni.clearPendingStop()
+                    closeTunnel()
+                    return@withLock
+                }
+                // Clear any STOP_PENDING flag that stopTunnel() set while no session
+                // was active (race window between old session exit and new activation).
+                // We are about to start an intentional new connection.
+                AivpnJni.clearPendingStop()
                 closeTunnel()
 
                 createNotificationChannel()
@@ -157,7 +204,19 @@ class AivpnService : VpnService() {
                 unregisterNetworkCallback()
                 registerNetworkCallback()
 
+                // Second manualDisconnect guard: closes the race window between
+                // the first check (above) and the launch below.  If stopVpn()
+                // fires after clearPendingStop() but before this launch, the
+                // STOP_PENDING flag is already cleared and serviceJob is still
+                // null (so stopVpn's cancel() was a no-op).  Without this check
+                // the new session starts with no stop signal and runs until the
+                // TX_WITHOUT_RX watchdog (~20 s), making the disconnect button
+                // appear broken on the 2nd connection.
+                if (manualDisconnect) {
+                    return@withLock
+                }
                 serviceJob = serviceScope.launch {
+            val mySessionId = capturedSessionId
             var retryDelayMs = INITIAL_RETRY_DELAY_MS
             try {
                 while (isActive && !manualDisconnect) {
@@ -165,7 +224,11 @@ class AivpnService : VpnService() {
                         sessionEstablished = false
                         networkTrigger = false
                         runTunnel()
-                        closeTunnel()
+                        // Only close TUN when this session is still the active one.
+                        // A superseded session must not close the vpnInterface that the
+                        // new serviceJob just created in ensureVpnInterface() — doing so
+                        // passes an invalid fd to Rust and causes 0 RX on the 2nd connect.
+                        if (mySessionId == sessionId) closeTunnel()
                         // runTunnel() returns normally only on Rust rekey trigger — reconnect fast.
                         retryDelayMs = INITIAL_RETRY_DELAY_MS
                     } catch (e: CancellationException) {
@@ -174,7 +237,7 @@ class AivpnService : VpnService() {
                         Log.e(TAG, "Tunnel error: ${e.message}", e)
                         isRunning = false
                         if (manualDisconnect) break
-                        closeTunnel()
+                        if (mySessionId == sessionId) closeTunnel()
 
                         // Network-triggered reconnects and reconnects after an established
                         // session use zero delay so the switch feels instant.
@@ -185,7 +248,7 @@ class AivpnService : VpnService() {
                         }
 
                         lastStatusText = getString(R.string.status_reconnecting)
-                        statusCallback?.invoke(false, lastStatusText)
+                        val cb0 = statusCallback; cb0?.invoke(false, lastStatusText)
                         updateNotification(getString(R.string.notification_connecting))
 
                         if (delayMs > 0) {
@@ -205,12 +268,17 @@ class AivpnService : VpnService() {
             } catch (e: CancellationException) {
                 Log.d(TAG, "Service job cancelled")
             } finally {
-                isRunning = false
-                serviceJob = null
-                if (!manualDisconnect) {
-                    isServiceActive = false
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                // Only update shared service state if this session is still the active one.
+                // A superseded session (cancelAndJoin timeout) must not clobber serviceJob,
+                // isRunning, or isServiceActive that the new session has already set up.
+                if (mySessionId == sessionId) {
+                    isRunning = false
+                    serviceJob = null
+                    if (!manualDisconnect) {
+                        isServiceActive = false
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
             }
                 }
@@ -255,27 +323,41 @@ class AivpnService : VpnService() {
 
         sessionEstablished = false
         isRunning          = true
-        sessionId++     // new session — invalidates any queued upgradePendingJob
         lastStatusText = getString(R.string.status_connecting)
-        statusCallback?.invoke(false, lastStatusText)
+        val cb1 = statusCallback; cb1?.invoke(false, lastStatusText)
         updateNotification(getString(R.string.notification_connecting))
 
         // Poll Rust traffic counters once per second and forward to UI.
-        val statsJob = serviceScope.launch {
-            while (isActive) {
-                delay(1_000L)
-                trafficCallback?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
+        // Use coroutineScope so statsJob is automatically cancelled when runTunnel exits,
+        // preventing stale callbacks after disconnect.
+        coroutineScope {
+            val statsJob = launch {
+                while (isActive) {
+                    delay(1_000L)
+                    val tcb = trafficCallback; tcb?.invoke(AivpnJni.getUploadBytes(), AivpnJni.getDownloadBytes())
+                    // Apply server-suggested adaptive level silently (takes effect on next reconnect).
+                    val hint = AivpnJni.getAdaptiveLevelHint()
+                    if (hint > 0 && hint != adaptiveLevel()) {
+                        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                            .edit().putInt("adaptive_level", hint).apply()
+                    }
+                }
             }
-        }
-
-        try {
-            val error = withContext(Dispatchers.IO) {
-                AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk)
+            try {
+                // Load or generate the device private key for JIT Device Enrollment.
+                val deviceKey: ByteArray = SecureStorage.loadDeviceKey(this@AivpnService)
+                    ?: ByteArray(32).also { bytes ->
+                        java.security.SecureRandom().nextBytes(bytes)
+                        SecureStorage.saveDeviceKey(this@AivpnService, bytes)
+                    }
+                val error = withContext(Dispatchers.IO) {
+                    AivpnJni.runTunnel(this@AivpnService, tunFd, host, port, serverKey, psk, savedMtlsCert, adaptiveLevel(), deviceKey)
+                }
+                if (error.isNotEmpty()) throw RuntimeException(error)
+            } finally {
+                statsJob.cancel()
+                isRunning = false
             }
-            if (error.isNotEmpty()) throw RuntimeException(error)
-        } finally {
-            statsJob.cancel()
-            isRunning = false
         }
     }
 
@@ -285,10 +367,15 @@ class AivpnService : VpnService() {
      */
     @Suppress("unused")
     fun onTunnelReady(host: String) {
+        // postConnectUntilMs must be written BEFORE sessionEstablished — network callbacks
+        // check sessionEstablished first and then read postConnectUntilMs; if the order were
+        // reversed a callback could see sessionEstablished=true while postConnectUntilMs=0.
+        postConnectUntilMs = SystemClock.elapsedRealtime() + POST_CONNECT_COOLDOWN_MS
         sessionEstablished = true
         isRunning = true
         lastStatusText = getString(R.string.status_connected, host)
-        statusCallback?.invoke(true, lastStatusText)
+        val cb2 = statusCallback; cb2?.invoke(true, lastStatusText)
+        val ticb0 = tileCallback; ticb0?.invoke()
         updateNotification(getString(R.string.notification_connected, host))
         Log.d(TAG, "Tunnel ready: host=$host")
     }
@@ -324,7 +411,21 @@ class AivpnService : VpnService() {
                 // under an established session, restart immediately on the new path.
                 if (previous != null && previous != network && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                    if (now < postConnectUntilMs) {
+                        // VPN just came up — Android reshuffles network IDs; ignore same-transport churn.
+                        // But if the transport type actually changed (e.g. WiFi → cellular), restart now
+                        // so the tunnel doesn't stay bound to the dead network until the RX watchdog fires.
+                        val prevCaps = cm.getNetworkCapabilities(previous)
+                        if (prevCaps != null && isTransportChange(prevCaps, caps)) {
+                            val now2 = SystemClock.elapsedRealtime()
+                            if (now2 - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                                lastNetworkEventAtMs = now2
+                                Log.d(TAG, "Transport type changed within post-connect cooldown; restarting tunnel")
+                                networkTrigger = true
+                                AivpnJni.stopTunnel()
+                            }
+                        }
+                    } else if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
                         Log.d(TAG, "Underlying network switched: $previous -> $network; restarting tunnel")
                         networkTrigger = true
@@ -356,7 +457,7 @@ class AivpnService : VpnService() {
 
                 if (hasUsableDefault && replacement != null && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
+                    if (now >= postConnectUntilMs && now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
                         Log.d(TAG, "Underlying network moved to $replacement after loss of $network; restarting tunnel")
                         networkTrigger = true
@@ -365,7 +466,13 @@ class AivpnService : VpnService() {
                     return
                 }
 
-                if (!hasUsableDefault && isRunning) {
+                // Only abort an established session on total network loss.
+                // During handshake (sessionEstablished=false) Android transiently
+                // reshuffles network IDs as the VPN interface comes up, causing
+                // momentary hasUsableDefault=false even when the link is healthy.
+                // Stopping the tunnel here before sessionEstablished produces
+                // repeated rapid reconnects ("jitter") on initial connect.
+                if (!hasUsableDefault && isRunning && sessionEstablished) {
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
@@ -389,9 +496,18 @@ class AivpnService : VpnService() {
         }
     }
 
-    private fun isVpnNetwork(cm: ConnectivityManager, network: Network): Boolean {
-        val caps = cm.getNetworkCapabilities(network)
-        return caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+    fun adaptiveLevel(): Int =
+        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+            .getInt("adaptive_level", 0)
+
+    private fun isAdaptiveEnabled(): Boolean = adaptiveLevel() > 0
+
+    private fun isTransportChange(prev: NetworkCapabilities, next: NetworkCapabilities): Boolean {
+        val prevWifi     = prev.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val nextWifi     = next.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val prevCellular = prev.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        val nextCellular = next.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        return prevWifi != nextWifi || prevCellular != nextCellular
     }
 
     private fun unregisterNetworkCallback() {
@@ -415,11 +531,16 @@ class AivpnService : VpnService() {
         unregisterNetworkCallback()
         AivpnJni.stopTunnel()
         serviceJob?.cancel()
-        serviceJob = null
+        // Do NOT null serviceJob here — the finally block (line ~235) sets it after the
+        // native call actually returns.  startVpn's cancelAndJoin() uses this reference
+        // to wait for the old session to fully unwind before starting a new one; a
+        // premature null turns that join into a no-op and lets two runTunnel calls
+        // overlap → "Max sessions active" errors and disconnect appearing to hang.
         closeTunnel()
         isRunning = false
         lastStatusText = getString(R.string.status_disconnected)
-        statusCallback?.invoke(false, lastStatusText)
+        val cb3 = statusCallback; cb3?.invoke(false, lastStatusText)
+        val ticb1 = tileCallback; ticb1?.invoke()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -431,14 +552,14 @@ class AivpnService : VpnService() {
 
     /**
      * Called when Android revokes the VPN permission (e.g. another VPN app takes over).
-     * Default VpnService.onRevoke() calls stopSelf() which kills the service with no reconnect.
-     * We signal Rust to exit cleanly; the reconnect loop in serviceJob will then restart the
-     * tunnel automatically (unless manualDisconnect is true).
+     * Mark as manual disconnect so the reconnect loop does not attempt to reconnect, stop
+     * the tunnel, and call super so Android tears down the VPN interface and service cleanly.
      */
     override fun onRevoke() {
-        Log.w(TAG, "onRevoke() — signalling Rust to exit, reconnect loop will restart")
-        AivpnJni.stopTunnel()
-        // Do NOT call super.onRevoke() — it calls stopSelf() which bypasses reconnect.
+        Log.w(TAG, "onRevoke() — OS revoked VPN permission, stopping permanently")
+        manualDisconnect = true
+        stopVpn()
+        super.onRevoke()
     }
 
     override fun onDestroy() {
@@ -453,6 +574,8 @@ class AivpnService : VpnService() {
         closeTunnel()
         isRunning = false
         serviceScope.cancel()
+        tileCallback = null
+        instance = null
         super.onDestroy()
     }
 
@@ -463,11 +586,13 @@ class AivpnService : VpnService() {
 
         val tunAddress4 = savedVpnIp ?: "10.0.0.2"
         val tunPrefixLen = savedVpnPrefixLen.coerceIn(1, 30)
-        val tunMtu = savedVpnMtu.coerceAtLeast(576)
+        val tunMtu = if (isAdaptiveEnabled()) ADAPTIVE_TUN_MTU else savedVpnMtu.coerceAtLeast(576)
 
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
         // IPv6 is intentionally disabled in this client.
+        // allowBypass() is intentionally NOT called — default VpnService.Builder behaviour
+        // prevents any app from bypassing the VPN tunnel.
         val builder = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, tunPrefixLen)
@@ -486,27 +611,71 @@ class AivpnService : VpnService() {
             }
         }
 
-        val excludedDomains = SecureStorage.loadExcludedDomains(this)
-        if (excludedDomains.isNotEmpty()) {
-            val excludedIPs = mutableSetOf<String>()
-            for (domain in excludedDomains) {
-                try {
-                    val addresses = java.net.InetAddress.getAllByName(domain)
-                    for (addr in addresses) {
-                        if (addr is java.net.Inet4Address) {
-                            excludedIPs.add(addr.hostAddress ?: continue)
-                        }
-                    }
-                } catch (_: Exception) {
-                    Log.d(TAG, "Failed to resolve excluded domain: $domain")
+        // Domain-based split tunnel: resolve each excluded domain to IPv4 addresses at
+        // connect time and add /32 exclusion routes so that traffic to those IPs bypasses
+        // the VPN tunnel. This is the same approach used by NordVPN and ExpressVPN on
+        // Android. Limitation: CDN IPs rotate and may differ per client, so exclusions
+        // are best-effort. The domain list is re-resolved on every tunnel (re)connect.
+        applyDomainExclusions(builder)
+
+        vpnInterface = builder.establish() ?: throw Exception("Failed to establish VPN interface")
+    }
+
+    /**
+     * Resolve each excluded domain to IPv4 addresses and register them as exclusion routes
+     * via [Builder.excludeRoute] so traffic to those IPs bypasses the VPN tunnel.
+     *
+     * [Builder.excludeRoute] was added in API 33 (Android 13). On older devices the builder
+     * has no exclusion-route primitive; we log a warning and skip — the stored domain list
+     * will take effect once the device is on API 33+.
+     *
+     * Limitation: CDN IPs rotate and vary per client. Domains are re-resolved on every
+     * tunnel (re)connect. DNS resolution runs synchronously here because
+     * [ensureVpnInterface] is already called from a background coroutine (Dispatchers.IO).
+     */
+    private fun applyDomainExclusions(builder: Builder) {
+        val domains = SecureStorage.loadExcludedDomains(this)
+        if (domains.isEmpty()) return
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Log.w(TAG, "Domain split tunnel requires API 33 (Android 13); " +
+                "${domains.size} domain(s) configured but skipped on API ${Build.VERSION.SDK_INT}")
+            return
+        }
+
+        val resolvedIps = mutableSetOf<Inet4Address>()
+
+        for (domain in domains) {
+            try {
+                val addrs = InetAddress.getAllByName(domain)
+                val v4addrs = addrs.filterIsInstance<Inet4Address>()
+                if (v4addrs.isEmpty()) {
+                    Log.d(TAG, "Domain $domain: no IPv4 addresses returned — skipping")
+                } else {
+                    Log.d(TAG, "Domain $domain resolved: ${v4addrs.map { it.hostAddress }}")
+                    resolvedIps.addAll(v4addrs)
                 }
-            }
-            if (excludedIPs.isNotEmpty()) {
-                Log.d(TAG, "Excluded domain IPs: $excludedIPs")
+            } catch (e: Exception) {
+                Log.w(TAG, "DNS resolution failed for excluded domain $domain: ${e.message}")
             }
         }
 
-        vpnInterface = builder.establish() ?: throw Exception("Failed to establish VPN interface")
+        if (resolvedIps.isEmpty()) {
+            Log.d(TAG, "No IPv4 addresses resolved for excluded domains")
+            return
+        }
+
+        for (addr in resolvedIps) {
+            try {
+                // Builder.excludeRoute(IpPrefix) — API 33+. Traffic to this /32 prefix
+                // is routed through the underlying network, not through the VPN tunnel.
+                @Suppress("NewApi")
+                builder.excludeRoute(android.net.IpPrefix(addr, 32))
+                Log.d(TAG, "Exclusion route applied: ${addr.hostAddress}/32")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to add exclusion route for ${addr.hostAddress}: ${e.message}")
+            }
+        }
     }
 
     // ──────────── Network waiting ────────────
@@ -563,11 +732,82 @@ class AivpnService : VpnService() {
             }
         }
         val lastColon = serverAddr.lastIndexOf(':')
-        val port = if (lastColon >= 0) serverAddr.substring(lastColon + 1).toIntOrNull() else null
+        val port = if (lastColon >= 0)
+            serverAddr.substring(lastColon + 1).toIntOrNull()?.takeIf { it in 1..65535 }
+        else null
         return if (port != null)
             Pair(serverAddr.substring(0, lastColon), port)
         else
             Pair(serverAddr, 443)
+    }
+
+    // ──────────── Profile-keyed connect ────────────
+
+    /**
+     * Load the VPN profile from EncryptedSharedPreferences by [profileId] and
+     * start the tunnel.  Server keys stay in secure storage and are never
+     * exposed as Intent extras.
+     */
+    private fun loadAndStartVpnFromProfile(profileId: String) {
+        val profiles = SecureStorage.loadProfiles(this)
+        val profile = profiles.find { it.id == profileId } ?: profiles.firstOrNull()
+        if (profile == null) {
+            Log.w(TAG, "loadAndStartVpnFromProfile: no profile for id=$profileId")
+            return
+        }
+        val parsed = parseConnectionKeyInService(profile.key) ?: return
+        val mtlsCert: ByteArray? = profile.mtlsCertBase64?.let { b64 ->
+            try { Base64.decode(b64, Base64.DEFAULT).takeIf { it.size == 104 } }
+            catch (_: Exception) { null }
+        }
+        startVpn(
+            serverAddr      = parsed.server,
+            serverKeyBase64 = parsed.serverKey,
+            pskBase64       = parsed.psk,
+            vpnIp           = parsed.vpnIp,
+            serverVpnIp     = parsed.serverVpnIp,
+            vpnPrefixLen    = parsed.prefixLen,
+            vpnMtu          = parsed.mtu,
+            mtlsCert        = mtlsCert,
+        )
+    }
+
+    private data class ParsedConnectionKey(
+        val server: String,
+        val serverKey: String,
+        val psk: String?,
+        val vpnIp: String,
+        val serverVpnIp: String,
+        val prefixLen: Int,
+        val mtu: Int,
+    )
+
+    private fun parseConnectionKeyInService(raw: String): ParsedConnectionKey? {
+        val payload = raw.trim().let {
+            if (it.startsWith("aivpn://")) it.removePrefix("aivpn://") else it
+        }
+        return try {
+            val bytes = Base64.decode(payload,
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            val net = json.optJSONObject("n")
+            val vpnIp = net?.optString("client_ip")?.takeIf { it.isNotBlank() }
+                ?: json.getString("i")
+            val serverVpnIp = net?.optString("server_vpn_ip")?.takeIf { it.isNotBlank() }
+                ?: "10.0.0.1"
+            ParsedConnectionKey(
+                server      = json.getString("s"),
+                serverKey   = json.getString("k"),
+                psk         = json.optString("p").takeIf { it.isNotEmpty() },
+                vpnIp       = vpnIp,
+                serverVpnIp = serverVpnIp,
+                prefixLen   = net?.optInt("prefix_len", LEGACY_PREFIX_LEN) ?: LEGACY_PREFIX_LEN,
+                mtu         = net?.optInt("mtu", DEFAULT_TUN_MTU) ?: DEFAULT_TUN_MTU,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "parseConnectionKeyInService failed: ${e.message}")
+            null
+        }
     }
 
     // ──────────── Notifications ────────────

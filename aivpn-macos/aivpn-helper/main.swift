@@ -9,11 +9,17 @@
 
 import Foundation
 import Darwin
+import SystemConfiguration
 
 // MARK: - Constants
 
 let SOCKET_PATH = "/var/run/aivpn/helper.sock"
 let DEFAULT_CLIENT_PATH = "/Library/Application Support/AIVPN/aivpn-client"
+let ALLOWED_CLIENT_PATHS = [
+    "/Applications/AIVPN.app/Contents/MacOS/aivpn-client",
+    "/Applications/AIVPN.app/Contents/Resources/aivpn-client",
+    DEFAULT_CLIENT_PATH,
+]
 let LOG_PATH = "/var/run/aivpn/client.log"
 let PID_PATH = "/var/run/aivpn/client.pid"
 let RECORDING_STATUS_PATH = "/var/run/aivpn/recording.status"
@@ -28,6 +34,11 @@ struct HelperRequest: Codable {
     let fullTunnel: Bool?    // full tunnel mode (for connect)
     let binaryPath: String?  // custom binary path (for connect/dev)
     let service: String?     // service name (for record_start)
+    let mtlsCertPath: String? // optional path to mTLS client cert file (for connect)
+    let excludeRoutes: String? // comma-separated CIDRs to bypass the VPN (split tunnel)
+    let adaptiveLevel: Int?   // 0=Off, 1=Light, 2=Aggressive, 3=Satellite; nil treated as 0
+    let dnsProxy: String?      // local bind address for DNS proxy (e.g. "127.0.0.1:5300")
+    let killSwitch: Bool?      // block all non-VPN traffic when true
 }
 
 struct HelperResponse: Codable {
@@ -146,10 +157,24 @@ func runCommand(_ path: String, args: [String]) -> Bool {
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
-func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperResponse {
+func startClient(key: String, fullTunnel: Bool, binaryPath: String?, mtlsCertPath: String? = nil, excludeRoutes: String? = nil, adaptiveLevel: Int = 0, dnsProxy: String? = nil, killSwitch: Bool = false) -> HelperResponse {
     killExistingClient()
 
-    let clientPath = binaryPath ?? DEFAULT_CLIENT_PATH
+    // Resolve the requested path; fall back to default
+    let requestedPath = binaryPath ?? DEFAULT_CLIENT_PATH
+
+    // Canonicalize to prevent symlink/traversal tricks
+    let clientPath: String
+    if let resolved = URL(fileURLWithPath: requestedPath).standardized.path as String?,
+       ALLOWED_CLIENT_PATHS.contains(resolved) {
+        clientPath = resolved
+    } else if ALLOWED_CLIENT_PATHS.contains(requestedPath) {
+        clientPath = requestedPath
+    } else {
+        log("ERROR: binaryPath '\(requestedPath)' not in allowlist — rejected")
+        return HelperResponse(status: "error",
+                              message: "Rejected: binary path is not permitted")
+    }
 
     guard FileManager.default.isExecutableFile(atPath: clientPath) else {
         log("ERROR: aivpn-client not found at \(clientPath)")
@@ -170,6 +195,55 @@ func startClient(key: String, fullTunnel: Bool, binaryPath: String?) -> HelperRe
     var args: [String] = [clientPath, "-k", key]
     if fullTunnel {
         args.append("--full-tunnel")
+    }
+    if let certPath = mtlsCertPath {
+        let homeDir = NSHomeDirectory()
+        let allowedPrefixes = [homeDir, "/etc/ssl", "/usr/local/etc"]
+        let certOk = certPath.count <= 512
+            && allowedPrefixes.contains(where: { certPath.hasPrefix($0) })
+            && certPath.range(of: #"^[\w/\.\-]+\.(pem|crt|cer)$"#,
+                              options: .regularExpression) != nil
+        guard certOk else {
+            log("ERROR: invalid mtlsCertPath '\(certPath)' — rejected")
+            return HelperResponse(status: "error", message: "Invalid mTLS cert path")
+        }
+        args.append("--mtls-cert")
+        args.append(certPath)
+    }
+    if adaptiveLevel > 0 {
+        args.append("--adaptive-level")
+        args.append("\(adaptiveLevel)")
+    }
+    if killSwitch {
+        args.append("--kill-switch")
+    }
+    if let proxy = dnsProxy, !proxy.isEmpty {
+        // Validate HOST:PORT — character whitelist + port range 1–65535.
+        let proxyCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:.[]-")
+        guard proxy.unicodeScalars.allSatisfy({ proxyCharset.contains($0) }),
+              let colonIdx = proxy.lastIndex(of: ":"),
+              let port = Int(proxy[proxy.index(after: colonIdx)...]),
+              (1...65535).contains(port) else {
+            log("ERROR: invalid dnsProxy '\(proxy)' — rejected")
+            return HelperResponse(status: "error", message: "Invalid dns-proxy value")
+        }
+        args.append("--dns-proxy")
+        args.append(proxy)
+    }
+    if let routes = excludeRoutes {
+        // Validate: each token must look like a CIDR (digits, dots, colons, slash).
+        // Reject anything containing shell-special characters or path traversal.
+        let tokens = routes.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let cidrCharset = CharacterSet(charactersIn: "0123456789abcdefABCDEF:./")
+        let allValid = tokens.allSatisfy { token in
+            !token.isEmpty && token.unicodeScalars.allSatisfy { cidrCharset.contains($0) }
+        }
+        guard !tokens.isEmpty && allValid else {
+            log("ERROR: invalid excludeRoutes — rejected")
+            return HelperResponse(status: "error", message: "Invalid exclude-routes value")
+        }
+        args.append("--exclude-routes")
+        args.append(tokens.joined(separator: ","))
     }
 
     // Use posix_spawn for reliable process management
@@ -357,11 +431,25 @@ func getLog() -> HelperResponse {
                               pid: managedPID > 0 ? Int(managedPID) : nil, log: "")
     }
     let lines = logContent.components(separatedBy: "\n")
+    // Keep log file bounded so it doesn't grow unboundedly over a long session
+    if lines.count > 500 {
+        let kept = lines.suffix(500).joined(separator: "\n")
+        try? kept.write(toFile: LOG_PATH, atomically: true, encoding: .utf8)
+    }
     let recent = lines.suffix(50).joined(separator: "\n")
     return HelperResponse(status: "ok", message: "Log retrieved",
                           connected: isConnected,
                           pid: managedPID > 0 ? Int(managedPID) : nil,
                           log: recent)
+}
+
+private func readQualityScore() -> String {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/var/run/aivpn/quality.json")),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let q = json["quality"] as? Int else { return "" }
+    var result = ",quality:\(q)"
+    if let a = json["adaptive"] as? Int { result += ",adaptive:\(a)" }
+    return result
 }
 
 /// Get traffic statistics
@@ -372,7 +460,7 @@ func getTrafficStats() -> HelperResponse {
         // Format: "sent:X,received:Y"
         let trimmed = statsContent.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.contains("sent:") && trimmed.contains("received:") {
-            return HelperResponse(status: "ok", message: trimmed)
+            return HelperResponse(status: "ok", message: trimmed + readQualityScore())
         }
     }
     
@@ -416,7 +504,7 @@ func getTrafficStats() -> HelperResponse {
         try? trimmed.write(toFile: LOG_PATH, atomically: true, encoding: .utf8)
     }
     
-    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)")
+    return HelperResponse(status: "ok", message: "sent:\(totalSent),received:\(totalReceived)\(readQualityScore())")
 }
 
 func getRecordingInfo() -> HelperResponse {
@@ -485,11 +573,32 @@ func createSocket() -> Int32 {
         return -1
     }
 
-    // Make socket accessible to all users
-    try? FileManager.default.setAttributes([.posixPermissions: 0o666],
-                                          ofItemAtPath: SOCKET_PATH)
+    // Restrict socket to owner only; chown to the console user so the GUI app
+    // (running as the logged-in user, not root) can connect. 0o666 would expose
+    // the socket — and any connection key/PSK it carries — to all local processes.
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                            ofItemAtPath: SOCKET_PATH)
+    var consoleUID: uid_t = 0
+    var consoleGID: gid_t = 0
+    if SCDynamicStoreCopyConsoleUser(nil, &consoleUID, &consoleGID) != nil {
+        chown(SOCKET_PATH, consoleUID, consoleGID)
+    }
 
     return fd
+}
+
+/// Read exactly `count` bytes from `fd`, returning nil on EOF/error/timeout.
+func readExact(_ fd: Int32, count: Int) -> Data? {
+    var buf = [UInt8](repeating: 0, count: count)
+    var total = 0
+    while total < count {
+        let n = buf.withUnsafeMutableBytes { bytes in
+            read(fd, bytes.baseAddress!.advanced(by: total), count - total)
+        }
+        if n <= 0 { return nil }
+        total += n
+    }
+    return Data(buf)
 }
 
 /// Handle a single client connection
@@ -499,18 +608,19 @@ func handleConnection(_ clientFD: Int32) {
     setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO,
                &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-    var buffer = [UInt8](repeating: 0, count: 8192)
-    let bytesRead = read(clientFD, &buffer, buffer.count)
-    guard bytesRead > 0 else { return }
-
-    let data = Data(bytes: buffer, count: bytesRead)
-    guard let requestStr = String(data: data, encoding: .utf8) else {
-        sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid encoding"))
+    // Read 4-byte big-endian length prefix
+    guard let lenBytes = readExact(clientFD, count: 4) else { return }
+    let payloadLen = Int(lenBytes[0]) << 24 | Int(lenBytes[1]) << 16
+                   | Int(lenBytes[2]) << 8  | Int(lenBytes[3])
+    guard payloadLen > 0 && payloadLen <= 65535 else {
+        sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid message length"))
         return
     }
 
-    guard let requestData = requestStr.data(using: .utf8),
-          let request = try? JSONDecoder().decode(HelperRequest.self, from: requestData) else {
+    // Read exactly payloadLen bytes
+    guard let data = readExact(clientFD, count: payloadLen) else { return }
+
+    guard let request = try? JSONDecoder().decode(HelperRequest.self, from: data) else {
         sendResponse(clientFD, HelperResponse(status: "error", message: "Invalid JSON"))
         return
     }
@@ -526,7 +636,12 @@ func handleConnection(_ clientFD: Int32) {
         }
         response = startClient(key: key,
                                fullTunnel: request.fullTunnel ?? false,
-                               binaryPath: request.binaryPath)
+                               binaryPath: request.binaryPath,
+                               mtlsCertPath: request.mtlsCertPath,
+                               excludeRoutes: request.excludeRoutes,
+                               adaptiveLevel: request.adaptiveLevel ?? 0,
+                               dnsProxy: request.dnsProxy,
+                               killSwitch: request.killSwitch ?? false)
 
     case "disconnect":
         response = stopClient()
@@ -552,6 +667,9 @@ func handleConnection(_ clientFD: Int32) {
 
     case "record_stop":
         response = runClientCommand(args: ["record", "stop"], binaryPath: request.binaryPath)
+
+    case "device_key":
+        response = runClientCommand(args: ["--show-device-key"], binaryPath: request.binaryPath)
 
     case "record_info":
         response = getRecordingInfo()
@@ -629,6 +747,10 @@ func main() {
 
     log("AIVPN Helper v\(HELPER_VERSION) started (socket: \(SOCKET_PATH))")
 
+    // Serial queue: keeps shared mutable state (managedPID, isConnected) thread-safe
+    // while freeing the accept loop from blocking on slow 5-second-timeout connections.
+    let connectionQueue = DispatchQueue(label: "aivpn.helper.connections")
+
     // Main accept loop — runs forever (LaunchDaemon manages lifecycle)
     while true {
         var clientBuf = [Int8](repeating: 0, count: 106)
@@ -644,8 +766,10 @@ func main() {
             break
         }
 
-        handleConnection(clientFD)
-        close(clientFD)
+        connectionQueue.async {
+            handleConnection(clientFD)
+            close(clientFD)
+        }
     }
 
     log("AIVPN Helper exiting")

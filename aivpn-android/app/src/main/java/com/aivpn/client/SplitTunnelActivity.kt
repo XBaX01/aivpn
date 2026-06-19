@@ -16,8 +16,12 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.aivpn.client.databinding.ActivitySplitTunnelBinding
 import com.google.android.material.tabs.TabLayout
 
@@ -142,37 +146,54 @@ class SplitTunnelActivity : AppCompatActivity() {
     }
 
     private fun loadApps() {
-        val pm = packageManager
-        val ownPackage = packageName
+        lifecycleScope.launch {
+            val pm = packageManager
+            val ownPackage = packageName
+            val defaultIcon = pm.defaultActivityIcon
 
-        // MATCH_ALL was added in API 33 (Android 13)
-        // For older versions, use 0 (default behavior)
-        val flags = if (android.os.Build.VERSION.SDK_INT >= 33) {
-            PackageManager.MATCH_ALL
-        } else {
-            0
+            data class LoadResult(val apps: List<AppEntry>, val denied: Boolean)
+
+            val result = withContext(Dispatchers.IO) {
+                val flags = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    PackageManager.MATCH_ALL
+                } else {
+                    0
+                }
+                val installedApps = try {
+                    pm.getInstalledApplications(flags)
+                } catch (e: Exception) {
+                    android.util.Log.w("SplitTunnelActivity",
+                        "getInstalledApplications denied — app list unavailable: ${e.message}")
+                    return@withContext LoadResult(emptyList(), denied = true)
+                }
+
+                val apps = installedApps
+                    .filter { it.packageName != ownPackage }
+                    .map { appInfo ->
+                        val icon = try { appInfo.loadIcon(pm) } catch (_: Exception) { defaultIcon }
+                        AppEntry(
+                            name = try { appInfo.loadLabel(pm).toString() } catch (_: Exception) { appInfo.packageName },
+                            packageName = appInfo.packageName,
+                            isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                                && (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
+                            icon = icon
+                        )
+                    }
+                    .distinctBy { it.packageName }
+                    .sortedWith(
+                        compareBy<AppEntry> { !allowedPackages.contains(it.packageName) }
+                            .thenBy { it.name.lowercase() }
+                    )
+                LoadResult(apps, denied = false)
+            }
+
+            if (result.denied) {
+                Toast.makeText(this@SplitTunnelActivity,
+                    getString(R.string.split_tunnel_apps_unavailable), Toast.LENGTH_LONG).show()
+            }
+            allApps = result.apps
+            applyFilter()
         }
-
-        allApps = pm.getInstalledApplications(flags)
-            .filter { appInfo ->
-                // Exclude own package
-                appInfo.packageName != ownPackage
-            }
-            .map { appInfo ->
-                AppEntry(
-                    name = appInfo.loadLabel(pm).toString(),
-                    packageName = appInfo.packageName,
-                    isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                        && (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
-                    icon = appInfo.loadIcon(pm)
-                )
-            }
-            .distinctBy { it.packageName }
-            .sortedWith(
-                compareBy<AppEntry> { !allowedPackages.contains(it.packageName) }
-                    .thenBy { it.name.lowercase() }
-            )
-        applyFilter()
     }
 
     private fun applyFilter() {
@@ -229,6 +250,14 @@ class SplitTunnelActivity : AppCompatActivity() {
                 addDomain()
                 true
             } else false
+        }
+
+        // Domain exclusions require API 33 (Android 13) for addRoute(IpPrefix, excluded).
+        // On older devices, saved domains are stored but not applied to VPN routing.
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            binding.textDomainNote.visibility = android.view.View.VISIBLE
+        } else {
+            binding.textDomainNote.visibility = android.view.View.GONE
         }
     }
 
@@ -331,13 +360,16 @@ class SplitTunnelActivity : AppCompatActivity() {
         override fun getItemCount() = excludedDomains.size
 
         override fun onBindViewHolder(holder: VH, position: Int) {
-            holder.domain.text = excludedDomains[position]
+            val domain = excludedDomains[position]
+            holder.domain.text = domain
             holder.delete.setOnClickListener {
-                val pos = holder.adapterPosition
-                if (pos >= 0 && pos < excludedDomains.size) {
-                    excludedDomains.removeAt(pos)
+                // Capture the domain value at bind time rather than reading adapterPosition
+                // in the click handler. adapterPosition can return -1 or a stale index
+                // while the RecyclerView is laying out (rapid taps, concurrent deletions),
+                // causing IndexOutOfBoundsException on excludedDomains.removeAt().
+                if (excludedDomains.remove(domain)) {
                     saveDomains()
-                    notifyItemRemoved(pos)
+                    notifyDataSetChanged()
                 }
             }
         }

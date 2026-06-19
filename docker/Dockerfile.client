@@ -1,0 +1,46 @@
+# AIVPN Client Test Dockerfile
+FROM rust:1.86-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy entire workspace (needed for Cargo.toml workspace resolution)
+COPY Cargo.toml ./
+COPY Cargo.lock* ./
+COPY aivpn-common aivpn-common/
+COPY aivpn-client aivpn-client/
+COPY aivpn-server aivpn-server/
+COPY aivpn-android-core aivpn-android-core/
+COPY aivpn-windows aivpn-windows/
+COPY aivpn-ios-core aivpn-ios-core/
+COPY aivpn-linux aivpn-linux/
+COPY aivpn-common/mask-assets mask-assets/
+
+RUN cargo build --release --bin aivpn-client
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    iproute2 \
+    iptables \
+    iputils-ping \
+    curl \
+    netcat-openbsd \
+    bc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/aivpn-client /usr/local/bin/aivpn-client
+
+RUN mkdir -p /dev/net && \
+    mknod /dev/net/tun c 10 200 2>/dev/null || true && \
+    chmod 600 /dev/net/tun
+
+ENTRYPOINT ["/usr/local/bin/aivpn-client"]

@@ -4,11 +4,12 @@
 //! Wire protocol is byte-for-byte identical to AivpnCrypto.kt so that both can talk to the
 //! same Rust server without any server-side changes.
 
+use aivpn_common::quality::{AdaptiveLevel, QualityTracker};
 use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use jni::objects::GlobalRef;
@@ -22,27 +23,26 @@ use aivpn_common::client_wire::{
     build_inner_packet, build_random_mdh_packet, decode_packet_with_mdh_len,
     obfuscate_client_eph_pub, process_server_hello_with_mdh_len, RecvWindow,
 };
-use aivpn_common::crypto::{
-    derive_session_keys, KeyPair, SessionKeys,
-};
+use aivpn_common::crypto::{derive_session_keys, KeyPair, SessionKeys};
 use aivpn_common::error::{Error, Result};
+use aivpn_common::mask::MaskProfile;
+use aivpn_common::mimicry::{bootstrap_mask_for_psk, MimicryEncryptor};
 use aivpn_common::protocol::{ControlPayload, InnerType};
-use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig, ZeroMdhEncryptor};
+use aivpn_common::upload_pipeline::{self, PacketEncryptor, UploadConfig};
 
 // ──────────── Constants ────────────
 
-const BUF_SIZE: usize = 1500;
+const BUF_SIZE: usize = 2048;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);  // closer to WireGuard roaming behavior
-const RX_SILENCE: Duration = Duration::from_secs(120);         // backup watchdog; network callback already handles real link loss
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(4); // below typical provider NAT UDP timeout (~10-15s)
+const RX_SILENCE: Duration = Duration::from_secs(120); // backup watchdog; network callback already handles real link loss
 const RX_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 // Mobile networks can briefly stall or batch downstream delivery. Keep this
 // detector responsive, but avoid tearing down an otherwise healthy session
 // after only a few kilobytes of outbound browser traffic.
 const TX_WITHOUT_RX_TIMEOUT: Duration = Duration::from_secs(20);
 const TX_WITHOUT_RX_MIN_BYTES: u64 = 64 * 1024;
-const REKEY_INTERVAL: Duration = Duration::from_secs(1800); // 30 min
 const CHANNEL_SIZE: usize = 8192;
 
 // ──────────── Session runtime (read by JNI exports in lib.rs) ────────────
@@ -52,6 +52,9 @@ pub struct SessionRuntime {
     stop_event_fd: AtomicI32,
     upload_bytes: AtomicU64,
     download_bytes: AtomicU64,
+    // Set by stop_active_tunnel() before eventfd/socket are ready so that early
+    // init phases (DNS, socket creation) can check and bail out immediately.
+    stop_requested: AtomicBool,
 }
 
 impl SessionRuntime {
@@ -61,11 +64,50 @@ impl SessionRuntime {
             stop_event_fd: AtomicI32::new(-1),
             upload_bytes: AtomicU64::new(0),
             download_bytes: AtomicU64::new(0),
+            stop_requested: AtomicBool::new(false),
         }
     }
 }
 
 static ACTIVE_SESSION: Mutex<Option<Arc<SessionRuntime>>> = Mutex::new(None);
+
+// Last local UDP port used by a tunnel session.  On reconnect we try to bind
+// to the same port so CGNAT carriers (MTS et al.) with port-preserving NAT
+// don't need to update their inbound routing table — the old mapping already
+// points to the right port and downlink arrives immediately.
+static LAST_LOCAL_PORT: AtomicU16 = AtomicU16::new(0);
+
+// Set by stop_active_tunnel() when called while no session is active (the gap
+// between the old session's ActiveSessionGuard drop and the new session's
+// activate_session() call).  activate_session() propagates this to the new
+// session so it stops immediately.  clear_pending_stop() resets the flag
+// when a new intentional connection is about to start (called from the
+// restartJob in Kotlin after cancelAndJoin()).
+static STOP_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Last computed connection quality score (0–100). Updated on each KeepaliveAck.
+/// Polled by JNI via getQualityScore().
+pub static ACTIVE_QUALITY_SCORE: AtomicU8 = AtomicU8::new(0);
+
+/// Suggested adaptive level from the last server AdaptiveHint (0–3). 0 = no hint yet.
+/// Polled by JNI via getAdaptiveLevelHint(); takes effect on next reconnect.
+pub static ACTIVE_ADAPTIVE_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+/// Sender half of the control-payload channel to the active upload loop.
+/// JNI uses this to inject RecordingStart / RecordingStop without a reconnect.
+static ACTIVE_CONTROL_TX: Mutex<Option<mpsc::Sender<ControlPayload>>> = Mutex::new(None);
+
+/// Queue a control payload to the active upload loop.
+/// Returns true if the payload was accepted, false if there is no active session
+/// or the channel is full.
+pub fn send_control_payload(payload: ControlPayload) -> bool {
+    let guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        tx.try_send(payload).is_ok()
+    } else {
+        false
+    }
+}
 
 struct ActiveSessionGuard {
     session: Arc<SessionRuntime>,
@@ -83,11 +125,10 @@ impl Drop for ActiveSessionGuard {
             unsafe { libc::close(stop_fd) };
         }
 
-        if let Ok(mut guard) = ACTIVE_SESSION.lock() {
-            if let Some(current) = guard.as_ref() {
-                if Arc::ptr_eq(current, &self.session) {
-                    *guard = None;
-                }
+        let mut guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = guard.as_ref() {
+            if Arc::ptr_eq(current, &self.session) {
+                *guard = None;
             }
         }
     }
@@ -98,10 +139,21 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
         .lock()
         .map_err(|_| Error::Session("Active session lock poisoned".into()))?;
 
-    if guard.is_some() {
-        return Err(Error::Session(
-            "Another Android tunnel session is already active".into(),
-        ));
+    if let Some(existing) = guard.as_ref() {
+        if !existing.stop_requested.load(Ordering::SeqCst) {
+            return Err(Error::Session(
+                "Another Android tunnel session is already active".into(),
+            ));
+        }
+        // Previous session was told to stop but the Rust task has not yet
+        // exited (service destroyed before JNI returned).  Evict it so the
+        // new connection can proceed; the old ActiveSessionGuard will clear
+        // ACTIVE_SESSION only if ptr_eq matches — it won't touch ours.
+    }
+
+    // Propagate any stop that arrived while no session was active.
+    if STOP_PENDING.swap(false, Ordering::SeqCst) {
+        session.stop_requested.store(true, Ordering::SeqCst);
     }
 
     *guard = Some(session.clone());
@@ -109,28 +161,47 @@ fn activate_session(session: Arc<SessionRuntime>) -> Result<ActiveSessionGuard> 
 }
 
 pub fn stop_active_tunnel() {
-    let (udp_fd, stop_fd) = ACTIVE_SESSION
-        .lock()
-        .ok()
-        .and_then(|guard| {
-            guard.as_ref().map(|s| {
+    let (udp_fd, stop_fd) = {
+        let guard = ACTIVE_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|s| {
+                // Set the flag FIRST so early init phases (DNS lookup, socket
+                // creation) see it before the eventfd/UDP fd are available.
+                s.stop_requested.store(true, Ordering::SeqCst);
                 (
                     s.udp_control_fd.swap(-1, Ordering::SeqCst),
                     s.stop_event_fd.load(Ordering::SeqCst),
                 )
             })
-        })
-        .unwrap_or((-1, -1));
+            .unwrap_or_else(|| {
+                // No active session in the window between the old session's
+                // guard drop and the new session's activate_session() call.
+                // Mark the flag so the next session inherits the stop.
+                STOP_PENDING.store(true, Ordering::SeqCst);
+                (-1, -1)
+            })
+    };
 
     if stop_fd >= 0 {
-        let value: u64 = 1;
-        unsafe {
-            let _ = libc::write(
-                stop_fd,
-                &value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>(),
-            );
-        };
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            let value: u64 = 1;
+            unsafe {
+                let _ = libc::write(
+                    stop_fd,
+                    &value as *const u64 as *const libc::c_void,
+                    std::mem::size_of::<u64>(),
+                );
+            };
+        }
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        {
+            let v: u8 = 1;
+            unsafe {
+                let _ = libc::write(stop_fd, &v as *const u8 as *const libc::c_void, 1);
+            };
+        }
     }
 
     if udp_fd >= 0 {
@@ -141,11 +212,22 @@ pub fn stop_active_tunnel() {
     }
 }
 
+/// Called by the Kotlin restartJob after cancelAndJoin() — clears any pending
+/// stop that was set during the cleanup phase so the intentional new connection
+/// is not immediately stopped by a stale flag.
+pub fn clear_pending_stop() {
+    STOP_PENDING.store(false, Ordering::SeqCst);
+}
+
 pub fn get_active_upload_bytes() -> u64 {
     ACTIVE_SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|s| s.upload_bytes.load(Ordering::Relaxed)))
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|s| s.upload_bytes.load(Ordering::Relaxed))
+        })
         .unwrap_or(0)
 }
 
@@ -153,15 +235,18 @@ pub fn get_active_download_bytes() -> u64 {
     ACTIVE_SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|s| s.download_bytes.load(Ordering::Relaxed)))
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|s| s.download_bytes.load(Ordering::Relaxed))
+        })
         .unwrap_or(0)
 }
 
 // ──────────── Entry point ────────────
 
 /// Blocking async function that runs the whole tunnel session.
-/// Returns Ok(()) only on REKEY_INTERVAL expiry (clean reconnect trigger).
-/// All errors cause the Kotlin reconnect loop to kick in.
+/// Returns Err on any tunnel failure (causes the Kotlin reconnect loop to kick in).
 pub async fn run_tunnel_android(
     vm: JavaVM,
     vpn_service: GlobalRef,
@@ -170,27 +255,53 @@ pub async fn run_tunnel_android(
     server_port: u16,
     server_key: [u8; 32],
     psk: Option<[u8; 32]>,
+    mtls_cert: Option<Vec<u8>>,
     mdh_len: usize,
+    adaptive_level: u8,
+    static_privkey: Option<[u8; 32]>,
 ) -> Result<()> {
+    let level = AdaptiveLevel::from_u8(adaptive_level);
     let session = Arc::new(SessionRuntime::new());
     let _active_session_guard = activate_session(session.clone())?;
 
-    // ── 1. Ephemeral keypair + initial session keys (Zero-RTT like existing Kotlin) ──
-    let keypair = KeyPair::generate();
-    let dh = keypair.compute_shared(&server_key)?;
+    // ── 1. Ephemeral keypair + initial session keys ──
+    let mut keypair = KeyPair::generate();
+    let mut dh = keypair.compute_shared(&server_key)?;
     let mut keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
 
-    // ── 2. Create and protect UDP socket ──
-    // Resolve host (async DNS so we don't block the tokio thread).
+    // ── 2. Create stop signal immediately — before DNS — so a disconnect press
+    //    during a slow/hung cellular DNS is handled instantly, not after a 5 s wait.
+    let stop_signal = create_stop_signal(&session)?;
+
+    // Resolve host; race against stop signal so disconnect is always responsive.
     let dest_str = format!("{}:{}", server_host, server_port);
-    let dest: SocketAddr = tokio::net::lookup_host(&dest_str)
-        .await
-        .map_err(|e| Error::Io(e))?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?;
+    let dest: SocketAddr = tokio::select! {
+        biased;
+        _ = wait_for_stop_signal(&stop_signal) => {
+            return Err(Error::Session("Stop requested".into()));
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host(&dest_str),
+        ) => {
+            result
+                .map_err(|_| Error::Session("DNS lookup timeout (5 s)".into()))?
+                .map_err(Error::Io)?
+                .find(|a| a.is_ipv4())
+                .ok_or_else(|| Error::Session("Cannot resolve server host to IPv4".into()))?
+        }
+    };
+
+    if session.stop_requested.load(Ordering::SeqCst) {
+        return Err(Error::Session("Stop requested".into()));
+    }
 
     let raw_udp_fd = create_protected_udp_socket(&vm, &vpn_service, dest, &session)?;
-    let stop_signal = create_stop_signal(&session)?;
+
+    if session.stop_requested.load(Ordering::SeqCst) {
+        unsafe { libc::close(raw_udp_fd) };
+        return Err(Error::Session("Stop requested".into()));
+    }
 
     // ── 3. Set TUN fd to non-blocking for AsyncFd ──
     let owned_tun_fd = unsafe { libc::dup(tun_fd_int) };
@@ -211,32 +322,30 @@ pub async fn run_tunnel_android(
     // ── 4. Send init handshake (Control/Keepalive + obfuscated eph_pub) ──
     let mut send_counter: u64 = 0;
     let mut send_seq: u16 = 0;
-    let keepalive = ControlPayload::Keepalive.encode()?;
-    let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
-
-    let send_handshake = |keys: &SessionKeys,
-                          send_counter: &mut u64,
-                          send_seq: &mut u16|
-     -> Result<Vec<u8>> {
-        let inner = build_inner_packet(InnerType::Control, *send_seq, &keepalive);
-        let pkt = build_random_mdh_packet(keys, send_counter, &inner, Some(&obf_pub), mdh_len)?;
-        *send_seq = send_seq.wrapping_add(1);
-        Ok(pkt)
-    };
-
-    let init_pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
-    udp.send(&init_pkt).await?;
+    let keepalive = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
+    {
+        let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+        let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+        let pkt =
+            build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+    }
 
     // ── 5. Wait for ServerHello with timeout ──
     let mut recv_buf = vec![0u8; BUF_SIZE];
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut retry_count: u32 = 0;
     let n = loop {
         let now = Instant::now();
         if now >= handshake_deadline {
             return Err(Error::Session("Handshake timeout (10 s)".into()));
         }
 
-        let wait = std::cmp::min(HANDSHAKE_RETRY_INTERVAL, handshake_deadline.saturating_duration_since(now));
+        let wait = std::cmp::min(
+            HANDSHAKE_RETRY_INTERVAL,
+            handshake_deadline.saturating_duration_since(now),
+        );
         let retry = time::sleep(wait);
         tokio::pin!(retry);
 
@@ -252,14 +361,34 @@ pub async fn run_tunnel_android(
                 }
             }
             _ = &mut retry => {
-                let pkt = send_handshake(&keys, &mut send_counter, &mut send_seq)?;
+                if session.stop_requested.load(Ordering::SeqCst) {
+                    return Err(Error::Session("Tunnel stop requested".into()));
+                }
+                retry_count += 1;
+                // Rotate keypair only once, on the 2nd retry (~1.5 s after first send).
+                // Rotating on every retry created a new server session per 750 ms (~13
+                // ghost sessions per 10 s timeout), which caused CGNAT per-IP cap (5)
+                // to be hit on the 2nd handshake attempt.  A single rotation at retry 2
+                // limits server ghost sessions to 2 max while still forcing a fresh
+                // handshake if the server lost the original one.
+                if retry_count == 2 {
+                    keypair = KeyPair::generate();
+                    dh = keypair.compute_shared(&server_key)?;
+                    keys = derive_session_keys(&dh, psk.as_ref(), &keypair.public_key_bytes());
+                    send_counter = 0;
+                    send_seq = 0;
+                }
+                let obf_pub = obfuscate_client_eph_pub(&keypair, &server_key);
+                let inner = build_inner_packet(InnerType::Control, send_seq, &keepalive);
+                let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, Some(&obf_pub), mdh_len)?;
+                send_seq = send_seq.wrapping_add(1);
                 udp.send(&pkt).await?;
             }
         }
     };
 
     let mut recv_win = RecvWindow::new();
-    process_server_hello_with_mdh_len(
+    let server_network_cfg = process_server_hello_with_mdh_len(
         &recv_buf[..n],
         &mut keys,
         &keypair,
@@ -267,6 +396,17 @@ pub async fn run_tunnel_android(
         &mut send_counter,
         mdh_len,
     )?;
+    let base_keepalive = server_network_cfg
+        .as_ref()
+        .and_then(|c| c.keepalive_secs)
+        .filter(|&s| s > 0)
+        .map(|s| Duration::from_secs(s as u64))
+        .unwrap_or(KEEPALIVE_INTERVAL);
+    let keepalive_interval = if level == AdaptiveLevel::Off {
+        base_keepalive
+    } else {
+        base_keepalive.min(Duration::from_secs(level.keepalive_secs()))
+    };
     let mut transition_recv_keys: Option<SessionKeys> = Some(derive_session_keys(
         &dh,
         psk.as_ref(),
@@ -274,8 +414,73 @@ pub async fn run_tunnel_android(
     ));
     let mut transition_recv_deadline = Some(Instant::now() + Duration::from_secs(2));
     let mut transition_recv_win = std::mem::take(&mut recv_win);
+    if let Some(cert) = mtls_cert {
+        let cert_len_debug = cert.len();
+        let cert_payload = ControlPayload::ClientCert { cert_bytes: cert }.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &cert_payload);
+        let pkt = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)?;
+        send_seq = send_seq.wrapping_add(1);
+        udp.send(&pkt).await?;
+        log::debug!("mTLS: ClientCert sent ({} bytes)", cert_len_debug);
+    }
+    // Immediately send a keepalive to prevent CGNAT outbound mapping expiry.
+    // Megafon/MTS CGNAT can expire the outbound UDP binding in the gap between the
+    // last handshake packet and the upload pipeline's first keepalive tick (which is
+    // intentionally skipped). One early packet keeps the NAT entry alive.
+    {
+        let ka = ControlPayload::Keepalive { send_ts: 0 }.encode()?;
+        let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+        if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+            send_seq = send_seq.wrapping_add(1);
+            let _ = udp.send(&pkt).await;
+        }
+    }
     notify_tunnel_ready(&vm, &vpn_service, &server_host);
     log::info!("aivpn: handshake + PFS ratchet complete");
+
+    // Warmup: 4 keepalives spaced 100 ms apart after the handshake.
+    // Primary fix is local-port reuse (see LAST_LOCAL_PORT above); this is
+    // the fallback for carriers that have a brief delay before updating their
+    // inbound CGNAT entry even after the outbound mapping was refreshed.
+    // Each outbound packet nudges the CGNAT to route subsequent downlink to
+    // the current socket rather than the previous (closed) one.
+    for _ in 0..4u8 {
+        tokio::select! {
+            biased;
+            _ = wait_for_stop_signal(&stop_signal) => {
+                return Err(Error::Session("Tunnel stop requested".into()));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Ok(ka) = (ControlPayload::Keepalive { send_ts: 0 }).encode() {
+                    let inner = build_inner_packet(InnerType::Control, send_seq, &ka);
+                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                        send_seq = send_seq.wrapping_add(1);
+                        let _ = udp.send(&pkt).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // Device enrollment: send static key proof after ratchet (PFS-protected).
+    if let Some(priv_bytes) = static_privkey {
+        let static_kp = KeyPair::from_private_key(priv_bytes);
+        if let Ok(dh_proof) = static_kp.compute_shared(&server_key) {
+            let enrollment = ControlPayload::DeviceEnrollment {
+                static_pub: static_kp.public_key_bytes(),
+                dh_proof,
+            };
+            if let Ok(encoded) = enrollment.encode() {
+                let inner = build_inner_packet(InnerType::Control, send_seq, &encoded);
+                if let Ok(pkt) =
+                    build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len)
+                {
+                    send_seq = send_seq.wrapping_add(1);
+                    let _ = udp.send(&pkt).await;
+                }
+            }
+        }
+    }
 
     // ── 6. Main forwarding loop ──
     let mut udp_buf = vec![0u8; BUF_SIZE];
@@ -319,49 +524,96 @@ pub async fn run_tunnel_android(
         }
     });
 
+    let keepalive_sent_ms = Arc::new(AtomicU64::new(0));
+    let mut quality_tracker = QualityTracker::new();
+
+    // Reset per-session hint so getAdaptiveLevelHint() returns 0 ("no hint yet") for this session.
+    ACTIVE_ADAPTIVE_LEVEL.store(0, Ordering::Relaxed);
+
+    // Control-payload channel: lets JNI send RecordingStart/Stop without reconnecting.
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlPayload>(8);
+    {
+        let mut guard = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ctrl_tx);
+    }
+    // RAII guard: clears ACTIVE_CONTROL_TX when run_tunnel_android returns (any path).
+    struct CtrlTxGuard;
+    impl Drop for CtrlTxGuard {
+        fn drop(&mut self) {
+            let mut g = ACTIVE_CONTROL_TX.lock().unwrap_or_else(|e| e.into_inner());
+            *g = None;
+        }
+    }
+    let _ctrl_tx_guard = CtrlTxGuard;
+
+    let initial_mask = bootstrap_mask_for_psk(psk.as_ref());
+    let mask_update_slot: Arc<Mutex<Option<MaskProfile>>> = Arc::new(Mutex::new(None));
+    let mask_update_for_enc = Arc::clone(&mask_update_slot);
+
     let udp_tx = udp.clone();
     let keys_tx = keys.clone();
     let session_for_upload = session.clone();
     let upload_sender_task = tokio::spawn(async move {
-        // Wrap ZeroMdhEncryptor with UPLOAD_BYTES tracking.
         struct AndroidEncryptor {
-            inner: ZeroMdhEncryptor,
+            inner: MimicryEncryptor,
             session: Arc<SessionRuntime>,
+            keepalive_sent_ms: Arc<AtomicU64>,
         }
 
         impl PacketEncryptor for AndroidEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_data(payload)
             }
-            fn encrypt_control(&mut self, payload: &aivpn_common::protocol::ControlPayload) -> aivpn_common::error::Result<Vec<u8>> {
+            fn encrypt_control(
+                &mut self,
+                payload: &aivpn_common::protocol::ControlPayload,
+            ) -> aivpn_common::error::Result<Vec<u8>> {
                 self.inner.encrypt_control(payload)
             }
             fn encrypt_keepalive(&mut self) -> aivpn_common::error::Result<Vec<u8>> {
-                self.inner.encrypt_keepalive()
+                let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                self.keepalive_sent_ms.store(now_ms, Ordering::Relaxed);
+                self.inner.encrypt_keepalive_ts(now_ms)
             }
             fn on_data_sent(&mut self, payload_len: usize) {
                 self.session
                     .upload_bytes
                     .fetch_add(payload_len as u64, Ordering::Relaxed);
             }
+            fn take_fec_repair(&mut self) -> Option<Vec<u8>> {
+                self.inner.take_fec_repair()
+            }
         }
 
         let mut enc = AndroidEncryptor {
-            inner: ZeroMdhEncryptor::with_mdh_len(keys_tx, send_counter, send_seq, mdh_len),
+            inner: MimicryEncryptor::new(
+                keys_tx,
+                send_counter,
+                send_seq,
+                initial_mask,
+                mask_update_for_enc,
+            ),
             session: session_for_upload,
+            keepalive_sent_ms,
         };
+        enc.inner.set_fec_group(level.fec_n());
         let config = UploadConfig {
-            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_interval,
             ..Default::default()
         };
 
-        if let Err(e) = upload_pipeline::run_upload_loop(&mut tun_rx, None, &udp_tx, &mut enc, &config).await {
+        if let Err(e) = upload_pipeline::run_upload_loop(
+            &mut tun_rx,
+            Some(&mut ctrl_rx),
+            &udp_tx,
+            &mut enc,
+            &config,
+        )
+        .await
+        {
             let _ = sender_err_tx.send(format!("Upload pipeline: {e}")).await;
         }
     });
-    let rekey_sleep = time::sleep(REKEY_INTERVAL);
-    tokio::pin!(rekey_sleep);
-
     // Periodic check for RX silence — uses a proper Interval so it's not
     // recreated every select! iteration (which would reset the timer).
     let mut rx_check = time::interval(RX_CHECK_INTERVAL);
@@ -372,22 +624,26 @@ pub async fn run_tunnel_android(
             biased;
 
             _ = wait_for_stop_signal(&stop_signal) => {
+                // Send Shutdown 3× (50 ms apart) so the server drops the session
+                // immediately even if one UDP packet is lost on the mobile path.
+                if let Ok(shutdown_bytes) = (ControlPayload::Shutdown { reason: 0 }).encode() {
+                    let inner = build_inner_packet(InnerType::Control, send_seq, &shutdown_bytes);
+                    if let Ok(pkt) = build_random_mdh_packet(&keys, &mut send_counter, &inner, None, mdh_len) {
+                        for _ in 0..3u8 {
+                            let _ = udp.send(&pkt).await;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+                }
                 tun_reader_task.abort();
                 upload_sender_task.abort();
                 return Err(Error::Session("Tunnel stop requested".into()));
             }
 
-            // ── Rekey (triggers fresh reconnect in Kotlin) ──
-            _ = &mut rekey_sleep => {
-                log::info!("aivpn: rekey interval — signalling reconnect");
-                tun_reader_task.abort();
-                upload_sender_task.abort();
-                return Ok(());
-            }
-
             // ── UDP → TUN (inbound from server) ──
             r = udp.recv(&mut udp_buf) => {
                 let n = r?;
+                log::debug!("aivpn: udp.recv() → {} bytes", n);
                 last_rx = Instant::now();
                 upload_at_last_rx = session.upload_bytes.load(Ordering::Relaxed);
                 if transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -404,14 +660,19 @@ pub async fn run_tunnel_android(
                     Ok(decoded) => {
                         Some(decoded)
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        log::debug!("aivpn: decode failed (primary keys): {}", e);
                         if let Some(fallback_keys) = transition_recv_keys.as_ref() {
-                            decode_packet_with_mdh_len(
+                            let r = decode_packet_with_mdh_len(
                                 &udp_buf[..n],
                                 fallback_keys,
                                 &mut transition_recv_win,
                                 mdh_len,
-                            ).ok()
+                            );
+                            if r.is_err() {
+                                log::debug!("aivpn: decode failed (fallback keys) — packet dropped");
+                            }
+                            r.ok()
                         } else {
                             None
                         }
@@ -419,14 +680,100 @@ pub async fn run_tunnel_android(
                 };
 
                 if let Some(decoded) = decoded {
+                    log::debug!("aivpn: decoded inner_type={:?} payload={} bytes",
+                        decoded.header.inner_type, decoded.payload.len());
                     if decoded.header.inner_type == InnerType::Data && !decoded.payload.is_empty() {
                         tun_async_write(&tun, &decoded.payload).await?;
                         session
                             .download_bytes
                             .fetch_add(decoded.payload.len() as u64, Ordering::Relaxed);
+                        log::debug!("aivpn: wrote {} bytes to TUN (rx total={})",
+                            decoded.payload.len(),
+                            session.download_bytes.load(Ordering::Relaxed));
                     }
                     // Any successfully decoded packet (including keepalive responses)
                     // proves the link is alive.
+                    // Handle server-initiated inline rekey (PFS without reconnect).
+                    if decoded.header.inner_type == InnerType::Control {
+                        if let Ok(ctrl) = ControlPayload::decode(&decoded.payload) {
+                            match ctrl {
+                                ControlPayload::KeyRotate { new_eph_pub } => {
+                                    let rekey_kp = KeyPair::generate();
+                                    if let Ok(dh) = rekey_kp.compute_shared(&new_eph_pub) {
+                                        let new_keys = derive_session_keys(
+                                            &dh,
+                                            Some(&keys.session_key),
+                                            &rekey_kp.public_key_bytes(),
+                                        );
+                                        if let Ok(resp) = (ControlPayload::KeyRotate {
+                                            new_eph_pub: rekey_kp.public_key_bytes()
+                                        }).encode() {
+                                            let inner = build_inner_packet(
+                                                InnerType::Control, send_seq, &resp,
+                                            );
+                                            if let Ok(pkt) = build_random_mdh_packet(
+                                                &keys, &mut send_counter, &inner, None, mdh_len,
+                                            ) {
+                                                let _ = udp.send(&pkt).await;
+                                                send_seq = send_seq.wrapping_add(1);
+                                            }
+                                        }
+                                        transition_recv_keys = Some(keys.clone());
+                                        transition_recv_deadline =
+                                            Some(Instant::now() + Duration::from_secs(2));
+                                        transition_recv_win = std::mem::take(&mut recv_win);
+                                        keys = new_keys;
+                                        log::info!("aivpn: inline PFS rekey complete");
+                                    }
+                                }
+                                ControlPayload::KeepaliveAck { echo_ts } => {
+                                    if echo_ts > 0 {
+                                        let now_ms = aivpn_common::crypto::current_timestamp_ms();
+                                        if now_ms >= echo_ts {
+                                            let rtt_us = (now_ms - echo_ts) * 1_000;
+                                            quality_tracker.record_rtt(rtt_us);
+                                            quality_tracker.record_received();
+                                            let score = quality_tracker.score();
+                                            ACTIVE_QUALITY_SCORE.store(score, Ordering::Relaxed);
+                                            if let Ok(qr) = (ControlPayload::QualityReport {
+                                                quality: score,
+                                                rtt_ms: quality_tracker.rtt_ms(),
+                                                loss_ppm: quality_tracker.loss_ppm(),
+                                                jitter_ms: quality_tracker.jitter_ms(),
+                                            }).encode() {
+                                                let inner = build_inner_packet(
+                                                    InnerType::Control, send_seq, &qr,
+                                                );
+                                                if let Ok(pkt) = build_random_mdh_packet(
+                                                    &keys, &mut send_counter, &inner, None, mdh_len,
+                                                ) {
+                                                    send_seq = send_seq.wrapping_add(1);
+                                                    let _ = udp.send(&pkt).await;
+                                                }
+                                            }
+                                            log::debug!(
+                                                "aivpn: KeepaliveAck rtt={}ms quality={}/100",
+                                                quality_tracker.rtt_ms(), score
+                                            );
+                                        }
+                                    }
+                                }
+                                ControlPayload::AdaptiveHint { level } => {
+                                    ACTIVE_ADAPTIVE_LEVEL.store(level.min(3), Ordering::Relaxed);
+                                    log::info!("aivpn: AdaptiveHint level={} stored", level);
+                                }
+                                ControlPayload::MaskUpdate { mask_data, .. } => {
+                                    if let Some(mask) = aivpn_common::mimicry::decode_mask_update(&mask_data) {
+                                        *mask_update_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(mask);
+                                        log::info!("aivpn: MaskUpdate received — mask queued for mimicry engine");
+                                    } else {
+                                        log::warn!("aivpn: MaskUpdate decode failed — ignoring");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             }
 
@@ -541,6 +888,9 @@ fn create_protected_udp_socket(
         .unwrap_or(false);
 
     if !protected {
+        // Clear any pending JNI exception from protect() before returning
+        // to avoid confusing subsequent JNI calls in the same thread.
+        let _ = guard.exception_clear();
         unsafe { libc::close(fd) };
         return Err(Error::Session("VpnService.protect() returned false".into()));
     }
@@ -565,10 +915,48 @@ fn create_protected_udp_socket(
         );
     }
 
+    // Try to reuse the same local port as the previous session.  When a
+    // port-preserving CGNAT (MTS, Beeline, etc.) is in use, the carrier's
+    // inbound routing table still maps the old external port back to this
+    // phone.  Binding to the same internal port means no CGNAT update is
+    // needed and downlink arrives immediately without a stale-mapping delay.
+    // Falls back to OS-assigned ephemeral port if the saved port is
+    // unavailable (first connect, or port taken by another socket).
+    let port_hint = LAST_LOCAL_PORT.load(Ordering::Relaxed);
+    unsafe {
+        let mut any: libc::sockaddr_in = std::mem::zeroed();
+        any.sin_family = libc::AF_INET as libc::sa_family_t;
+        if port_hint != 0 {
+            any.sin_port = port_hint.to_be();
+            if libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            ) < 0
+            {
+                // Port unavailable — fall back to OS-assigned ephemeral.
+                any.sin_port = 0;
+                let _ = libc::bind(
+                    fd,
+                    &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                );
+            }
+        } else {
+            let _ = libc::bind(
+                fd,
+                &any as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            );
+        }
+    }
+
     // Connect to server (sets default destination for send/recv, non-blocking for UDP).
     let SocketAddr::V4(v4) = dest else {
         unsafe { libc::close(fd) };
-        return Err(Error::Session("Only IPv4 server addresses are supported".into()));
+        return Err(Error::Session(
+            "Only IPv4 server addresses are supported".into(),
+        ));
     };
     let sa = to_sockaddr_in(&v4);
     let rc = unsafe {
@@ -583,6 +971,20 @@ fn create_protected_udp_socket(
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
+    // Persist the local port for the next reconnect attempt.
+    unsafe {
+        let mut sa: libc::sockaddr_in = std::mem::zeroed();
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::getsockname(
+            fd,
+            &mut sa as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut len,
+        ) == 0
+        {
+            LAST_LOCAL_PORT.store(u16::from_be(sa.sin_port), Ordering::Relaxed);
+        }
+    }
+
     let control_fd = unsafe { libc::dup(fd) };
     if control_fd < 0 {
         unsafe { libc::close(fd) };
@@ -594,6 +996,7 @@ fn create_protected_udp_socket(
     Ok(fd)
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>> {
     let stop_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     if stop_fd < 0 {
@@ -608,10 +1011,47 @@ fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>>
 
     session.stop_event_fd.store(control_fd, Ordering::SeqCst);
 
+    // If stop_active_tunnel() fired in the race window between the last
+    // stop_requested check and this function, the eventfd was never written
+    // to (stop_event_fd was -1 at that point). Arm it now so the main loop
+    // exits on its first poll instead of hanging forever.
+    if session.stop_requested.load(Ordering::SeqCst) {
+        let v: u64 = 1;
+        unsafe {
+            let _ = libc::write(
+                stop_fd,
+                &v as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
+
     let owned_stop_fd = unsafe { OwnedFd::from_raw_fd(stop_fd) };
     Ok(AsyncFd::new(owned_stop_fd)?)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn create_stop_signal(session: &Arc<SessionRuntime>) -> Result<AsyncFd<OwnedFd>> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    unsafe { libc::fcntl(read_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    let dup_write = unsafe { libc::dup(write_fd) };
+    if dup_write < 0 {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    session.stop_event_fd.store(dup_write, Ordering::SeqCst);
+    unsafe { libc::close(write_fd) };
+    Ok(AsyncFd::new(unsafe { OwnedFd::from_raw_fd(read_fd) })?)
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
 async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
     loop {
         let mut guard = stop_signal.readable().await?;
@@ -624,6 +1064,26 @@ async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result
                     std::mem::size_of::<u64>(),
                 )
             };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(r) => return r,
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+async fn wait_for_stop_signal(stop_signal: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
+    loop {
+        let mut guard = stop_signal.readable().await?;
+        match guard.try_io(|inner| {
+            let mut b = [0u8; 1];
+            let n =
+                unsafe { libc::read(inner.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 1) };
             if n < 0 {
                 Err(std::io::Error::last_os_error())
             } else {

@@ -7,11 +7,22 @@ struct ContentView: View {
     @State private var connectionKey: String = ""
     @State private var keyName: String = ""
     @State private var showKeyInput: Bool = false
+    @State private var showConnectionKey: Bool = false
     @AppStorage("fullTunnel") private var fullTunnel: Bool = false
+    @AppStorage("excludeRoutes") private var excludeRoutes: String = ""
+    @AppStorage("proxyMode") private var proxyMode: Bool = false
+    @AppStorage("proxyPort") private var proxyPort: String = "1080"
+    @AppStorage("adaptiveLevel") private var adaptiveLevel: Int = 0
+    @AppStorage("dnsProxyAddr") private var dnsProxyAddr: String = ""
+    @AppStorage("killSwitch") private var killSwitch: Bool = false
+    @State private var showDiagnostics: Bool = false
+    @State private var benchRunning: Bool = false
+    @State private var benchResult: BenchDisplayResult? = nil
     @State private var editingKeyId: String?
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
     @State private var keyToDelete: ConnectionKey?
+    @State private var mtlsCertPath: String = ""
     @State private var recordingServiceName: String = ""
     private let recordingDarkGreen = Color(red: 0.0, green: 0.35, blue: 0.16)
 
@@ -76,6 +87,20 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
+                        if vpn.qualityScore > 0 {
+                            Text("Q: \(vpn.qualityScore)/100")
+                                .font(.caption)
+                                .foregroundColor(vpn.qualityScore >= 80 ? .green :
+                                                 vpn.qualityScore >= 50 ? .orange : .red)
+                            Spacer()
+                        }
+                        if vpn.serverAdaptiveLevel > 0 {
+                            let label = ["Off", "Light", "Aggressive", "Satellite"][min(vpn.serverAdaptiveLevel, 3)]
+                            Text("A: \(label)")
+                                .font(.caption)
+                                .foregroundColor(.cyan)
+                            Spacer()
+                        }
                         Text("↑ \(formatBytes(vpn.bytesSent))")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -151,8 +176,9 @@ struct ContentView: View {
                                     onEdit: {
                                         editingKeyId = key.id
                                         editingKeyName = key.name
-                                        keyName = key.name  // Заполнить поле имени текущим именем
-                                        connectionKey = key.keyValue  // Показать текущий ключ
+                                        keyName = key.name
+                                        connectionKey = key.keyValue
+                                        mtlsCertPath = key.mtlsCertPath ?? ""
                                         withAnimation {
                                             showKeyInput = true
                                         }
@@ -184,25 +210,123 @@ struct ContentView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11))
                     
-                    SecureField(loc.t("enter_key"), text: $connectionKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 10))
-                        .help("aivpn://...")
+                    HStack(spacing: 4) {
+                        if showConnectionKey {
+                            TextField(loc.t("enter_key"), text: $connectionKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 10))
+                                .help("aivpn://...")
+                        } else {
+                            SecureField(loc.t("enter_key"), text: $connectionKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 10))
+                                .help("aivpn://...")
+                        }
+                        Button(action: { showConnectionKey.toggle() }) {
+                            Image(systemName: showConnectionKey ? "eye.slash" : "eye")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     HStack {
                         Toggle(loc.t("full_tunnel"), isOn: $fullTunnel)
                             .toggleStyle(.checkbox)
                             .font(.caption)
                             .help(loc.t("full_tunnel_help"))
+                            .disabled(proxyMode)
                         Spacer()
                     }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(loc.t("exclude_routes_label"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField(loc.t("exclude_routes_placeholder"), text: $excludeRoutes)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                            .help(loc.t("exclude_routes_help"))
+                            .disabled(proxyMode)
+                    }
+
+                    HStack {
+                        Toggle(loc.t("proxy_mode"), isOn: $proxyMode)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help(loc.t("proxy_mode_help"))
+                        Spacer()
+                    }
+
+                    if proxyMode {
+                        HStack(spacing: 4) {
+                            Text(loc.t("proxy_port"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("1080", text: $proxyPort)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11))
+                                .frame(width: 64)
+                                .onReceive(proxyPort.publisher.collect()) { _ in
+                                    let filtered = proxyPort.filter { $0.isNumber }
+                                    if filtered != proxyPort { proxyPort = filtered }
+                                }
+                            Spacer()
+                        }
+                        if let cert = vpn.selectedKey?.mtlsCertPath, !cert.isEmpty {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.orange)
+                                Text(loc.t("mtls_ignored_in_proxy_mode"))
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
                     
+                    HStack {
+                        Text(loc.t("adaptive_mode"))
+                            .font(.caption)
+                            .help(loc.t("adaptive_mode_help"))
+                        Spacer()
+                        Picker("", selection: $adaptiveLevel) {
+                            Text(loc.t("adaptive_off")).tag(0)
+                            Text(loc.t("adaptive_light")).tag(1)
+                            Text(loc.t("adaptive_aggressive")).tag(2)
+                            Text(loc.t("adaptive_satellite")).tag(3)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 160)
+                        .font(.caption)
+                    }
+
+                    TextField(loc.t("mtls_cert_path"), text: $mtlsCertPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .help(loc.t("mtls_cert_path_help"))
+
+                    TextField(loc.t("dns_proxy_placeholder"), text: $dnsProxyAddr)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .help(loc.t("dns_proxy_help"))
+
+                    HStack {
+                        Toggle(loc.t("kill_switch"), isOn: $killSwitch)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help(loc.t("kill_switch_help"))
+                            .disabled(proxyMode)
+                        Spacer()
+                    }
+
                     HStack(spacing: 8) {
                         Button(loc.t("cancel")) {
                             withAnimation {
                                 showKeyInput = false
                                 keyName = ""
                                 connectionKey = ""
+                                mtlsCertPath = ""
                                 editingKeyId = nil
                             }
                         }
@@ -211,25 +335,28 @@ struct ContentView: View {
                         Button(loc.t("save_key")) {
                             let name = keyName.isEmpty ? "Key \(vpn.keys.count + 1)" : keyName
                             
+                            let cert = mtlsCertPath.trimmingCharacters(in: .whitespaces)
                             if let editId = editingKeyId {
-                                // Editing existing key - update both name and key value
-                                if vpn.updateKey(id: editId, name: name, keyValue: connectionKey) {
+                                if vpn.updateKey(id: editId, name: name, keyValue: connectionKey,
+                                                 mtlsCertPath: cert.isEmpty ? nil : cert) {
                                     withAnimation {
                                         showKeyInput = false
                                         keyName = ""
                                         connectionKey = ""
+                                        mtlsCertPath = ""
                                         editingKeyId = nil
                                     }
                                 } else {
                                     vpn.lastError = loc.t("duplicate_key")
                                 }
                             } else {
-                                // Adding new key
-                                if vpn.addKey(name: name, keyValue: connectionKey) {
+                                if vpn.addKey(name: name, keyValue: connectionKey,
+                                              mtlsCertPath: cert.isEmpty ? nil : cert) {
                                     withAnimation {
                                         showKeyInput = false
                                         keyName = ""
                                         connectionKey = ""
+                                        mtlsCertPath = ""
                                     }
                                 } else {
                                     vpn.lastError = loc.t("duplicate_key")
@@ -244,6 +371,34 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Device public key
+            if !vpn.devicePublicKey.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Device Key:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    let truncated = vpn.devicePublicKey.count > 20
+                        ? String(vpn.devicePublicKey.prefix(8)) + "…" + String(vpn.devicePublicKey.suffix(8))
+                        : vpn.devicePublicKey
+                    Text(truncated)
+                        .font(.caption2)
+                        .monospaced()
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(vpn.devicePublicKey, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
             }
 
             Divider()
@@ -325,6 +480,82 @@ struct ContentView: View {
                 Divider()
             }
 
+            // Diagnostics panel (when connected)
+            if vpn.isConnected {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(loc.t("diagnostics"))
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button(action: { showDiagnostics.toggle() }) {
+                            Image(systemName: showDiagnostics ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if showDiagnostics {
+                        if let result = benchResult {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Quality: \(result.qualityScore)/100")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(result.qualityScore >= 80 ? .green :
+                                                         result.qualityScore >= 50 ? .orange : .red)
+                                    Spacer()
+                                    Text("Loss: \(String(format: "%.1f", result.lossPct))%")
+                                        .font(.caption)
+                                        .foregroundColor(result.lossPct > 5 ? .red : .secondary)
+                                }
+                                Text("P50: \(Int(result.p50))ms  P95: \(Int(result.p95))ms  P99: \(Int(result.p99))ms")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if benchRunning {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.6)
+                                Text(loc.t("bench_running"))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Text(loc.t("bench_idle"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Button(action: {
+                            guard let key = vpn.selectedKey?.keyValue ?? vpn.keys.first?.keyValue,
+                                  let addr = serverAddrFromConnectionKey(key) else { return }
+                            benchRunning = true
+                            benchResult = nil
+                            vpn.runBench(serverAddr: addr) { result in
+                                benchResult = result
+                                benchRunning = false
+                            }
+                        }) {
+                            HStack {
+                                Spacer()
+                                Text(benchRunning ? loc.t("bench_running") : loc.t("run_benchmark"))
+                                Spacer()
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(benchRunning)
+                        .font(.caption)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+                .cornerRadius(8)
+
+                Divider()
+            }
+
             // Connect / Disconnect button
             Button(action: {
                 if vpn.isConnected {
@@ -338,7 +569,16 @@ struct ContentView: View {
                     if !vpn.helperAvailable {
                         vpn.checkHelperAvailable()
                     } else {
-                        vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel)
+                        if proxyMode, let port = Int(proxyPort), port > 1024 {
+                            vpn.connectProxy(key: selectedKey.keyValue, proxyPort: port)
+                        } else {
+                            vpn.connect(key: selectedKey.keyValue, fullTunnel: fullTunnel,
+                                        mtlsCertPath: selectedKey.mtlsCertPath,
+                                        excludeRoutes: excludeRoutes.isEmpty ? nil : excludeRoutes,
+                                        adaptiveLevel: adaptiveLevel,
+                                        dnsProxy: dnsProxyAddr.isEmpty ? nil : dnsProxyAddr,
+                                        killSwitch: killSwitch)
+                        }
                     }
                 }
             }) {
@@ -379,7 +619,7 @@ struct ContentView: View {
 
             // Footer
             HStack {
-                Text("AIVPN v0.4.0")
+                Text("AIVPN v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -394,7 +634,8 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .frame(width: 360, height: 420)
+        .frame(width: 360)
+        .frame(minHeight: 420)
         .onReceive(vpn.$isConnected) { connected in
             if let appDelegate = NSApp.delegate as? AppDelegate {
                 appDelegate.updateStatusIcon(connected: connected)
@@ -529,6 +770,29 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Bench Display
+
+/// Extract server address from an `aivpn://` connection key (base64url JSON ["s"] field).
+func serverAddrFromConnectionKey(_ key: String) -> String? {
+    guard key.hasPrefix("aivpn://") else { return nil }
+    var b64 = String(key.dropFirst(8))
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    while b64.count % 4 != 0 { b64 += "=" }
+    guard let data = Data(base64Encoded: b64),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let s = json["s"] as? String else { return nil }
+    return s
+}
+
+struct BenchDisplayResult {
+    let p50: Double
+    let p95: Double
+    let p99: Double
+    let lossPct: Double
+    let qualityScore: Int
+}
+
 // MARK: - Key Row View
 
 struct KeyRowView: View {
@@ -538,7 +802,8 @@ struct KeyRowView: View {
     let onSelect: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
-    
+
+    @EnvironmentObject var loc: LocalizationManager
     @State private var isHovering = false
     
     var body: some View {
@@ -596,10 +861,10 @@ struct KeyRowView: View {
             // Actions menu - larger button
             Menu {
                 Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
+                    Label(loc.t("edit"), systemImage: "pencil")
                 }
                 Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
+                    Label(loc.t("delete"), systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")

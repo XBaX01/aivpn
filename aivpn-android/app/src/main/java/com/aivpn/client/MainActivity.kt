@@ -8,19 +8,28 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
+import androidx.lifecycle.lifecycleScope
 import com.aivpn.client.databinding.ActivityMainBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.util.UUID
 
 /**
@@ -43,6 +52,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var isConnected = false
+    private var currentQualityScore: Int = 0
+    private var currentRecordingService: String = ""
 
     private var profiles = mutableListOf<SecureStorage.ConnectionProfile>()
     private var activeProfileId: String? = null
@@ -78,6 +89,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        binding.versionFooter.text = "v${BuildConfig.VERSION_NAME} · ${getString(R.string.version_tagline)}"
 
         // Migrate legacy single connection key to profiles
         migrateLegacyKey()
@@ -119,6 +131,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnSplitTunnel.setOnClickListener {
             startActivity(Intent(this, SplitTunnelActivity::class.java))
         }
+
+        binding.btnOptions.setOnClickListener { showOptionsMenu(it) }
 
         updateSplitTunnelHint()
 
@@ -254,9 +268,23 @@ class MainActivity : AppCompatActivity() {
             setSingleLine(true)
             textSize = 13f
         }
+        val certInput = EditText(dialogCtx).apply {
+            hint = getString(R.string.mtls_cert_hint)
+            setText(existing?.mtlsCertBase64 ?: "")
+            setSingleLine(true)
+            textSize = 12f
+        }
+        val certLabel = TextView(dialogCtx).apply {
+            text = getString(R.string.mtls_cert)
+            textSize = 12f
+            setTextColor(getColor(R.color.text_secondary))
+            setPadding(0, 8.dp, 0, 2.dp)
+        }
 
         layout.addView(nameInput)
         layout.addView(keyInput)
+        layout.addView(certLabel)
+        layout.addView(certInput)
 
         val title = if (existing != null)
             getString(R.string.dialog_edit_profile)
@@ -283,16 +311,29 @@ class MainActivity : AppCompatActivity() {
                     return@setPositiveButton
                 }
 
+                val certRaw = certInput.text.toString().trim()
+                val mtlsCert: String? = if (certRaw.isEmpty()) null else {
+                    val decoded = try {
+                        android.util.Base64.decode(certRaw, android.util.Base64.DEFAULT)
+                    } catch (_: Exception) { null }
+                    if (decoded == null || decoded.size != 104) {
+                        Toast.makeText(this, getString(R.string.mtls_cert_invalid), Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    certRaw
+                }
+
                 if (existing != null) {
                     val idx = profiles.indexOfFirst { it.id == existing.id }
                     if (idx >= 0) {
-                        profiles[idx] = existing.copy(name = name, key = key)
+                        profiles[idx] = existing.copy(name = name, key = key, mtlsCertBase64 = mtlsCert)
                     }
                 } else {
                     val newProfile = SecureStorage.ConnectionProfile(
                         id = UUID.randomUUID().toString(),
                         name = name,
-                        key = key
+                        key = key,
+                        mtlsCertBase64 = mtlsCert
                     )
                     profiles.add(newProfile)
                     activeProfileId = newProfile.id
@@ -354,9 +395,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         AivpnService.trafficCallback = { uploadBytes, downloadBytes ->
+            val quality = AivpnJni.getQualityScore()
             runOnUiThread {
                 binding.textUpload.text = formatBytes(uploadBytes)
                 binding.textDownload.text = formatBytes(downloadBytes)
+                currentQualityScore = quality
             }
         }
 
@@ -468,22 +511,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpnService() {
-        val connectionKey = binding.editConnectionKey.text.toString().trim()
-        val parsed = parseConnectionKey(connectionKey) ?: return
-        val server = parsed.server
-        val serverKey = parsed.serverKey
-        val psk = parsed.psk
-        val vpnIp = parsed.vpnIp
-
+        // Pass only the profile ID via Intent so that the server key and PSK are
+        // read from EncryptedSharedPreferences inside AivpnService rather than
+        // travelling through IPC as plaintext Intent extras.
+        val profileId = activeProfileId ?: return
         val intent = Intent(this, AivpnService::class.java).apply {
             action = AivpnService.ACTION_CONNECT
-            putExtra("server", server)
-            putExtra("server_key", serverKey)
-            putExtra("psk", psk)
-            putExtra("vpn_ip", vpnIp)
-            putExtra("server_vpn_ip", parsed.serverVpnIp)
-            putExtra("vpn_prefix_len", parsed.prefixLen)
-            putExtra("vpn_mtu", parsed.mtu)
+            putExtra("profile_id", profileId)
         }
         startForegroundService(intent)
         updateUI(true, getString(R.string.status_connecting))
@@ -492,9 +526,15 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(connected: Boolean, statusText: String) {
         isConnected = connected
         val serviceActive = connected || AivpnService.isServiceActive
-        binding.btnConnect.text = getString(
-            if (serviceActive) R.string.btn_disconnect else R.string.btn_connect
-        )
+        // When not connected, append the active profile name so the user can see
+        // which profile will be used without having to look at the profile list.
+        binding.btnConnect.text = if (serviceActive) {
+            getString(R.string.btn_disconnect)
+        } else {
+            val activeName = profiles.find { it.id == activeProfileId }?.name
+            if (activeName != null) "${getString(R.string.btn_connect)} · $activeName"
+            else getString(R.string.btn_connect)
+        }
         binding.btnConnect.setBackgroundColor(
             getColor(if (serviceActive) R.color.disconnect else R.color.accent)
         )
@@ -558,8 +598,236 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showOptionsMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        val levelNames = arrayOf(
+            getString(R.string.adaptive_off),
+            getString(R.string.adaptive_light),
+            getString(R.string.adaptive_aggressive),
+            getString(R.string.adaptive_satellite)
+        )
+        val currentLevel = adaptiveLevel()
+        val adaptiveLabel = getString(R.string.adaptive_mode) + ": " + levelNames[currentLevel]
+        popup.menu.add(0, MENU_ADAPTIVE, 0, adaptiveLabel)
+        popup.menu.add(0, MENU_DIAGNOSTICS, 1, getString(R.string.diagnostics))
+        popup.menu.add(0, MENU_RECORDING, 2, getString(R.string.recording))
+        popup.menu.add(0, MENU_EXPORT_LOGS, 3, getString(R.string.export_logs))
+        popup.menu.add(0, MENU_OS_KILL_SWITCH, 4, getString(R.string.os_kill_switch))
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_ADAPTIVE -> {
+                    val names = arrayOf(
+                        getString(R.string.adaptive_off),
+                        getString(R.string.adaptive_light),
+                        getString(R.string.adaptive_aggressive),
+                        getString(R.string.adaptive_satellite)
+                    )
+                    AlertDialog.Builder(this)
+                        .setTitle(getString(R.string.adaptive_mode))
+                        .setSingleChoiceItems(names, adaptiveLevel()) { dlg, which ->
+                            getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+                                .edit().putInt("adaptive_level", which).apply()
+                            dlg.dismiss()
+                        }
+                        .setNegativeButton(getString(R.string.btn_cancel), null)
+                        .show()
+                    true
+                }
+                MENU_DIAGNOSTICS -> { showDiagnosticsDialog(); true }
+                MENU_RECORDING -> { showRecordingDialog(); true }
+                MENU_EXPORT_LOGS -> { exportLogs(); true }
+                MENU_OS_KILL_SWITCH -> {
+                    startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS))
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun adaptiveLevel(): Int =
+        getSharedPreferences("aivpn_prefs", MODE_PRIVATE)
+            .getInt("adaptive_level", 0)
+
+    private fun exportLogs() {
+        val toast = Toast.makeText(this, getString(R.string.export_logs_collecting), Toast.LENGTH_SHORT)
+        toast.show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val pid = android.os.Process.myPid().toString()
+                val proc = Runtime.getRuntime().exec(
+                    arrayOf("logcat", "-d", "-t", "1000", "-v", "time", "--pid=$pid")
+                )
+                val logs = proc.inputStream.bufferedReader().readText()
+                proc.destroy()
+                if (logs.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        toast.cancel()
+                        Toast.makeText(this@MainActivity, getString(R.string.export_logs_empty), Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                val logFile = java.io.File(cacheDir, "aivpn-debug.txt")
+                logFile.writeText(logs)
+                withContext(Dispatchers.Main) {
+                    toast.cancel()
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity,
+                        "${packageName}.provider",
+                        logFile
+                    )
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "AIVPN Debug Logs")
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(intent, getString(R.string.export_logs)))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    toast.cancel()
+                    Toast.makeText(this@MainActivity, getString(R.string.export_logs_error), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun showDiagnosticsDialog() {
+        if (!isConnected) {
+            Toast.makeText(this, getString(R.string.status_disconnected), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val serverAddr = profiles.find { it.id == activeProfileId }
+            ?.key?.let { parseConnectionKey(it)?.server } ?: ""
+        val liveScore = currentQualityScore
+        val qualityLine = if (liveScore > 0)
+            getString(R.string.quality_score_live, liveScore)
+        else
+            getString(R.string.quality_score_no_data)
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.diagnostics))
+            .setMessage(qualityLine + "\n\n" + getString(R.string.run_benchmark))
+            .setPositiveButton(getString(R.string.run_benchmark)) { _, _ ->
+                val runningToast = Toast.makeText(this, getString(R.string.bench_running), Toast.LENGTH_LONG)
+                runningToast.show()
+                lifecycleScope.launch {
+                    val stats = withContext(Dispatchers.IO) { runUDPBench(serverAddr) }
+                    runningToast.cancel()
+                    val msg = getString(R.string.bench_result, stats.p50, stats.p95, stats.lossPct.toFloat(), stats.quality)
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle(getString(R.string.diagnostics))
+                        .setMessage(msg)
+                        .setPositiveButton(getString(R.string.btn_cancel), null)
+                        .show()
+                }
+            }
+            .setNegativeButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
+    private data class BenchStats(val p50: Int, val p95: Int, val lossPct: Double, val quality: Int)
+
+    private fun runUDPBench(serverAddr: String): BenchStats {
+        if (serverAddr.isEmpty()) return BenchStats(0, 0, 100.0, 0)
+        val colonIdx = serverAddr.lastIndexOf(':')
+        if (colonIdx < 0) return BenchStats(0, 0, 100.0, 0)
+        val host = serverAddr.substring(0, colonIdx)
+        val port = serverAddr.substring(colonIdx + 1).toIntOrNull() ?: return BenchStats(0, 0, 100.0, 0)
+
+        return try {
+            val socket = DatagramSocket()
+            // Protect the socket so bench probes bypass the VPN tunnel and reach the
+            // server directly, avoiding a routing loop when the VPN is active.
+            AivpnService.instance?.protect(socket) ?: run {
+                android.util.Log.w("MainActivity", "bench: VPN service not running, socket not protected")
+            }
+            socket.soTimeout = 500
+            val probe = "aivpn-bench-probe-v1".toByteArray()
+            val addr = InetAddress.getByName(host)
+            val deadline = System.currentTimeMillis() + 5_000L
+            val rtts = mutableListOf<Double>()
+            var sent = 0
+            try {
+                while (System.currentTimeMillis() < deadline) {
+                    val t0 = System.currentTimeMillis()
+                    sent++
+                    socket.send(DatagramPacket(probe, probe.size, addr, port))
+                    try {
+                        val buf = ByteArray(256)
+                        socket.receive(DatagramPacket(buf, buf.size))
+                        rtts.add((System.currentTimeMillis() - t0).toDouble())
+                    } catch (_: SocketTimeoutException) {
+                        val elapsed = (System.currentTimeMillis() - t0).toDouble()
+                        if (elapsed < 490) rtts.add(elapsed * 2)
+                    }
+                    Thread.sleep(100)
+                }
+            } finally {
+                socket.close()
+            }
+            computeBenchStats(rtts, sent)
+        } catch (_: Exception) {
+            BenchStats(0, 0, 100.0, 0)
+        }
+    }
+
+    private fun computeBenchStats(rtts: List<Double>, sent: Int): BenchStats {
+        if (rtts.isEmpty()) return BenchStats(0, 0, 100.0, 0)
+        val sorted = rtts.sorted()
+        val p50 = sorted[(sorted.size * 0.50).toInt().coerceAtMost(sorted.size - 1)].toInt()
+        val p95 = sorted[(sorted.size * 0.95).toInt().coerceAtMost(sorted.size - 1)].toInt()
+        val lossPct = (maxOf(0, sent - rtts.size).toDouble() / sent * 100).coerceIn(0.0, 100.0)
+        val quality = when {
+            p50 < 50 && lossPct < 1.0  -> 95
+            p50 < 100 && lossPct < 3.0 -> 80
+            p50 < 200 && lossPct < 10.0 -> 60
+            else -> 30
+        }
+        return BenchStats(p50, p95, lossPct, quality)
+    }
+
     override fun onDestroy() {
         timerHandler.removeCallbacks(timerRunnable)
         super.onDestroy()
+    }
+
+    private fun showRecordingDialog() {
+        if (!isConnected) {
+            Toast.makeText(this, getString(R.string.recording_no_session), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val input = android.widget.EditText(this).apply {
+            hint = getString(R.string.recording_service_hint)
+            setText(currentRecordingService)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.recording))
+            .setView(input)
+            .setPositiveButton(getString(R.string.recording_start)) { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "unknown" }
+                currentRecordingService = name
+                if (AivpnJni.startRecording(name) == 1) {
+                    Toast.makeText(this, getString(R.string.recording_started), Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, getString(R.string.recording_no_session), Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton(getString(R.string.recording_stop)) { _, _ ->
+                AivpnJni.stopRecording()
+                Toast.makeText(this, getString(R.string.recording_stopped), Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton(getString(R.string.btn_cancel), null)
+            .show()
+    }
+
+    companion object {
+        private const val MENU_ADAPTIVE = 1001
+        private const val MENU_DIAGNOSTICS = 1002
+        private const val MENU_EXPORT_LOGS = 1003
+        private const val MENU_RECORDING = 1004
+        private const val MENU_OS_KILL_SWITCH = 1005
     }
 }

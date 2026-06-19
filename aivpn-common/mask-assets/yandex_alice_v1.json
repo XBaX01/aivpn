@@ -1,0 +1,74 @@
+{
+  "mask_id": "yandex_alice_v1",
+  "version": 1,
+  "created_at": 1749740000,
+  "expires_at": 1781276000,
+  "spoof_protocol": "WebRTC_STUN",
+  "header_template": [89, 65, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "eph_pub_offset": 20,
+  "eph_pub_length": 32,
+  "size_distribution": {
+    "dist_type": "Histogram",
+    "bins": [
+      [80, 120, 0.35],
+      [300, 500, 0.55],
+      [500, 700, 0.10]
+    ],
+    "parametric_type": null,
+    "parametric_params": null
+  },
+  "iat_distribution": {
+    "dist_type": "LogNormal",
+    "params": [3.4, 0.4],
+    "jitter_range_ms": [5.0, 15.0]
+  },
+  "padding_strategy": {
+    "RandomUniform": {
+      "min": 0,
+      "max": 32
+    }
+  },
+  "fsm_states": [
+    {
+      "state_id": 0,
+      "transitions": [
+        {
+          "condition": {
+            "AfterPackets": 20
+          },
+          "next_state": 1,
+          "size_override": null,
+          "iat_override": null,
+          "padding_override": null
+        }
+      ]
+    },
+    {
+      "state_id": 1,
+      "transitions": []
+    }
+  ],
+  "fsm_initial_state": 0,
+  "signature_vector": [
+    0.72, 0.65, 0.41, 0.18, -0.12, -0.34, 0.55, 0.48,
+    0.31, 0.22, -0.07, 0.63, 0.57, 0.44, 0.29, -0.19,
+    0.81, 0.76, 0.68, 0.52, 0.35, 0.17, -0.08, 0.42,
+    0.38, 0.27, 0.14, -0.21, -0.33, 0.59, 0.67, 0.73,
+    -0.45, -0.38, -0.26, 0.11, 0.23, 0.46, 0.54, 0.62,
+    0.70, 0.58, 0.43, 0.28, 0.09, -0.15, -0.29, 0.37,
+    0.49, 0.61, 0.66, 0.74, 0.83, 0.77, 0.69, 0.53,
+    0.36, 0.20, -0.05, -0.18, -0.31, 0.47, 0.56, 0.64
+  ],
+  "reverse_profile": null,
+  "header_spec": {
+    "type": "Structured",
+    "fields": [
+      { "kind": "Fixed", "bytes": [89, 65] },
+      { "kind": "Fixed", "bytes": [0, 0] },
+      { "kind": "Id", "len": 4, "mode": "Random" },
+      { "kind": "Length", "len": 4, "endian": "Big" },
+      { "kind": "Fixed", "bytes": [0, 0, 0, 1] },
+      { "kind": "Id", "len": 4, "mode": "Random" }
+    ]
+  }
+}

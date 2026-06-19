@@ -17,18 +17,18 @@
 //! calls Win32 ShowWindow directly to wake up eframe, and communicates
 //! the action type via an atomic flag.
 
-mod vpn_manager;
 mod key_storage;
 mod localization;
 mod tray;
 mod ui;
+mod vpn_manager;
 
 use eframe::egui;
 use key_storage::KeyStorage;
 use localization::Lang;
-use vpn_manager::VpnManager;
 use std::fs;
 use std::path::PathBuf;
+use vpn_manager::VpnManager;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const WINDOW_WIDTH: f32 = 360.0;
@@ -107,7 +107,10 @@ fn main() -> eframe::Result<()> {
                                 return Ok(adapter.clone());
                             }
                         }
-                        adapters.first().cloned().ok_or_else(|| "No adapters found".to_string())
+                        adapters
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| "No adapters found".to_string())
                     },
                 )),
                 ..Default::default()
@@ -130,7 +133,8 @@ fn main() -> eframe::Result<()> {
                 tray_icon_h,
                 localization::t(lang, "show"),
                 localization::t(lang, "quit"),
-            ).ok();
+            )
+            .ok();
 
             if tray_mgr.is_none() {
                 eprintln!("Warning: failed to create tray icon");
@@ -203,11 +207,30 @@ pub struct AivpnApp {
     new_key_name: String,
     new_key_value: String,
     new_key_full_tunnel: bool,
+    new_key_exclude_routes: String,
+    new_key_use_proxy: bool,
+    new_key_proxy_listen: String,
+    new_key_mtls_cert: String,
     editing_key_idx: Option<usize>,
     error_message: Option<String>,
     error_timer: Option<std::time::Instant>,
     // Recording UI state
     recording_service_name: String,
+    // Kill-switch
+    kill_switch: bool,
+    // Adaptive / diagnostics
+    adaptive_level: u8,
+    dns_proxy: String,
+    show_diagnostics: bool,
+    bench_p50: Option<f64>,
+    bench_p95: Option<f64>,
+    bench_p99: Option<f64>,
+    bench_loss: Option<f64>,
+    bench_quality: Option<u8>,
+    bench_running: bool,
+    bench_rx: Option<std::sync::mpsc::Receiver<Option<vpn_manager::BenchResult>>>,
+    // Device identity
+    device_public_key: Option<String>,
     // Tray
     tray: Option<tray::TrayManager>,
     pub should_quit: bool,
@@ -216,18 +239,36 @@ pub struct AivpnApp {
 
 impl AivpnApp {
     fn new(tray: Option<tray::TrayManager>) -> Self {
+        let vpn = VpnManager::new();
+        let device_public_key = vpn.get_device_public_key();
         Self {
-            vpn: VpnManager::new(),
+            vpn,
             keys: KeyStorage::load(),
             lang: Lang::load(),
             show_add_key: false,
             new_key_name: String::new(),
             new_key_value: String::new(),
             new_key_full_tunnel: false,
+            new_key_exclude_routes: String::new(),
+            new_key_use_proxy: false,
+            new_key_proxy_listen: String::new(),
+            new_key_mtls_cert: String::new(),
             editing_key_idx: None,
             error_message: None,
             error_timer: None,
             recording_service_name: String::new(),
+            device_public_key,
+            kill_switch: false,
+            adaptive_level: 0,
+            dns_proxy: String::new(),
+            show_diagnostics: false,
+            bench_p50: None,
+            bench_p95: None,
+            bench_p99: None,
+            bench_loss: None,
+            bench_quality: None,
+            bench_running: false,
+            bench_rx: None,
             tray,
             should_quit: false,
             window_visible: true,
@@ -296,9 +337,12 @@ impl eframe::App for AivpnApp {
             if self.vpn.is_connected() {
                 self.vpn.disconnect();
             }
-            // Drop tray icon to remove it from system tray
+            // Drop tray icon to remove it from system tray before the window
+            // closes so the icon is gone before the process exits.  Dropping
+            // it here (before send_viewport_cmd) guarantees the tray thread
+            // has already been joined inside TrayManager::drop().
             self.tray = None;
-            std::process::exit(0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         // ── Update tray tooltip ────────────────────────────────────────

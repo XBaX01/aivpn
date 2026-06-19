@@ -1,0 +1,62 @@
+name: Aivpn
+options:
+  bundleIdPrefix: com.aivpn
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    ENABLE_BITCODE: NO
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+
+targets:
+  Aivpn:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: App
+        excludes:
+          - "*.entitlements"
+    info:
+      path: App/Info.plist
+    entitlements:
+      path: App/Aivpn.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aivpn.client
+        PRODUCT_NAME: Aivpn
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+    dependencies:
+      - target: AivpnTunnel
+        embed: true
+
+  AivpnTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Tunnel
+        excludes:
+          - "*.entitlements"
+    info:
+      path: Tunnel/Info.plist
+    entitlements:
+      path: Tunnel/AivpnTunnel.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aivpn.client.tunnel
+        PRODUCT_NAME: AivpnTunnel
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        SWIFT_OBJC_BRIDGING_HEADER: Tunnel/AivpnCoreBridge.h
+        # Static library linked by the tunnel extension (not the app)
+        OTHER_LDFLAGS: $(inherited) -force_load $(SRCROOT)/../aivpn-ios-core/lib/libaivpn_core.a
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/../aivpn-ios-core/lib
+        HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/../aivpn-ios-core/include

@@ -239,6 +239,7 @@ chmod +x "$PKG_SCRIPTS/preinstall" "$PKG_SCRIPTS/postinstall"
 # Build PKG
 # ──────────────────────────────────────────────
 echo "📦 Building installer package..."
+mkdir -p "$PROJECT_DIR/releases"
 PKG_OUTPUT="$PROJECT_DIR/releases/aivpn-macos.pkg"
 
 pkgbuild \

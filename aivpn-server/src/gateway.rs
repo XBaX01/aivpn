@@ -1,5 +1,5 @@
 //! Gateway Engine - Full Implementation
-//! 
+//!
 //! Handles:
 //! - UDP packet reception with O(1) tag validation
 //! - Decryption and de-mimicry
@@ -8,38 +8,41 @@
 //! - Neural Resonance validation (Patent 1)
 //! - Automatic mask rotation on compromise (Patent 3)
 
-use std::net::{Ipv4Addr, SocketAddr, IpAddr};
+use dashmap::DashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use aivpn_common::crypto::{
-    self, encrypt_payload, decrypt_payload,
-    TAG_SIZE, NONCE_SIZE,
+    self, decrypt_payload, encrypt_payload, DEFAULT_WINDOW_MS, NONCE_SIZE, TAG_SIZE,
 };
-use aivpn_common::protocol::{
-    InnerType, InnerHeader, ControlPayload, ControlSubtype,
-    MAX_PACKET_SIZE,
-};
+use aivpn_common::error::{Error, Result};
+use aivpn_common::fec::FecRepair;
+use aivpn_common::kernel_accel::{KernelAccel, SessionAdd, TagWindowEntry, UpdateTagsPayload};
 use aivpn_common::mask::{
     current_unix_secs, derive_bootstrap_candidates, BootstrapDescriptor, MaskProfile,
 };
-use aivpn_common::error::{Error, Result};
 use aivpn_common::network_config::VpnNetworkConfig;
+use aivpn_common::protocol::{ControlPayload, InnerHeader, InnerType, MAX_PACKET_SIZE};
+use libc;
 
-use crate::session::{SessionManager, Session};
-use crate::nat::NatForwarder;
-use crate::neural::{NeuralResonanceModule, NeuralConfig, ResonanceStatus};
-use crate::metrics::MetricsCollector;
+use crate::audit_log::{AuditActor, AuditLogger};
 use crate::client_db::ClientDatabase;
-use crate::recording::RecordingManager;
-use crate::recording::{RecordingStopOutcome, RecordingStopReason};
+use crate::ebpf_observer::EbpfObserver;
 use crate::mask_gen::generate_and_store_mask;
 use crate::mask_store::MaskStore;
+use crate::metrics::MetricsCollector;
+use crate::nat::NatForwarder;
+use crate::neural::{NeuralConfig, NeuralResonanceModule, ResonanceStatus};
+use crate::qos::QosEnforcer;
+use crate::recording::RecordingManager;
+use crate::recording::{RecordingStopOutcome, RecordingStopReason};
+use crate::session::{Session, SessionManager, MAX_SESSIONS};
+use aivpn_common::event_log::EventBus;
 
 struct QueuedPacket {
     packet_data: Vec<u8>,
@@ -72,6 +75,27 @@ pub struct GatewayConfig {
     pub idle_timeout_secs: Option<u64>,
     /// Optional custom bootstrap masks embedded into signed descriptors.
     pub bootstrap_masks: Vec<MaskProfile>,
+    /// Server-side NAT TUN MTU. Does not affect client VPN MTU (carried in ServerHello).
+    pub tun_mtu: u16,
+    /// Structured event bus — emits JSON-lines events to stdout (and optional webhook).
+    pub event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP).
+    pub qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder.  When `Some`, client Data packets are
+    /// relayed to the exit node instead of being NAT-forwarded locally.
+    pub chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
+    /// Optional mTLS certificate policy.  `None` = no cert verification.
+    pub mtls: Option<crate::mtls::MtlsConfig>,
+    /// When `true`, this node accepts `ChainForward` control messages and
+    /// injects them directly into the TUN device (exit-node role).
+    /// Must be set explicitly — defaults to `false` to prevent open relay.
+    pub exit_node_enabled: bool,
+    /// Append-only audit log (H-S-8). Records security-relevant session events.
+    /// Defaults to `AuditLogger::disabled()` (writes to /dev/null).
+    pub audit_log: AuditLogger,
+    /// Allow direct client-to-client packet routing inside the VPN subnet (0.9.0+).
+    /// When false (default), VPN-to-VPN traffic is silently dropped at the TUN level.
+    pub allow_peer_routing: bool,
 }
 
 impl Default for GatewayConfig {
@@ -93,6 +117,17 @@ impl Default for GatewayConfig {
             session_timeout_secs: None,
             idle_timeout_secs: None,
             bootstrap_masks: Vec::new(),
+            tun_mtu: crate::nat::DEFAULT_TUN_MTU,
+            event_bus: EventBus::new(aivpn_common::event_log::EventSinkConfig {
+                stdout: false,
+                webhook_url: None,
+            }),
+            qos_enforcer: Arc::new(QosEnforcer::new()),
+            chain_forwarder: None,
+            mtls: None,
+            exit_node_enabled: false,
+            audit_log: AuditLogger::disabled(),
+            allow_peer_routing: false,
         }
     }
 }
@@ -144,7 +179,8 @@ impl MaskCatalog {
 
     /// Select the best non-compromised mask, excluding `current_mask_id`
     pub fn select_fallback(&self, current_mask_id: &str) -> Option<MaskProfile> {
-        self.masks.iter()
+        self.masks
+            .iter()
             .filter(|e| e.key() != current_mask_id)
             .map(|e| e.value().clone())
             .next()
@@ -178,7 +214,8 @@ impl MaskCatalog {
 
     pub fn primary_mask(&self) -> Option<MaskProfile> {
         let primary_id = self.primary_mask_id.lock().clone();
-        self.masks.get(&primary_id)
+        self.masks
+            .get(&primary_id)
             .map(|entry| entry.value().clone())
             .or_else(|| self.masks.iter().next().map(|entry| entry.value().clone()))
     }
@@ -187,7 +224,8 @@ impl MaskCatalog {
 fn packet_layout_for_mask(mask: &MaskProfile) -> (usize, usize, usize, usize) {
     let eph_offset = mask.eph_pub_offset as usize;
     let eph_len = mask.eph_pub_length as usize;
-    let packet_mdh_len = mask.header_spec
+    let packet_mdh_len = mask
+        .header_spec
         .as_ref()
         .map(|spec| spec.min_length())
         .unwrap_or_else(|| mask.header_template.len());
@@ -207,7 +245,10 @@ fn packet_mdh_bytes_for_mask(mask: &MaskProfile) -> Vec<u8> {
 /// Hash a socket address for privacy-preserving logging (MED-4)
 fn hash_addr(addr: &SocketAddr) -> String {
     let hash = crypto::blake3_hash(addr.to_string().as_bytes());
-    format!("{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3])
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        hash[0], hash[1], hash[2], hash[3]
+    )
 }
 
 /// Gateway server
@@ -223,6 +264,10 @@ pub struct Gateway {
     /// Per-IP handshake failure cooldown: (failure_count, last_failure_time)
     /// Prevents rapid session-creation loops when client retries with stale keys
     handshake_cooldowns: Arc<DashMap<IpAddr, (u32, Instant)>>,
+    /// Per-IP handshake mutex: serializes concurrent handshakes arriving on
+    /// different source ports from the same client, preventing duplicate sessions
+    /// that compete for the same VPN IP and cause aead::Error on data packets.
+    handshake_locks: Arc<DashMap<IpAddr, Arc<tokio::sync::Mutex<()>>>>,
     /// Neural Resonance Module (Patent 1) — periodic traffic validation
     neural_module: Arc<parking_lot::Mutex<NeuralResonanceModule>>,
     /// Mask catalog for automatic rotation (Patent 3)
@@ -238,6 +283,16 @@ pub struct Gateway {
     mask_store: Option<Arc<MaskStore>>,
     /// Active bootstrap descriptors for previous/current/next epochs.
     bootstrap_descriptors: Vec<BootstrapDescriptor>,
+    /// Optional kernel-module accelerator (auto-detected via /dev/aivpn).
+    kernel_accel: Option<Arc<KernelAccel>>,
+    /// Structured event bus for JSON-lines output.
+    event_bus: EventBus,
+    /// Per-client QoS enforcer (token bucket + DSCP marking).
+    qos_enforcer: Arc<QosEnforcer>,
+    /// Multi-hop exit node forwarder (None = local NAT).
+    chain_forwarder: Option<Arc<crate::chain_forwarder::ChainForwarder>>,
+    /// Append-only audit log (H-S-8).
+    audit_log: AuditLogger,
 }
 
 const BOOTSTRAP_ROTATION_SECS: u64 = 24 * 3600;
@@ -346,7 +401,9 @@ impl Gateway {
                         session_id: completed.session_id,
                         status: "analyzing".into(),
                     };
-                    if let Err(e) = Self::send_control_message_via(socket.as_ref(), mdh, &ack, session).await {
+                    if let Err(e) =
+                        Self::send_control_message_via(socket.as_ref(), mdh, &ack, session).await
+                    {
                         warn!("Failed to send RecordingAck: {}", e);
                     }
                 }
@@ -361,13 +418,17 @@ impl Gateway {
                 let store = store.clone();
                 let mdh = mdh.to_vec();
                 tokio::spawn(async move {
-                    match generate_and_store_mask(&completed.service, &completed.packets, &store).await {
+                    match generate_and_store_mask(&completed.service, &completed.packets, &store)
+                        .await
+                    {
                         Ok(mask_id) => {
                             info!(
                                 "✅ Mask generated: '{}' for service '{}' by {}",
                                 mask_id, completed.service, completed.admin_key_id
                             );
-                            if let Some(target_session) = sessions.get_session(&completed.session_id) {
+                            if let Some(target_session) =
+                                sessions.get_session(&completed.session_id)
+                            {
                                 let confidence = store
                                     .get_mask(&mask_id)
                                     .map(|entry| entry.stats.confidence)
@@ -377,18 +438,34 @@ impl Gateway {
                                     mask_id,
                                     confidence,
                                 };
-                                if let Err(e) = Self::send_control_message_via(socket.as_ref(), &mdh, &payload, &target_session).await {
+                                if let Err(e) = Self::send_control_message_via(
+                                    socket.as_ref(),
+                                    &mdh,
+                                    &payload,
+                                    &target_session,
+                                )
+                                .await
+                                {
                                     warn!("Failed to send RecordingComplete: {}", e);
                                 }
                             }
                         }
                         Err(e) => {
                             warn!("Mask generation failed for '{}': {}", completed.service, e);
-                            if let Some(target_session) = sessions.get_session(&completed.session_id) {
+                            if let Some(target_session) =
+                                sessions.get_session(&completed.session_id)
+                            {
                                 let payload = ControlPayload::RecordingFailed {
                                     reason: e.to_string(),
                                 };
-                                if let Err(send_err) = Self::send_control_message_via(socket.as_ref(), &mdh, &payload, &target_session).await {
+                                if let Err(send_err) = Self::send_control_message_via(
+                                    socket.as_ref(),
+                                    &mdh,
+                                    &payload,
+                                    &target_session,
+                                )
+                                .await
+                                {
                                     warn!("Failed to send RecordingFailed: {}", send_err);
                                 }
                             }
@@ -398,21 +475,31 @@ impl Gateway {
             }
             RecordingStopOutcome::Incomplete(incomplete) => {
                 let reason = match incomplete.reason {
-                    RecordingStopReason::IdleTimeout => "Recording stopped after idle timeout before enough traffic was captured",
-                    RecordingStopReason::SessionEnded => "Recording ended with the session before enough traffic was captured",
+                    RecordingStopReason::IdleTimeout => {
+                        "Recording stopped after idle timeout before enough traffic was captured"
+                    }
+                    RecordingStopReason::SessionEnded => {
+                        "Recording ended with the session before enough traffic was captured"
+                    }
                     _ => "Too few packets or too short duration",
                 };
                 if let Some(ref session) = notify_session {
                     let payload = ControlPayload::RecordingFailed {
                         reason: reason.into(),
                     };
-                    if let Err(e) = Self::send_control_message_via(socket.as_ref(), mdh, &payload, session).await {
+                    if let Err(e) =
+                        Self::send_control_message_via(socket.as_ref(), mdh, &payload, session)
+                            .await
+                    {
                         warn!("Failed to send RecordingFailed: {}", e);
                     }
                 }
                 warn!(
                     "Recording for '{}' ended without mask generation: {} packets, {}s ({:?})",
-                    incomplete.service, incomplete.total_packets, incomplete.duration_secs, incomplete.reason
+                    incomplete.service,
+                    incomplete.total_packets,
+                    incomplete.duration_secs,
+                    incomplete.reason
                 );
             }
             RecordingStopOutcome::NotFound => {}
@@ -426,20 +513,24 @@ impl Gateway {
         } else {
             crypto::KeyPair::generate()
         };
-        
+
         // Create Ed25519 signing key
         let signing_key = derive_server_signing_key(&config.server_private_key);
-        let bootstrap_descriptors = build_bootstrap_descriptors(&config.server_private_key, &signing_key, &config.bootstrap_masks);
-        
+        let bootstrap_descriptors = build_bootstrap_descriptors(
+            &config.server_private_key,
+            &signing_key,
+            &config.bootstrap_masks,
+        );
+
         // Initialize mask catalog (empty — populated from disk only)
         let mask_catalog = Arc::new(MaskCatalog::new());
-        
+
         // Initialize mask store — loads masks from disk into catalog
         let mask_store = Arc::new(MaskStore::new(
             mask_catalog.clone(),
             config.mask_dir.clone(),
         ));
-        
+
         // Runtime primary mask is selected from the masks loaded on disk.
         // Bootstrap compatibility is handled separately using built-in presets.
         let primary_id = if let Some(first) = mask_catalog.masks.iter().next() {
@@ -454,13 +545,15 @@ impl Gateway {
         } else {
             warn!("No masks found in {:?} — server will not accept connections until masks are recorded", config.mask_dir);
         }
-        
+
         // Get default mask from catalog (required — at least one mask must exist on disk)
-        let default_mask = mask_catalog.primary_mask()
-            .ok_or_else(|| Error::Session(
-                format!("No masks found in {:?} — place mask JSON files there before starting the server", config.mask_dir)
-            ))?;
-        
+        let default_mask = mask_catalog.primary_mask().ok_or_else(|| {
+            Error::Session(format!(
+                "No masks found in {:?} — place mask JSON files there before starting the server",
+                config.mask_dir
+            ))
+        })?;
+
         let session_manager = Arc::new(SessionManager::with_timeouts(
             server_keys,
             signing_key,
@@ -468,11 +561,11 @@ impl Gateway {
             config.session_timeout_secs,
             config.idle_timeout_secs,
         ));
-        
+
         // Initialize neural resonance module (Patent 1)
         let mut neural = NeuralResonanceModule::new(config.neural_config.clone())
             .map_err(|e| Error::Session(format!("Neural module init failed: {}", e)))?;
-        
+
         if config.enable_neural {
             // Register all catalog masks for signature-based resonance checking
             for entry in mask_catalog.masks.iter() {
@@ -482,9 +575,23 @@ impl Gateway {
             let _ = neural.load_model();
             info!("Neural Resonance Module initialized (Patent 1)");
         }
-        
+
         let recording_manager = Arc::new(RecordingManager::new(mask_store.clone()));
-        info!("Auto Mask Recording system initialized ({} masks loaded from disk)", mask_catalog.available_count());
+        info!(
+            "Auto Mask Recording system initialized ({} masks loaded from disk)",
+            mask_catalog.available_count()
+        );
+
+        let kernel_accel: Option<Arc<KernelAccel>> = KernelAccel::try_open().map(Arc::new);
+        if kernel_accel.is_some() {
+            info!("Kernel acceleration: active (aivpn.ko loaded — /dev/aivpn ready)");
+        } else {
+            info!("Kernel acceleration: not available — using built-in user-space data path");
+        }
+
+        let event_bus = config.event_bus.clone();
+        let qos_enforcer = config.qos_enforcer.clone();
+        let audit_log = config.audit_log.clone();
 
         Ok(Self {
             config: config.clone(),
@@ -494,6 +601,7 @@ impl Gateway {
             tun_write_tx: None,
             rate_limits: Arc::new(DashMap::new()),
             handshake_cooldowns: Arc::new(DashMap::new()),
+            handshake_locks: Arc::new(DashMap::new()),
             neural_module: Arc::new(parking_lot::Mutex::new(neural)),
             mask_catalog,
             metrics: Arc::new(MetricsCollector::new()),
@@ -501,7 +609,17 @@ impl Gateway {
             recording_manager: Some(recording_manager),
             mask_store: Some(mask_store),
             bootstrap_descriptors,
+            kernel_accel,
+            event_bus,
+            qos_enforcer,
+            chain_forwarder: config.chain_forwarder.clone(),
+            audit_log,
         })
+    }
+
+    /// Set (or replace) the multi-hop chain forwarder after server construction.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.chain_forwarder = Some(cf);
     }
 
     async fn send_bootstrap_descriptors(
@@ -510,60 +628,134 @@ impl Gateway {
     ) -> Result<()> {
         for descriptor in &self.bootstrap_descriptors {
             let payload = ControlPayload::BootstrapDescriptorUpdate {
-                descriptor_data: rmp_serde::to_vec(descriptor)
-                    .map_err(|e| Error::Session(format!("Failed to serialize bootstrap descriptor: {}", e)))?,
+                descriptor_data: rmp_serde::to_vec(descriptor).map_err(|e| {
+                    Error::Session(format!("Failed to serialize bootstrap descriptor: {}", e))
+                })?,
             };
             self.send_control_message(&payload, session).await?;
         }
         Ok(())
     }
-    
+
+    /// Return a shared reference to the session manager.
+    /// Used by pool sync to register the synthetic cluster session before `run()` is called.
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.session_manager.clone()
+    }
+
+    /// Return the default mask-dependent header bytes from the mask catalog.
+    /// Pool sync packets use this MDH so the receiver can locate the ciphertext
+    /// boundary using the same session-mask heuristic as regular client packets.
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.mask_catalog.packet_mdh_bytes()
+    }
+
     /// Start the gateway
     pub async fn run(mut self) -> Result<()> {
         info!("Starting AIVPN Gateway on {}", self.config.listen_addr);
-        info!("Per-IP UDP rate limit: {} pps", self.config.per_ip_pps_limit);
-        
+        info!(
+            "Per-IP UDP rate limit: {} pps",
+            self.config.per_ip_pps_limit
+        );
+
+        // Start eBPF observer (no-op when xdp_prog.o is absent)
+        Arc::new(EbpfObserver::new(self.event_bus.clone())).start();
+
         // Create NAT forwarder (requires root — deferred from constructor for testability)
         if self.config.enable_nat {
             let mut nat = NatForwarder::new(
                 &self.config.tun_name,
                 &self.config.tun_addr,
                 &self.config.tun_netmask,
-                self.config.network_config,
+                self.config.tun_mtu,
+                self.config.network_config.clone(),
             )?;
             nat.create()?;
+
+            // IPv6 dual-stack (NAT66) — optional, off by default.
+            if self.config.network_config.ipv6_enabled {
+                let tun = self.config.tun_name.as_str();
+                let prefix = self.config.network_config.ipv6_prefix.as_str();
+                match crate::nat::setup_nat66(tun, prefix) {
+                    Ok(()) => info!("NAT66 configured for prefix {}", prefix),
+                    Err(e) => warn!("NAT66 setup failed (non-fatal): {}", e),
+                }
+                match crate::nat::assign_ipv6_to_tun(tun, "fd10:cafe::1", 48) {
+                    Ok(()) => info!("Assigned fd10:cafe::1/48 to {}", tun),
+                    Err(e) => warn!("IPv6 TUN address assignment failed (non-fatal): {}", e),
+                }
+            }
+
             self.nat_forwarder = Some(Arc::new(nat));
-            info!("TUN device: {} ({}/{})", 
-                self.config.tun_name,
-                self.config.tun_addr,
-                self.config.tun_netmask
+            info!(
+                "TUN device: {} ({}/{})",
+                self.config.tun_name, self.config.tun_addr, self.config.tun_netmask
             );
         }
-        
+
         // Create UDP socket with 4MB OS buffers (OPTIMIZATION)
-        let bind_addr: SocketAddr = self.config.listen_addr.parse()
-            .map_err(|e: std::net::AddrParseError| Error::Io(
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-            ))?;
-            
+        let bind_addr: SocketAddr =
+            self.config
+                .listen_addr
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        e.to_string(),
+                    ))
+                })?;
+
         let socket2_sock = socket2::Socket::new(
-            if bind_addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
+            if bind_addr.is_ipv4() {
+                socket2::Domain::IPV4
+            } else {
+                socket2::Domain::IPV6
+            },
             socket2::Type::DGRAM,
             Some(socket2::Protocol::UDP),
-        ).map_err(Error::Io)?;
-        
+        )
+        .map_err(Error::Io)?;
+
         socket2_sock.set_nonblocking(true).map_err(Error::Io)?;
         let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
         let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
         socket2_sock.bind(&bind_addr.into()).map_err(Error::Io)?;
-        
+
         let std_sock: std::net::UdpSocket = socket2_sock.into();
         let socket = UdpSocket::from_std(std_sock).map_err(Error::Io)?;
-        
-        info!("UDP listener bound to {} (4MB buffers via socket2)", self.config.listen_addr);
-        
+
+        info!(
+            "UDP listener bound to {} (4MB buffers via socket2)",
+            self.config.listen_addr
+        );
+
         self.udp_socket = Some(Arc::new(socket));
-        
+
+        // Wire kernel accelerator to live TUN + UDP socket.
+        if let Some(ref ka) = self.kernel_accel {
+            if self.config.enable_nat {
+                let tun_name = self.config.tun_name.as_str();
+                if let Ok(cname) = std::ffi::CString::new(tun_name) {
+                    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+                    if ifindex > 0 {
+                        if let Err(e) = ka.set_tun(ifindex) {
+                            warn!("aivpn: kernel set_tun failed: {e}");
+                        } else {
+                            info!(
+                                "Kernel acceleration wired to TUN {} (ifindex={ifindex})",
+                                tun_name
+                            );
+                        }
+                    }
+                }
+            }
+            use std::os::unix::io::AsRawFd;
+            let udp_fd = self.udp_socket.as_ref().unwrap().as_raw_fd();
+            if let Err(e) = ka.set_udp_sock(udp_fd) {
+                warn!("aivpn: kernel set_udp_sock failed: {e}");
+            }
+        }
+
         // Spawn neural resonance check loop (Patent 1 — periodic validation)
         if self.config.enable_neural {
             let neural = self.neural_module.clone();
@@ -572,29 +764,44 @@ impl Gateway {
             let metrics = self.metrics.clone();
             let check_interval = self.config.neural_config.check_interval_secs;
             let socket = self.udp_socket.as_ref().unwrap().clone();
-            
+
             tokio::spawn(async move {
-                Self::resonance_check_loop(neural, sessions, catalog, metrics, check_interval, socket).await;
+                Self::resonance_check_loop(
+                    neural,
+                    sessions,
+                    catalog,
+                    metrics,
+                    check_interval,
+                    socket,
+                )
+                .await;
             });
-            info!("Neural resonance check loop spawned (interval: {}s)", check_interval);
+            info!(
+                "Neural resonance check loop spawned (interval: {}s)",
+                check_interval
+            );
         }
-        
+
         // Spawn TUN → Client read loop (reads packets from TUN, routes back to clients)
         // Also set up channel-based TUN writer for upload path (avoids Mutex contention)
         if let Some(ref nat) = self.nat_forwarder {
             if let Some(tun_reader) = nat.take_reader().await {
                 let sessions = self.session_manager.clone();
                 let socket = self.udp_socket.as_ref().unwrap().clone();
-                let mask = self.mask_catalog.masks.iter().next()
+                let mask = self
+                    .mask_catalog
+                    .masks
+                    .iter()
+                    .next()
                     .map(|e| e.value().clone())
                     .expect("at least one mask must be loaded");
                 let server_vpn_ip = self.config.network_config.server_vpn_ip;
                 let recorder = self.recording_manager.clone();
-                
+
                 // Channel for writing packets to TUN device (upload + ICMP replies)
                 let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>(4096);
                 self.tun_write_tx = Some(tun_tx.clone());
-                
+
                 // Spawn dedicated TUN writer task — owns the DeviceWriter, no Mutex needed
                 if let Some(tun_writer) = nat.take_writer().await {
                     tokio::spawn(async move {
@@ -604,50 +811,136 @@ impl Gateway {
                 } else {
                     warn!("Could not take TUN writer — falling back to forward_packet");
                 }
-                
+
                 let client_db = self.client_db.clone();
+                let qos_enforcer = self.qos_enforcer.clone();
+                let allow_peer_routing = self.config.allow_peer_routing;
                 tokio::spawn(async move {
-                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip, recorder, client_db).await;
+                    Self::tun_read_loop(
+                        tun_reader,
+                        tun_tx,
+                        sessions,
+                        socket,
+                        mask,
+                        server_vpn_ip,
+                        recorder,
+                        client_db,
+                        qos_enforcer,
+                        allow_peer_routing,
+                    )
+                    .await;
                 });
                 info!("TUN read loop spawned");
             }
         }
-        
+
         // Spawn periodic session cleanup task (remove expired/idle sessions and stop recordings)
         {
             let sessions = self.session_manager.clone();
             let recorder = self.recording_manager.clone();
             let socket = self.udp_socket.as_ref().unwrap().clone();
             let mdh = self.mask_catalog.packet_mdh_bytes();
+            let neural = self.neural_module.clone();
+            let ka_cleanup = self.kernel_accel.clone();
+            let rate_limits_cleanup = self.rate_limits.clone();
+            let handshake_cooldowns_cleanup = self.handshake_cooldowns.clone();
+            let handshake_locks_cleanup = self.handshake_locks.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     if let Some(ref rec) = recorder {
                         let store = rec.store();
-                        for outcome in rec.take_ready_or_stale(aivpn_common::recording::RECORDING_IDLE_TIMEOUT_SECS) {
+                        for outcome in rec.take_ready_or_stale(
+                            aivpn_common::recording::RECORDING_IDLE_TIMEOUT_SECS,
+                        ) {
                             let notify_session = match &outcome {
-                                RecordingStopOutcome::Completed(completed) => sessions.get_session(&completed.session_id),
-                                RecordingStopOutcome::Incomplete(incomplete) => sessions.get_session(&incomplete.session_id),
+                                RecordingStopOutcome::Completed(completed) => {
+                                    sessions.get_session(&completed.session_id)
+                                }
+                                RecordingStopOutcome::Incomplete(incomplete) => {
+                                    sessions.get_session(&incomplete.session_id)
+                                }
                                 RecordingStopOutcome::NotFound => None,
                             };
-                            Self::handle_recording_outcome(&socket, &sessions, &store, &mdh, outcome, notify_session).await;
+                            Self::handle_recording_outcome(
+                                &socket,
+                                &sessions,
+                                &store,
+                                &mdh,
+                                outcome,
+                                notify_session,
+                            )
+                            .await;
                         }
                     }
 
+                    // Prune stale per-IP rate-limit, handshake-cooldown, and
+                    // handshake-lock entries.  handshake_locks is never pruned
+                    // elsewhere so it grows without bound under sustained churn.
+                    // Entries whose Arc strong_count == 1 have no active waiters
+                    // and are safe to remove.
+                    rate_limits_cleanup.retain(|_, v| v.1.elapsed() < Duration::from_secs(30));
+                    handshake_cooldowns_cleanup
+                        .retain(|_, v| v.1.elapsed() < Duration::from_secs(60));
+                    handshake_locks_cleanup.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
+
                     let removed = sessions.cleanup_expired();
+                    for session_id in &removed {
+                        // Release per-session neural traffic stats; without this the
+                        // neural_module's DashMap grows unbounded as sessions expire.
+                        neural.lock().cleanup_stats(*session_id);
+                        if let Some(ref ka) = ka_cleanup {
+                            let _ = ka.session_remove(session_id);
+                        }
+                    }
                     // Stop active recordings for removed sessions
                     if let Some(ref rec) = recorder {
                         let store = rec.store();
                         for session_id in removed {
                             let outcome = rec.stop_for_session_end(session_id);
-                            Self::handle_recording_outcome(&socket, &sessions, &store, &mdh, outcome, None).await;
+                            Self::handle_recording_outcome(
+                                &socket, &sessions, &store, &mdh, outcome, None,
+                            )
+                            .await;
                         }
                     }
                 }
             });
             info!("Session cleanup / recording auto-finish task spawned (5s interval)");
         }
-        
+
+        // Spawn periodic inline rekey task (PFS key rotation every 30s check, 120s actual)
+        {
+            let sessions = self.session_manager.clone();
+            let socket = self.udp_socket.as_ref().unwrap().clone();
+            let mdh = self.mask_catalog.packet_mdh_bytes();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let due = sessions.start_rekeying_sessions();
+                    for (session_id, new_eph_pub) in due {
+                        if let Some(session) = sessions.get_session(&session_id) {
+                            let payload =
+                                aivpn_common::protocol::ControlPayload::KeyRotate { new_eph_pub };
+                            if let Err(e) = Self::send_control_message_via(
+                                socket.as_ref(),
+                                &mdh,
+                                &payload,
+                                &session,
+                            )
+                            .await
+                            {
+                                warn!("Inline rekey: failed to send KeyRotate to session: {}", e);
+                            } else {
+                                info!("Inline rekey: KeyRotate sent to session");
+                            }
+                        }
+                    }
+                }
+            });
+            info!("Inline rekey task spawned (30s check interval, 120s rekey period)");
+        }
+
         // Spawn client DB stats flush task (persist traffic stats every 5 min)
         if let Some(ref db) = self.client_db {
             let db = db.clone();
@@ -659,7 +952,7 @@ impl Gateway {
             });
             info!("Client stats flush task spawned (300s interval)");
         }
-        
+
         // Spawn client DB hot-reload task (pick up new clients without restart)
         if let Some(ref db) = self.client_db {
             let db = db.clone();
@@ -671,15 +964,15 @@ impl Gateway {
             });
             info!("Client DB hot-reload task spawned (10s interval)");
         }
-        
+
         // Use session-aware receive sharding: preserve ordering within one
         // session, but allow different sessions to make progress in parallel.
         let gateway = Arc::new(self);
         Self::process_packets_concurrent(gateway).await?;
-        
+
         Ok(())
     }
-    
+
     /// Background task: periodic neural resonance checks (Patent 1)
     ///
     /// For each active session, computes reconstruction error between
@@ -695,47 +988,62 @@ impl Gateway {
         socket: Arc<UdpSocket>,
     ) {
         let interval = Duration::from_secs(check_interval_secs);
-        
+
         loop {
             tokio::time::sleep(interval).await;
-            
+
             // Collect session IDs and their mask IDs
-            let session_checks: Vec<([u8; 16], String)> = sessions.iter_sessions()
+            let session_checks: Vec<([u8; 16], String)> = sessions
+                .iter_sessions()
                 .filter_map(|entry| {
                     let sess = entry.value().lock();
-                    let mask_id = sess.mask.as_ref().map(|m| m.mask_id.clone())
+                    let mask_id = sess
+                        .mask
+                        .as_ref()
+                        .map(|m| m.mask_id.clone())
                         .unwrap_or_else(|| "unknown".to_string());
                     Some((sess.session_id, mask_id))
                 })
                 .collect();
-            
+
             if session_checks.is_empty() {
                 continue;
             }
-            
+
             // Collect mask update packets to send AFTER releasing the neural lock
             // (parking_lot::MutexGuard is !Send, cannot hold across .await)
-            let mut pending_sends: Vec<(Vec<u8>, std::net::SocketAddr, [u8; 16], MaskProfile)> = Vec::new();
-            
+            let mut pending_sends: Vec<(Vec<u8>, std::net::SocketAddr, [u8; 16], MaskProfile)> =
+                Vec::new();
+
             {
                 let neural_guard = neural.lock();
-                
+
                 for (session_id, mask_id) in &session_checks {
                     // Check neural resonance (Patent 1: Signal Reconstruction Resonance)
                     match neural_guard.check_resonance(*session_id, mask_id) {
                         Ok(result) => {
-                            metrics.record_neural_check(result.status == ResonanceStatus::Compromised);
-                            
+                            metrics
+                                .record_neural_check(result.status == ResonanceStatus::Compromised);
+
                             match result.status {
                                 ResonanceStatus::Compromised => {
+                                    if !neural_guard.can_rotate(mask_id) {
+                                        debug!(
+                                            "Mask '{}' compromised (MSE={:.4}) but rotation on cooldown — skipping",
+                                            mask_id, result.mse
+                                        );
+                                        continue;
+                                    }
                                     warn!(
                                         "Mask '{}' compromised (MSE={:.4}) — triggering rotation (Patent 3)",
                                         mask_id, result.mse
                                     );
-                                    
+
+                                    neural_guard.record_rotation(mask_id);
+
                                     // Mark mask as compromised in catalog
                                     catalog.mark_compromised(mask_id);
-                                    
+
                                     // Select fallback mask
                                     if let Some(new_mask) = catalog.select_fallback(mask_id) {
                                         info!(
@@ -743,22 +1051,34 @@ impl Gateway {
                                             new_mask.mask_id,
                                             catalog.available_count()
                                         );
-                                        
+
                                         if let Some(session) = sessions.get_session(session_id) {
                                             let client_addr = session.lock().client_addr;
-                                            match sessions.build_mask_update_packet(&session, &new_mask) {
+                                            match sessions
+                                                .build_mask_update_packet(&session, &new_mask)
+                                            {
                                                 Ok(packet) => {
-                                                    pending_sends.push((packet, client_addr, *session_id, new_mask.clone()));
+                                                    pending_sends.push((
+                                                        packet,
+                                                        client_addr,
+                                                        *session_id,
+                                                        new_mask.clone(),
+                                                    ));
                                                 }
                                                 Err(e) => {
-                                                    warn!("Failed to build MaskUpdate packet: {}", e);
+                                                    warn!(
+                                                        "Failed to build MaskUpdate packet: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
-                                        
+
                                         metrics.record_mask_rotation();
                                     } else {
-                                        error!("No fallback masks available! All masks compromised.");
+                                        error!(
+                                            "No fallback masks available! All masks compromised."
+                                        );
                                     }
                                 }
                                 ResonanceStatus::Warning => {
@@ -779,22 +1099,29 @@ impl Gateway {
                             debug!("Resonance check error for session: {}", e);
                         }
                     }
-                    
+
                     // Check anomaly detection (DPI blocking indicators)
                     if neural_guard.is_mask_anomalous(mask_id) {
-                        warn!("Anomaly detected for mask '{}' (packet loss / RTT spike)", mask_id);
+                        warn!(
+                            "Anomaly detected for mask '{}' (packet loss / RTT spike)",
+                            mask_id
+                        );
                         metrics.record_dpi_attack();
                         catalog.mark_compromised(mask_id);
-                        
+
                         if let Some(new_mask) = catalog.select_fallback(mask_id) {
-                            info!(
-                                "Anomaly-triggered rotation to mask '{}'",
-                                new_mask.mask_id
-                            );
+                            info!("Anomaly-triggered rotation to mask '{}'", new_mask.mask_id);
                             if let Some(session) = sessions.get_session(session_id) {
                                 let client_addr = session.lock().client_addr;
-                                if let Ok(packet) = sessions.build_mask_update_packet(&session, &new_mask) {
-                                    pending_sends.push((packet, client_addr, *session_id, new_mask.clone()));
+                                if let Ok(packet) =
+                                    sessions.build_mask_update_packet(&session, &new_mask)
+                                {
+                                    pending_sends.push((
+                                        packet,
+                                        client_addr,
+                                        *session_id,
+                                        new_mask.clone(),
+                                    ));
                                 }
                             }
                             metrics.record_mask_rotation();
@@ -802,7 +1129,7 @@ impl Gateway {
                     }
                 }
             } // neural_guard dropped here
-            
+
             // Send collected MaskUpdate packets (async, safe now)
             for (packet, client_addr, session_id, new_mask) in pending_sends {
                 if let Err(e) = socket.send_to(&packet, client_addr).await {
@@ -814,7 +1141,7 @@ impl Gateway {
             }
         }
     }
-    
+
     /// TUN read loop: reads packets from TUN device and routes them back to clients
     async fn tun_read_loop(
         mut tun_reader: tun::DeviceReader,
@@ -825,22 +1152,24 @@ impl Gateway {
         server_vpn_ip: Ipv4Addr,
         recorder: Option<Arc<RecordingManager>>,
         client_db: Option<Arc<ClientDatabase>>,
+        qos_enforcer: Arc<crate::qos::QosEnforcer>,
+        allow_peer_routing: bool,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
-        
+
         loop {
             match tun_reader.read(&mut buf).await {
                 Ok(0) => continue,
                 Ok(n) => {
                     let packet = &buf[..n];
-                    
+
                     // Parse destination IP from IP header
                     if packet.len() < 20 || (packet[0] >> 4) != 4 {
                         continue; // Not IPv4
                     }
                     let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-                    
+
                     // Handle ICMP echo request to server's own IP (ping to gateway)
                     if dst_ip == server_ip && packet.len() >= 28 && packet[9] == 1 {
                         // ICMP packet to server — generate echo reply
@@ -849,7 +1178,22 @@ impl Gateway {
                         }
                         continue;
                     }
-                    
+
+                    // Guard client-to-client relay (0.9.0+).
+                    // If the packet's source IP belongs to a VPN client session,
+                    // this is intra-VPN (peer-to-peer) traffic — only forward when
+                    // allow_peer_routing is enabled.
+                    if !allow_peer_routing {
+                        let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+                        if sessions.get_session_by_vpn_ip(&src_ip).is_some() {
+                            debug!(
+                                "TUN: dropping peer packet {}->{} (allow_peer_routing=false)",
+                                src_ip, dst_ip
+                            );
+                            continue;
+                        }
+                    }
+
                     // Find session by VPN IP
                     let session = match sessions.get_session_by_vpn_ip(&dst_ip) {
                         Some(s) => s,
@@ -858,7 +1202,16 @@ impl Gateway {
                             continue;
                         }
                     };
-                    
+
+                    // QoS: enforce downstream rate limit before expensive encryption
+                    let qos_cid = { session.lock().client_id.clone() };
+                    if let Some(ref cid) = qos_cid {
+                        if !qos_enforcer.check_downstream(cid, n as u64) {
+                            debug!("QoS: downstream rate limited, dropping packet for {}", cid);
+                            continue;
+                        }
+                    }
+
                     // Build encrypted response packet
                     // Minimize lock duration: extract only what we need under lock, then encrypt outside
                     let (session_id, client_addr, downlink_iat_ms, tag, mdh, ciphertext) = {
@@ -871,18 +1224,22 @@ impl Gateway {
                         let (nonce, counter) = sess.next_send_nonce();
                         let key = sess.keys.session_key.clone();
                         let tag_secret = sess.keys.tag_secret;
-                        let downlink_iat_ms = sess.last_server_send.elapsed().as_secs_f64() * 1000.0;
+                        let downlink_iat_ms =
+                            sess.last_server_send.elapsed().as_secs_f64() * 1000.0;
                         sess.last_server_send = Instant::now();
                         // Use the session's own mask for MDH so the client can
                         // decode with the mask it currently expects (bootstrap
                         // or runtime after MaskUpdate is processed).
-                        let session_mdh = sess.mask.as_ref()
+                        let session_mdh = sess
+                            .mask
+                            .as_ref()
                             .map(packet_mdh_bytes_for_mask)
                             .unwrap_or_else(|| mask.header_template.clone());
                         // Pre-accumulate downlink bytes estimate (IP packet + overhead)
                         // This avoids a second lock after send_to
                         let estimated_out = (n + 64) as u64; // packet + AIVPN overhead
-                        sess.pending_bytes_out = sess.pending_bytes_out.saturating_add(estimated_out);
+                        sess.pending_bytes_out =
+                            sess.pending_bytes_out.saturating_add(estimated_out);
                         // Flush downlink-only traffic to client_db when threshold reached
                         let flush_out = if sess.pending_bytes_out >= 64 * 1024 {
                             let bytes = sess.pending_bytes_out;
@@ -893,11 +1250,11 @@ impl Gateway {
                             None
                         };
                         drop(sess); // Release lock BEFORE expensive encryption
-                        // Flush outside lock
+                                    // Flush outside lock
                         if let (Some(ref db), Some((cid, bytes))) = (&client_db, flush_out) {
                             db.record_traffic(&cid, 0, bytes);
                         }
-                        
+
                         // Build inner payload: Data type + IP packet
                         let inner_header = InnerHeader {
                             inner_type: InnerType::Data,
@@ -905,16 +1262,16 @@ impl Gateway {
                         };
                         let mut inner_payload = inner_header.encode().to_vec();
                         inner_payload.extend_from_slice(packet);
-                        
+
                         // Build MDH using session mask (not global runtime mask)
                         let mdh = session_mdh;
-                        
+
                         // Pad and encrypt (outside lock)
                         let pad_len: u16 = 0;
                         let mut padded = Vec::with_capacity(2 + inner_payload.len());
                         padded.extend_from_slice(&pad_len.to_le_bytes());
                         padded.extend_from_slice(&inner_payload);
-                        
+
                         let ciphertext = match encrypt_payload(&key, &nonce, &padded) {
                             Ok(ct) => ct,
                             Err(e) => {
@@ -922,27 +1279,31 @@ impl Gateway {
                                 continue;
                             }
                         };
-                        
+
                         // Generate tag (outside lock)
                         let time_window = crypto::compute_time_window(
                             crypto::current_timestamp_ms(),
                             aivpn_common::crypto::DEFAULT_WINDOW_MS,
                         );
-                        let tag = crypto::generate_resonance_tag(
-                            &tag_secret,
-                            counter,
-                            time_window,
-                        );
-                        
-                        (session_id, client_addr, downlink_iat_ms, tag, mdh, ciphertext)
+                        let tag = crypto::generate_resonance_tag(&tag_secret, counter, time_window);
+
+                        (
+                            session_id,
+                            client_addr,
+                            downlink_iat_ms,
+                            tag,
+                            mdh,
+                            ciphertext,
+                        )
                     };
-                    
+
                     // Assemble: TAG | MDH | ciphertext
-                    let mut aivpn_packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());
+                    let mut aivpn_packet =
+                        Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());
                     aivpn_packet.extend_from_slice(&tag);
                     aivpn_packet.extend_from_slice(&mdh);
                     aivpn_packet.extend_from_slice(&ciphertext);
-                    
+
                     // Send to client
                     if let Err(e) = socket.send_to(&aivpn_packet, client_addr).await {
                         debug!("TUN: send failed: {}", e);
@@ -955,11 +1316,14 @@ impl Gateway {
                                     size: aivpn_packet.len() as u16,
                                     iat_ms: downlink_iat_ms,
                                     entropy: Self::compute_entropy(&ciphertext) as f32,
-                                    header_prefix: aivpn_packet[TAG_SIZE..TAG_SIZE + 16.min(aivpn_packet.len() - TAG_SIZE)].to_vec(),
+                                    header_prefix: aivpn_packet[TAG_SIZE
+                                        ..TAG_SIZE + 16.min(aivpn_packet.len() - TAG_SIZE)]
+                                        .to_vec(),
                                     timestamp_ns: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_nanos() as u64,
+                                        .as_nanos()
+                                        as u64,
                                 };
                                 recorder.record_packet(session_id, meta);
                             }
@@ -973,25 +1337,25 @@ impl Gateway {
             }
         }
     }
-    
+
     /// Build ICMP Echo Reply from Echo Request
     fn build_icmp_echo_reply(request: &[u8], server_ip: &Ipv4Addr) -> Option<Vec<u8>> {
         if request.len() < 28 {
             return None;
         }
-        
+
         // Parse source IP
         let src_ip = Ipv4Addr::new(request[12], request[13], request[14], request[15]);
-        
+
         // Parse ICMP type and code
         let icmp_type = request[20];
         if icmp_type != 8 {
             return None; // Not echo request
         }
-        
+
         // Build reply: swap src/dst IP, change ICMP type to 0 (echo reply)
         let mut reply = Vec::with_capacity(request.len());
-        
+
         // IP header
         reply.push(0x45); // Version 4, IHL 5
         reply.push(0x00); // DSCP/ECN
@@ -1000,52 +1364,52 @@ impl Gateway {
         reply.extend_from_slice(&request[4..6]); // Identification
         reply.extend_from_slice(&request[6..8]); // Flags/Fragment
         reply.push(64); // TTL
-        reply.push(1);  // Protocol: ICMP
-        reply.push(0);  // Header checksum (will be computed by kernel)
+        reply.push(1); // Protocol: ICMP
+        reply.push(0); // Header checksum (will be computed by kernel)
         reply.push(0);
         reply.extend_from_slice(&server_ip.octets()); // Source IP (server)
-        reply.extend_from_slice(&src_ip.octets());    // Dest IP (client)
-        
+        reply.extend_from_slice(&src_ip.octets()); // Dest IP (client)
+
         // ICMP header
-        reply.push(0);  // Type: Echo Reply
+        reply.push(0); // Type: Echo Reply
         reply.push(request[21]); // Code
-        reply.push(0);  // Checksum placeholder
+        reply.push(0); // Checksum placeholder
         reply.push(0);
         reply.extend_from_slice(&request[24..28]); // ID + Sequence
-        reply.extend_from_slice(&request[28..]);   // Data
-        
+        reply.extend_from_slice(&request[28..]); // Data
+
         // Compute ICMP checksum
         let checksum = Self::compute_checksum(&reply[20..]);
         reply[22] = (checksum >> 8) as u8;
         reply[23] = (checksum & 0xFF) as u8;
-        
+
         Some(reply)
     }
-    
+
     /// Compute Internet checksum (RFC 1071)
     fn compute_checksum(data: &[u8]) -> u16 {
         let mut sum: u32 = 0;
         let mut i = 0;
-        
+
         // Process 16-bit words
         while i + 1 < data.len() {
             sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
             i += 2;
         }
-        
+
         // Add remaining byte
         if i < data.len() {
             sum += (data[i] as u32) << 8;
         }
-        
+
         // Fold 32-bit sum to 16 bits
         while (sum >> 16) != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
-        
+
         !sum as u16
     }
-    
+
     /// Dedicated TUN writer task — owns the DeviceWriter, no Mutex contention
     async fn tun_write_loop(mut writer: tun::DeviceWriter, mut rx: mpsc::Receiver<Vec<u8>>) {
         while let Some(packet) = rx.recv().await {
@@ -1056,7 +1420,7 @@ impl Gateway {
         }
         warn!("TUN write loop ended — channel closed");
     }
-    
+
     fn receive_worker_count() -> usize {
         std::thread::available_parallelism()
             .map(|count| count.get())
@@ -1064,7 +1428,12 @@ impl Gateway {
             .clamp(2, 16)
     }
 
-    fn worker_index_for_packet(&self, packet_data: &[u8], client_addr: SocketAddr, worker_count: usize) -> usize {
+    fn worker_index_for_packet(
+        &self,
+        packet_data: &[u8],
+        client_addr: SocketAddr,
+        worker_count: usize,
+    ) -> usize {
         if worker_count <= 1 {
             return 0;
         }
@@ -1081,9 +1450,7 @@ impl Gateway {
         }
 
         let key = match shard_addr.ip() {
-            IpAddr::V4(ip) => {
-                ((u32::from(ip) as u64) << 16) | shard_addr.port() as u64
-            }
+            IpAddr::V4(ip) => ((u32::from(ip) as u64) << 16) | shard_addr.port() as u64,
             IpAddr::V6(ip) => {
                 let octets = ip.octets();
                 u64::from_le_bytes(octets[..8].try_into().unwrap()) ^ shard_addr.port() as u64
@@ -1110,7 +1477,10 @@ impl Gateway {
             let gw = gateway.clone();
             tokio::spawn(async move {
                 while let Some(packet) = rx.recv().await {
-                    if let Err(e) = gw.handle_packet(&packet.packet_data, packet.client_addr).await {
+                    if let Err(e) = gw
+                        .handle_packet(&packet.packet_data, packet.client_addr)
+                        .await
+                    {
                         debug!(
                             "Worker {} packet error from {}: {}",
                             worker_id,
@@ -1122,14 +1492,17 @@ impl Gateway {
                 warn!("Receive worker {} ended — channel closed", worker_id);
             });
         }
-        
+
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, client_addr)) => {
                     // Per-IP rate limiting (fast, stays in recv task)
                     {
                         let now = Instant::now();
-                        let mut entry = gateway.rate_limits.entry(client_addr.ip()).or_insert((0, now));
+                        let mut entry = gateway
+                            .rate_limits
+                            .entry(client_addr.ip())
+                            .or_insert((0, now));
                         if entry.1.elapsed() > Duration::from_secs(1) {
                             entry.0 = 0;
                             entry.1 = now;
@@ -1139,13 +1512,19 @@ impl Gateway {
                             continue;
                         }
                     }
-                    
+
                     let packet_data = buf[..len].to_vec();
-                    let worker_idx = gateway.worker_index_for_packet(&packet_data, client_addr, worker_count);
-                    let packet = QueuedPacket { packet_data, client_addr };
+                    let worker_idx =
+                        gateway.worker_index_for_packet(&packet_data, client_addr, worker_count);
+                    let packet = QueuedPacket {
+                        packet_data,
+                        client_addr,
+                    };
 
                     if worker_txs[worker_idx].send(packet).await.is_err() {
-                        return Err(Error::Channel(format!("Receive worker {worker_idx} channel closed")));
+                        return Err(Error::Channel(format!(
+                            "Receive worker {worker_idx} channel closed"
+                        )));
                     }
                 }
                 Err(e) => {
@@ -1155,20 +1534,21 @@ impl Gateway {
             }
         }
     }
-    
+
     /// Main packet processing loop (legacy sequential — unused, kept for reference)
     #[allow(dead_code)]
     async fn process_packets(&self) -> Result<()> {
         let socket = self.udp_socket.as_ref().unwrap();
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
-        
+
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, client_addr)) => {
                     // Per-IP rate limiting.
                     {
                         let now = Instant::now();
-                        let mut entry = self.rate_limits.entry(client_addr.ip()).or_insert((0, now));
+                        let mut entry =
+                            self.rate_limits.entry(client_addr.ip()).or_insert((0, now));
                         if entry.1.elapsed() > Duration::from_secs(1) {
                             entry.0 = 0;
                             entry.1 = now;
@@ -1178,9 +1558,9 @@ impl Gateway {
                             continue;
                         }
                     }
-                    
+
                     let packet_data = &buf[..len];
-                    
+
                     // Process packet
                     if let Err(e) = self.handle_packet(packet_data, client_addr).await {
                         debug!("Packet error from {}: {}", hash_addr(&client_addr), e);
@@ -1194,22 +1574,25 @@ impl Gateway {
             }
         }
     }
-    
+
     /// Handle incoming packet
     async fn handle_packet(&self, packet_data: &[u8], client_addr: SocketAddr) -> Result<()> {
         // Minimum packet size check
         if packet_data.len() < TAG_SIZE + 2 {
             return Err(Error::InvalidPacket("Too short"));
         }
-        
+
         // Extract resonance tag
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&packet_data[0..TAG_SIZE]);
-        
+
         // Default layout from runtime primary mask (used for handshake fallback).
-        let (catalog_mdh_len, catalog_hs_mdh_len, _eph_offset, _eph_len) = self.mask_catalog.packet_layout();
+        let (catalog_mdh_len, catalog_hs_mdh_len, _eph_offset, _eph_len) =
+            self.mask_catalog.packet_layout();
         let mut is_new_session = false;
-        let (session, counter, is_ratcheted_tag) = if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
+        let (session, counter, is_ratcheted_tag) = if let Some(session) =
+            self.session_manager.get_session_by_tag(&tag)
+        {
             // Existing session — validate tag
             let (counter, is_ratcheted) = {
                 let sess = session.lock();
@@ -1217,21 +1600,66 @@ impl Gateway {
                     .ok_or(Error::InvalidPacket("Invalid tag"))?
             };
             (session, counter, is_ratcheted)
-        } else if let Some((session, counter, is_ratcheted)) = self.session_manager.refresh_and_find_by_tag(&tag) {
+        } else if let Some((session, counter, is_ratcheted)) =
+            self.session_manager.refresh_and_find_by_tag(&tag)
+        {
             // Tag not in map — time window may have advanced. Refresh all sessions and retry.
-            debug!("Tag matched after refresh (counter={}, ratcheted={})", counter, is_ratcheted);
+            debug!(
+                "Tag matched after refresh (counter={}, ratcheted={})",
+                counter, is_ratcheted
+            );
             (session, counter, is_ratcheted)
-        } else if let Some((session, counter, is_ratcheted)) = self.session_manager.recover_session_by_tag(&tag, &client_addr.ip()) {
+        } else if let Some((session, counter, is_ratcheted)) = self
+            .session_manager
+            .recover_session_by_tag(&tag, &client_addr.ip())
+        {
             // Counter drift recovery — client counter was out of range but session keys match
             (session, counter, is_ratcheted)
         } else {
             // NOTE: We intentionally do NOT drop packets from the same public IP
             // on a different port. Multiple clients behind the same NAT must be
             // able to handshake independently (different PSKs → different sessions).
-            //
-            // A valid new handshake for the same VPN IP will replace the old
-            // session below via cleanup_old_sessions_for_vpn_ip, allowing quick
-            // recovery after client reboots or NAT rebinds.
+            // Mobile carriers (MTS, etc.) change source ports on reconnect — we must
+            // not block new handshakes based on port mismatch with an existing session.
+            // The handshake_locks mutex below serializes concurrent handshakes from
+            // the same IP, preventing the duplicate-session race without blocking
+            // legitimate reconnects from a new port.
+
+            // Serialize concurrent handshakes from the same source IP.
+            // When a client reconnects rapidly, multiple shard workers may receive
+            // init packets on different source ports simultaneously and each enter
+            // this branch before any session is registered in tag_map. Without
+            // serialization both complete PSK-matching, create sessions for the same
+            // VPN IP, and the last cleanup_old_sessions_for_vpn_ip call removes the
+            // session the client already ratcheted to, causing aead::Error on all
+            // subsequent data packets. try_lock_owned is non-blocking: if another
+            // handshake is in progress for this IP we drop the packet silently;
+            // the client retransmits naturally and hits the existing-session path.
+            let _handshake_guard = {
+                let lock = {
+                    let entry = self
+                        .handshake_locks
+                        .entry(client_addr.ip())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+                    entry.value().clone()
+                };
+                match lock.try_lock_owned() {
+                    Ok(guard) => guard,
+                    Err(_) => return Ok(()),
+                }
+            };
+
+            // Guard against session pool exhaustion: the handshake path calls
+            // create_session() speculatively for every (client × bootstrap_mask)
+            // combination before tag validation confirms which one is correct.
+            // An attacker spoofing many source IPs can fill the pool with temporary
+            // sessions and block legitimate clients. Reserve 10 slots so ratchet
+            // renewals for existing sessions always have capacity.
+            if self.session_manager.session_count() + 10 >= MAX_SESSIONS {
+                debug!("Session pool near capacity ({}/{}), dropping unauthenticated handshake from {}",
+                    self.session_manager.session_count(), MAX_SESSIONS, hash_addr(&client_addr));
+                return Ok(());
+            }
 
             // No session found — try handshake
             // Rate-limit failed handshake attempts to prevent rapid session-creation loops.
@@ -1242,9 +1670,7 @@ impl Gateway {
                 if let Some(entry) = self.handshake_cooldowns.get(&ip) {
                     let (fail_count, last_fail) = *entry;
                     // Exponential cooldown: 2s → 4s → 8s → 16s (max)
-                    let cooldown = Duration::from_millis(
-                        (2000 * (1 << fail_count.min(3))) as u64
-                    );
+                    let cooldown = Duration::from_millis((2000 * (1 << fail_count.min(3))) as u64);
                     if last_fail.elapsed() < cooldown {
                         debug!("Handshake cooldown active for {}: fail_count={}, elapsed={:?}, cooldown={:?}",
                             hash_addr(&client_addr), fail_count, last_fail.elapsed(), cooldown);
@@ -1260,7 +1686,8 @@ impl Gateway {
             // DH + PSK to find one whose derived tags match.
             // Falls back to no-PSK for backward compatibility.
             let builtin_bootstrap_masks = aivpn_common::mask::preset_masks::all();
-            let (session, matched_client_id, bootstrap_mask) = if let Some(ref db) = self.client_db {
+            let (session, matched_client_id, bootstrap_mask) = if let Some(ref db) = self.client_db
+            {
                 let clients = db.list_clients();
                 let mut found = None;
                 'bootstrap: for client_cfg in &clients {
@@ -1269,14 +1696,20 @@ impl Gateway {
                     }
 
                     let psk = client_cfg.psk;
-                    let candidate_masks = self.bootstrap_descriptors.iter()
+                    let candidate_masks = self
+                        .bootstrap_descriptors
+                        .iter()
                         .flat_map(|descriptor| derive_bootstrap_candidates(descriptor, Some(&psk)))
                         .chain(builtin_bootstrap_masks.clone().into_iter())
                         .collect::<Vec<_>>();
 
                     for bootstrap_mask in candidate_masks {
-                        let (_, candidate_handshake_mdh_len, candidate_eph_offset, candidate_eph_len) =
-                            packet_layout_for_mask(&bootstrap_mask);
+                        let (
+                            _,
+                            candidate_handshake_mdh_len,
+                            candidate_eph_offset,
+                            candidate_eph_len,
+                        ) = packet_layout_for_mask(&bootstrap_mask);
                         if packet_data.len() < TAG_SIZE + candidate_handshake_mdh_len {
                             continue;
                         }
@@ -1286,8 +1719,13 @@ impl Gateway {
                         }
 
                         let mut eph_pub = [0u8; 32];
-                        eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + candidate_eph_len]);
-                        crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
+                        eph_pub.copy_from_slice(
+                            &packet_data[eph_start..eph_start + candidate_eph_len],
+                        );
+                        crypto::obfuscate_eph_pub(
+                            &mut eph_pub,
+                            &self.session_manager.server_public_key(),
+                        );
 
                         match self.session_manager.create_session(
                             client_addr,
@@ -1303,7 +1741,8 @@ impl Gateway {
                                         client_cfg.id,
                                         bootstrap_mask.mask_id
                                     );
-                                    found = Some((sess, Some(client_cfg.id.clone()), bootstrap_mask));
+                                    found =
+                                        Some((sess, Some(client_cfg.id.clone()), bootstrap_mask));
                                     break 'bootstrap;
                                 }
                                 let sid = sess.lock().session_id;
@@ -1321,24 +1760,27 @@ impl Gateway {
                     None => {
                         // Track failed handshake for cooldown
                         let ip = client_addr.ip();
-                        let fail_count = self.handshake_cooldowns
-                            .get(&ip)
-                            .map(|e| e.0)
-                            .unwrap_or(0);
-                        self.handshake_cooldowns.insert(ip, (fail_count + 1, Instant::now()));
+                        let fail_count =
+                            self.handshake_cooldowns.get(&ip).map(|e| e.0).unwrap_or(0);
+                        self.handshake_cooldowns
+                            .insert(ip, (fail_count + 1, Instant::now()));
                         warn!(
                             "Handshake failed for {} (attempt #{}) — tag mismatch for all {} registered clients",
                             hash_addr(&client_addr),
                             fail_count + 1,
                             clients.len()
                         );
-                        return Err(Error::InvalidPacket("No registered client matches this handshake"));
+                        return Err(Error::InvalidPacket(
+                            "No registered client matches this handshake",
+                        ));
                     }
                 }
             } else {
                 // No client DB — legacy mode without PSK
                 let mut found = None;
-                let candidate_masks = self.bootstrap_descriptors.iter()
+                let candidate_masks = self
+                    .bootstrap_descriptors
+                    .iter()
                     .flat_map(|descriptor| derive_bootstrap_candidates(descriptor, None))
                     .chain(builtin_bootstrap_masks.clone().into_iter())
                     .collect::<Vec<_>>();
@@ -1355,14 +1797,14 @@ impl Gateway {
 
                     let mut eph_pub = [0u8; 32];
                     eph_pub.copy_from_slice(&packet_data[eph_start..eph_start + candidate_eph_len]);
-                    crypto::obfuscate_eph_pub(&mut eph_pub, &self.session_manager.server_public_key());
+                    crypto::obfuscate_eph_pub(
+                        &mut eph_pub,
+                        &self.session_manager.server_public_key(),
+                    );
 
-                    let sess = self.session_manager.create_session(
-                        client_addr,
-                        eph_pub,
-                        None,
-                        None,
-                    )?;
+                    let sess =
+                        self.session_manager
+                            .create_session(client_addr, eph_pub, None, None)?;
                     let validation = sess.lock().validate_tag(&tag);
                     if validation.is_some() {
                         found = Some((sess, None, bootstrap_mask));
@@ -1372,9 +1814,11 @@ impl Gateway {
                     self.session_manager.rollback_failed_session(&sid);
                 }
 
-                found.ok_or_else(|| Error::InvalidPacket("No bootstrap mask matched this handshake"))?
+                found.ok_or_else(|| {
+                    Error::InvalidPacket("No bootstrap mask matched this handshake")
+                })?
             };
-            
+
             // Validate the tag against the session.
             let validation = {
                 let sess = session.lock();
@@ -1388,7 +1832,7 @@ impl Gateway {
                     return Err(Error::InvalidPacket("Tag mismatch on new session"));
                 }
             };
-            
+
             // Tag is valid — this is a real handshake.
             // Clean up old sessions for the SAME CLIENT (by VPN IP), not
             // all sessions from this source IP — different clients behind
@@ -1399,10 +1843,9 @@ impl Gateway {
                     (sess_lock.session_id, sess_lock.vpn_ip)
                 };
                 if let Some(vpn_ip) = vpn_ip {
-                    let removed = self.session_manager.cleanup_old_sessions_for_vpn_ip(
-                        &vpn_ip,
-                        &session_id,
-                    );
+                    let removed = self
+                        .session_manager
+                        .cleanup_old_sessions_for_vpn_ip(&vpn_ip, &session_id);
                     // Stop active recordings for removed stale sessions
                     if let Some(ref recorder) = self.recording_manager {
                         let socket = self.udp_socket.as_ref().unwrap().clone();
@@ -1410,12 +1853,20 @@ impl Gateway {
                         let mdh = self.mask_catalog.packet_mdh_bytes();
                         for sid in removed {
                             let outcome = recorder.stop_for_session_end(sid);
-                            Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, None).await;
+                            Self::handle_recording_outcome(
+                                &socket,
+                                &self.session_manager,
+                                &store,
+                                &mdh,
+                                outcome,
+                                None,
+                            )
+                            .await;
                         }
                     }
                 }
             }
-            
+
             // Successful handshake — clear cooldown for this IP
             self.handshake_cooldowns.remove(&client_addr.ip());
 
@@ -1431,15 +1882,48 @@ impl Gateway {
                 session.lock().client_id = Some(cid.clone());
                 debug!("Client '{}' authenticated via PSK", cid);
             }
-            
+
+            // Clean up any stale sessions for the same authenticated client
+            // (handles WiFi→cellular reconnect where source IP changes but PSK is the same).
+            if let Some(ref cid) = matched_client_id {
+                let session_id = session.lock().session_id;
+                let removed_cid = self
+                    .session_manager
+                    .cleanup_old_sessions_for_client_id(cid, &session_id);
+                if let Some(ref recorder) = self.recording_manager {
+                    let socket = self.udp_socket.as_ref().unwrap().clone();
+                    let store = recorder.store();
+                    let mdh = self.mask_catalog.packet_mdh_bytes();
+                    for sid in removed_cid {
+                        let outcome = recorder.stop_for_session_end(sid);
+                        Self::handle_recording_outcome(
+                            &socket,
+                            &self.session_manager,
+                            &store,
+                            &mdh,
+                            outcome,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             self.send_server_hello(&session, client_addr).await?;
             self.send_bootstrap_descriptors(&session).await?;
 
             if let Some(runtime_mask) = self.mask_catalog.primary_mask() {
                 if runtime_mask.mask_id != bootstrap_mask.mask_id {
-                    match self.session_manager.build_mask_update_packet(&session, &runtime_mask) {
+                    match self
+                        .session_manager
+                        .build_mask_update_packet(&session, &runtime_mask)
+                    {
                         Ok(packet) => {
-                            self.udp_socket.as_ref().unwrap().send_to(&packet, client_addr).await?;
+                            self.udp_socket
+                                .as_ref()
+                                .unwrap()
+                                .send_to(&packet, client_addr)
+                                .await?;
                             // NOTE: Do NOT call update_session_mask here.
                             // The client still sends packets with bootstrap mask layout
                             // until it processes MaskUpdate. Keep sess.mask = bootstrap
@@ -1452,15 +1936,24 @@ impl Gateway {
                     }
                 }
             }
-            
+
             // NOTE: PFS ratchet is deferred until AFTER decrypting the init packet,
             // which was encrypted with pre-ratchet keys.
-            
+
             is_new_session = true;
-            debug!("New session from {} (ServerHello sent)", hash_addr(&client_addr));
+            // When mTLS is required, block Data until the client sends a valid ClientCert.
+            // SAFETY: process_inner_payload is skipped for is_new_session packets (see below),
+            // so mtls_ok=false is guaranteed to be visible before any Data is processed.
+            if self.config.mtls.as_ref().map_or(false, |c| c.required) {
+                session.lock().mtls_ok = false;
+            }
+            debug!(
+                "New session from {} (ServerHello sent)",
+                hash_addr(&client_addr)
+            );
             (session, counter, is_ratcheted)
         };
-        
+
         // Parse packet — pad_len is inside encrypted area (CRIT-5 fix).
         // Use the session's own mask layout for decryption. This is critical
         // because the client may still be using its bootstrap mask before
@@ -1512,7 +2005,9 @@ impl Gateway {
             let key = if is_new_session {
                 &sess.keys.session_key
             } else if is_ratcheted_tag {
-                &sess.ratcheted_keys.as_ref()
+                &sess
+                    .ratcheted_keys
+                    .as_ref()
                     .ok_or(Error::InvalidPacket("Ratcheted keys missing"))?
                     .session_key
             } else {
@@ -1537,11 +2032,13 @@ impl Gateway {
 
             match decrypted {
                 Some(result) => result,
-                None => return Err(last_error.unwrap_or_else(|| Error::InvalidPacket("Invalid length"))),
+                None => {
+                    return Err(last_error.unwrap_or_else(|| Error::InvalidPacket("Invalid length")))
+                }
             }
         };
         let encrypted_payload = &packet_data[payload_offset..];
-        
+
         // Complete PFS ratchet only when the CLIENT proves it has ratcheted
         // by sending a packet with ratcheted-key tags.
         // Do NOT ratchet on is_new_session — the client hasn't received
@@ -1549,12 +2046,26 @@ impl Gateway {
         if is_ratcheted_tag {
             let session_id = session.lock().session_id;
             self.session_manager.complete_session_ratchet(&session_id);
-            self.session_manager.refresh_session_tags(&session_id);
             let sess = session.lock();
-            info!("PFS ratchet complete for {} — send_counter={}, counter={}", 
-                hash_addr(&client_addr), sess.send_counter, sess.counter);
+            info!(
+                "PFS ratchet complete for {} — send_counter={}, counter={}",
+                hash_addr(&client_addr),
+                sess.send_counter,
+                sess.counter
+            );
+            // Install session into kernel accelerator now that keys are stable.
+            if let Some(ref ka) = self.kernel_accel {
+                let add = make_kernel_session_add(&sess);
+                if let Err(e) = ka.session_add(&add) {
+                    warn!("kernel session_add failed: {e}");
+                }
+                let upd = make_kernel_update_tags(&sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags failed: {e}");
+                }
+            }
         }
-        
+
         // Extract pad_len from inside decrypted data and strip padding
         if padded_plaintext.len() < 2 {
             return Err(Error::InvalidPacket("Decrypted payload too short"));
@@ -1564,20 +2075,28 @@ impl Gateway {
             return Err(Error::InvalidPacket("Invalid padding length"));
         }
         let plaintext = &padded_plaintext[2..padded_plaintext.len() - pad_len];
-        
+
         // Update session state. Avoid expensive O(window) tag-map rebuild on every packet.
         let mut client_db_flush: Option<(String, u64, u64)> = None;
         let (session_id, refresh_tags) = {
             let mut sess = session.lock();
             sess.mark_tag_received(counter);
+            // C-S-2: if this packet matched a pre-ratchet (old-key) tag, mark
+            // it in the pre_ratchet_bitmap to prevent replay within the grace window.
+            if sess.is_pre_ratchet_counter(counter) {
+                sess.mark_pre_ratchet_received(counter);
+            }
             sess.last_seen = std::time::Instant::now();
 
             // IP migration: update stored client address when a validated packet
             // arrives from a different endpoint (e.g. WiFi → cellular switchover).
             // Safe because the packet passed full cryptographic validation.
             if !is_new_session && sess.client_addr != client_addr {
-                info!("Client endpoint migrated: {} → {} (session keepalive active)",
-                    hash_addr(&sess.client_addr), hash_addr(&client_addr));
+                info!(
+                    "Client endpoint migrated: {} → {} (session keepalive active)",
+                    hash_addr(&sess.client_addr),
+                    hash_addr(&client_addr)
+                );
                 sess.client_addr = client_addr;
             }
 
@@ -1590,7 +2109,12 @@ impl Gateway {
             }
 
             // Batch client stats updates to avoid taking a global write lock per packet.
-            sess.pending_bytes_in = sess.pending_bytes_in.saturating_add(packet_data.len() as u64);
+            sess.pending_bytes_in = sess
+                .pending_bytes_in
+                .saturating_add(packet_data.len() as u64);
+            sess.bytes_since_rekey = sess
+                .bytes_since_rekey
+                .saturating_add(packet_data.len() as u64);
             if sess.pending_bytes_in >= 16 * 1024 || sess.pending_bytes_out >= 16 * 1024 {
                 if let Some(cid) = sess.client_id.clone() {
                     client_db_flush = Some((cid, sess.pending_bytes_in, sess.pending_bytes_out));
@@ -1602,12 +2126,20 @@ impl Gateway {
             sess.update_fsm();
             (sess.session_id, refresh_tags)
         };
-        
+
         // Refresh tag_map only when the precomputed window moves.
         if refresh_tags {
             self.session_manager.refresh_session_tags(&session_id);
+            if let Some(ref ka) = self.kernel_accel {
+                let sess = session.lock();
+                let upd = make_kernel_update_tags(&sess);
+                drop(sess);
+                if let Err(e) = ka.session_update_tags(&upd) {
+                    warn!("kernel session_update_tags (refresh) failed: {e}");
+                }
+            }
         }
-        
+
         // Record traffic stats for neural resonance (Patent 1)
         if self.config.enable_neural {
             let packet_size = packet_data.len() as u16;
@@ -1622,9 +2154,10 @@ impl Gateway {
             // Neural model update is expensive under lock. Sampling every 16th packet
             // preserves trends while reducing lock contention in the receive hot path.
             if counter & 0x0f == 0 {
-                self.neural_module.lock().record_traffic(
-                    session_id, packet_size, iat_ms, entropy,
-                );
+                self.neural_module
+                    .lock()
+                    // is_rx=true: packet from client → server (uplink direction)
+                    .record_traffic(session_id, packet_size, iat_ms, entropy, true);
             }
             self.metrics.record_packet_received(packet_data.len());
         }
@@ -1642,7 +2175,9 @@ impl Gateway {
                     size: packet_data.len() as u16,
                     iat_ms,
                     entropy: Self::compute_entropy(encrypted_payload) as f32,
-                    header_prefix: packet_data[TAG_SIZE..TAG_SIZE + 16.min(packet_data.len() - TAG_SIZE)].to_vec(),
+                    header_prefix: packet_data
+                        [TAG_SIZE..TAG_SIZE + 16.min(packet_data.len() - TAG_SIZE)]
+                        .to_vec(),
                     timestamp_ns: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1651,28 +2186,30 @@ impl Gateway {
                 recorder.record_packet(session_id, meta);
             }
         }
-        
+
         // Record traffic in client DB in batches (see pending_bytes_in/out above).
-        if let (Some(ref db), Some((cid, bytes_in, bytes_out))) = (&self.client_db, client_db_flush) {
+        if let (Some(ref db), Some((cid, bytes_in, bytes_out))) = (&self.client_db, client_db_flush)
+        {
             db.record_traffic(&cid, bytes_in, bytes_out);
         }
-        
+
         // Process inner payload (skip for new sessions — ServerHello is already the response,
         // and any ControlAck sent here would use pre-ratchet keys that the client can't validate)
         if !is_new_session {
-            self.process_inner_payload(plaintext, &session, client_addr).await?;
+            self.process_inner_payload(plaintext, &session, client_addr)
+                .await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Compute nonce from counter
     fn compute_nonce(&self, counter: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = [0u8; NONCE_SIZE];
         nonce[0..8].copy_from_slice(&counter.to_le_bytes());
         nonce
     }
-    
+
     /// Process decrypted inner payload
     async fn process_inner_payload(
         &self,
@@ -1683,16 +2220,88 @@ impl Gateway {
         if plaintext.len() < 4 {
             return Err(Error::InvalidPacket("Inner payload too short"));
         }
-        
+
         let inner_header = InnerHeader::decode(plaintext)?;
         let payload = &plaintext[4..];
-        
+
         match inner_header.inner_type {
             InnerType::Data => {
+                // mTLS gate: drop Data packets until cert is verified (when required).
+                if !session.lock().mtls_ok {
+                    warn!(
+                        "mtls: Data from {} rejected — certificate not yet verified",
+                        hash_addr(&client_addr)
+                    );
+                    return Ok(());
+                }
+
+                // Anti-spoof + peer routing gate (authoritative, at ingress).
+                // Only IPv4 is routed through the VPN; reject everything else to
+                // prevent clients from injecting arbitrary layer-3 traffic that
+                // bypasses the source-address check.
+                if payload.len() < 20 || (payload[0] >> 4) != 4 {
+                    debug!(
+                        "Anti-spoof: dropping non-IPv4 payload (len={} ver={})",
+                        payload.len(),
+                        payload.first().map(|b| b >> 4).unwrap_or(0)
+                    );
+                    return Ok(());
+                }
+                {
+                    let inner_src =
+                        std::net::Ipv4Addr::new(payload[12], payload[13], payload[14], payload[15]);
+                    let inner_dst =
+                        std::net::Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
+                    let session_vpn_ip = session.lock().vpn_ip;
+                    if let Some(svpn) = session_vpn_ip {
+                        if inner_src != svpn {
+                            warn!(
+                                "Anti-spoof: dropping packet src={} from session owning vpn_ip={}",
+                                inner_src, svpn
+                            );
+                            return Ok(());
+                        }
+                    }
+                    // Block intra-VPN routing at ingress when not opted in.
+                    if !self.config.allow_peer_routing
+                        && self
+                            .session_manager
+                            .get_session_by_vpn_ip(&inner_dst)
+                            .is_some()
+                    {
+                        debug!(
+                            "Peer routing disabled — dropping {}->{} at ingress",
+                            inner_src, inner_dst
+                        );
+                        return Ok(());
+                    }
+                }
+
                 // Forward to NAT/internet via TUN write channel (lock-free)
-                debug!("DATA packet from {} ({} bytes)", hash_addr(&client_addr), payload.len());
-                
-                if let Some(ref tx) = self.tun_write_tx {
+                debug!(
+                    "DATA packet from {} ({} bytes)",
+                    hash_addr(&client_addr),
+                    payload.len()
+                );
+
+                // QoS: enforce upstream rate limit before forwarding to TUN
+                let upstream_cid = session.lock().client_id.clone();
+                if let Some(ref c) = upstream_cid {
+                    if !self.qos_enforcer.check_upstream(c, payload.len() as u64) {
+                        debug!("QoS: upstream rate limited, dropping packet for {}", c);
+                        return Ok(());
+                    }
+                }
+
+                // Site peers send subnet traffic — never relay to the exit node.
+                let use_chain_forward =
+                    self.chain_forwarder.is_some() && !session.lock().is_site_peer;
+                if use_chain_forward {
+                    if let Some(ref cf) = self.chain_forwarder {
+                        // Multi-hop: relay to exit node instead of local NAT
+                        cf.forward(payload.to_vec()).await;
+                    }
+                } else if let Some(ref tx) = self.tun_write_tx {
                     if tx.send(payload.to_vec()).await.is_err() {
                         debug!("TUN write channel closed, dropping packet");
                     }
@@ -1701,9 +2310,27 @@ impl Gateway {
                 } else {
                     debug!("NAT disabled, dropping packet");
                 }
+
+                // Accumulate payload into FEC XOR buffer for server-side recovery.
+                // When FecRepair arrives we can reconstruct exactly one missing packet.
+                {
+                    let mut sess = session.lock();
+                    let len = payload.len().min(1500);
+                    if sess.fec_xor_buf.len() < len {
+                        sess.fec_xor_buf.resize(len, 0);
+                    }
+                    for (a, b) in sess.fec_xor_buf[..len].iter_mut().zip(&payload[..len]) {
+                        *a ^= b;
+                    }
+                    if len > sess.fec_xor_len {
+                        sess.fec_xor_len = len;
+                    }
+                    sess.fec_recv_count = sess.fec_recv_count.saturating_add(1);
+                }
             }
             InnerType::Control => {
-                self.handle_control_message(payload, session, client_addr).await?;
+                self.handle_control_message(payload, session, client_addr)
+                    .await?;
             }
             InnerType::Fragment => {
                 // TODO: Implement fragmentation
@@ -1713,11 +2340,66 @@ impl Gateway {
                 // Handle ACK
                 debug!("ACK packet received");
             }
+            InnerType::FecRepair => {
+                if let Some(repair) = FecRepair::decode(payload) {
+                    if repair.group_size > 0 {
+                        let recovered_opt = {
+                            let mut sess = session.lock();
+                            let recv = sess.fec_recv_count;
+                            let seq_ok = repair.group_seq == sess.fec_pending_seq;
+                            // Recover only when group_seq matches (XOR buffer is for this
+                            // exact group) and exactly one packet is missing.
+                            let result = if seq_ok && recv == repair.group_size.saturating_sub(1) {
+                                let xor_len = sess.fec_xor_len.max(repair.xor_data.len());
+                                let mut out = vec![0u8; xor_len];
+                                for i in 0..xor_len {
+                                    out[i] = repair.xor_data.get(i).copied().unwrap_or(0)
+                                        ^ sess.fec_xor_buf.get(i).copied().unwrap_or(0);
+                                }
+                                debug!(
+                                    "FEC: recovered {} bytes from {} (group seq={} size={})",
+                                    out.len(),
+                                    hash_addr(&client_addr),
+                                    repair.group_seq,
+                                    repair.group_size
+                                );
+                                Some(out)
+                            } else {
+                                debug!(
+                                    "FEC: group seq={} size={} recv={} seq_ok={} — no recovery",
+                                    repair.group_seq, repair.group_size, recv, seq_ok
+                                );
+                                None
+                            };
+                            // Reset accumulator; advance expected seq to the next group.
+                            sess.fec_recv_count = 0;
+                            sess.fec_xor_buf.iter_mut().for_each(|b| *b = 0);
+                            sess.fec_xor_len = 0;
+                            sess.fec_pending_seq = repair.group_seq.wrapping_add(1);
+                            result
+                        };
+
+                        if let Some(recovered) = recovered_opt {
+                            let use_chain =
+                                self.chain_forwarder.is_some() && !session.lock().is_site_peer;
+                            if use_chain {
+                                if let Some(ref cf) = self.chain_forwarder {
+                                    cf.forward(recovered).await;
+                                }
+                            } else if let Some(ref tx) = self.tun_write_tx {
+                                let _ = tx.send(recovered).await;
+                            } else if let Some(ref nat) = self.nat_forwarder {
+                                nat.forward_packet(&recovered).await?;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle control message
     async fn handle_control_message(
         &self,
@@ -1726,16 +2408,32 @@ impl Gateway {
         client_addr: SocketAddr,
     ) -> Result<()> {
         let control = ControlPayload::decode(payload)?;
-        
+
         match control {
-            ControlPayload::KeyRotate { new_eph_pub: _ } => {
-                info!("Key rotation request from {}", hash_addr(&client_addr));
-                // TODO: Implement key rotation
+            ControlPayload::KeyRotate { new_eph_pub } => {
+                let (session_id, has_pending) = {
+                    let sess = session.lock();
+                    (sess.session_id, sess.pending_rekey_keypair.is_some())
+                };
+                if has_pending {
+                    info!(
+                        "Inline rekey response from {} — committing new keys",
+                        hash_addr(&client_addr)
+                    );
+                    self.session_manager
+                        .commit_session_rekey(&session_id, &new_eph_pub);
+                    // refresh_session_tags is redundant — commit_session_rekey already updates tag_map
+                } else {
+                    debug!(
+                        "KeyRotate from {} ignored — no pending rekey",
+                        hash_addr(&client_addr)
+                    );
+                }
             }
             ControlPayload::MaskUpdate { .. } => {
                 warn!("Unexpected MASK_UPDATE from client");
             }
-            ControlPayload::Keepalive => {
+            ControlPayload::Keepalive { send_ts } => {
                 debug!("Keepalive from {}", hash_addr(&client_addr));
                 if !session.lock().is_ratcheted {
                     // The client is still retrying the initial handshake. If the
@@ -1744,12 +2442,13 @@ impl Gateway {
                     self.send_server_hello(session, client_addr).await?;
                     return Ok(());
                 }
-                // Send ACK
-                let ack = ControlPayload::ControlAck {
-                    ack_seq: 0,
-                    ack_for_subtype: ControlSubtype::Keepalive as u8,
-                };
-                self.send_control_message(&ack, session).await?;
+                // Echo the client's own send_ts so it can measure RTT without
+                // clock-skew between client and server.
+                self.send_control_message(
+                    &ControlPayload::KeepaliveAck { echo_ts: send_ts },
+                    session,
+                )
+                .await?;
             }
             ControlPayload::TelemetryRequest { metric_flags: _ } => {
                 debug!("Telemetry request from {}", hash_addr(&client_addr));
@@ -1769,23 +2468,42 @@ impl Gateway {
                 debug!("Time sync request");
             }
             ControlPayload::Shutdown { reason } => {
-                info!("Shutdown request from {} (reason: {})", hash_addr(&client_addr), reason);
+                info!(
+                    "Shutdown request from {} (reason: {})",
+                    hash_addr(&client_addr),
+                    reason
+                );
                 // Close session and stop active recording if any
                 let session_id = session.lock().session_id;
                 self.session_manager.remove_session(&session_id);
+                self.neural_module.lock().cleanup_stats(session_id);
+                if let Some(ref ka) = self.kernel_accel {
+                    let _ = ka.session_remove(&session_id);
+                }
                 if let Some(ref recorder) = self.recording_manager {
                     let socket = self.udp_socket.as_ref().unwrap().clone();
                     let store = recorder.store();
                     let mdh = self.mask_catalog.packet_mdh_bytes();
                     let outcome = recorder.stop_for_session_end(session_id);
-                    Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, None).await;
+                    Self::handle_recording_outcome(
+                        &socket,
+                        &self.session_manager,
+                        &store,
+                        &mdh,
+                        outcome,
+                        None,
+                    )
+                    .await;
                 }
             }
             ControlPayload::ControlAck { .. } => {
                 // ACK received, nothing to do
             }
             ControlPayload::ServerHello { .. } => {
-                warn!("Unexpected ServerHello from client {}", hash_addr(&client_addr));
+                warn!(
+                    "Unexpected ServerHello from client {}",
+                    hash_addr(&client_addr)
+                );
             }
             ControlPayload::RecordingStart { service } => {
                 // Only allow from admin sessions (check client_id)
@@ -1794,7 +2512,10 @@ impl Gateway {
                     sess.client_id.clone()
                 };
                 if !self.can_start_recording(admin_key_id.as_deref()) {
-                    warn!("Recording rejected: unauthenticated client {}", hash_addr(&client_addr));
+                    warn!(
+                        "Recording rejected: unauthenticated client {}",
+                        hash_addr(&client_addr)
+                    );
                     let failed = ControlPayload::RecordingFailed {
                         reason: "Recording requires a recording-admin key".into(),
                     };
@@ -1803,16 +2524,32 @@ impl Gateway {
                 }
                 if let Some(ref recorder) = self.recording_manager {
                     let session_id = session.lock().session_id;
-                    recorder.start(session_id, service.clone(), admin_key_id.unwrap_or_else(|| "admin".into()));
+                    recorder.start(
+                        session_id,
+                        service.clone(),
+                        admin_key_id.unwrap_or_else(|| "admin".into()),
+                    );
                     let ack = ControlPayload::RecordingAck {
                         session_id,
                         status: "started".into(),
                     };
                     self.send_control_message(&ack, session).await?;
-                    info!("Recording started for '{}' from {}", service, hash_addr(&client_addr));
+                    info!(
+                        "Recording started for '{}' from {}",
+                        service,
+                        hash_addr(&client_addr)
+                    );
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "RecordingStart",
+                        &format!("service={} peer={}", service, hash_addr(&client_addr)),
+                        "ok",
+                    );
                 }
             }
-            ControlPayload::RecordingStop { session_id: rec_session_id } => {
+            ControlPayload::RecordingStop {
+                session_id: rec_session_id,
+            } => {
                 if let Some(ref recorder) = self.recording_manager {
                     let owner_session_id = session.lock().session_id;
                     if rec_session_id != owner_session_id {
@@ -1827,7 +2564,21 @@ impl Gateway {
                     let store = recorder.store();
                     let mdh = self.mask_catalog.packet_mdh_bytes();
                     let outcome = recorder.stop(owner_session_id);
-                    Self::handle_recording_outcome(&socket, &self.session_manager, &store, &mdh, outcome, Some(session.clone())).await;
+                    Self::handle_recording_outcome(
+                        &socket,
+                        &self.session_manager,
+                        &store,
+                        &mdh,
+                        outcome,
+                        Some(session.clone()),
+                    )
+                    .await;
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "RecordingStop",
+                        &hash_addr(&client_addr),
+                        "ok",
+                    );
                 }
             }
             ControlPayload::RecordingStatusRequest => {
@@ -1836,7 +2587,8 @@ impl Gateway {
                     sess.client_id.clone()
                 };
                 let can_record = self.can_start_recording(client_id.as_deref());
-                let active_service = self.recording_manager
+                let active_service = self
+                    .recording_manager
                     .as_ref()
                     .and_then(|recorder| recorder.status(&session.lock().session_id))
                     .map(|status| status.service);
@@ -1861,11 +2613,248 @@ impl Gateway {
             ControlPayload::BootstrapDescriptorUpdate { .. } => {
                 // Client-side only, ignore on server
             }
+            ControlPayload::PoolSync { clients_json } => {
+                // Only accept PoolSync from sessions registered as pool peers.
+                // A regular VPN client sending PoolSync would be able to inject
+                // or overwrite arbitrary client records in the database.
+                let is_pool = session.lock().is_pool_peer;
+                if !is_pool {
+                    warn!(
+                        "pool_sync: rejected from non-pool session {}",
+                        hash_addr(&client_addr)
+                    );
+                    self.audit_log.log(
+                        AuditActor::System,
+                        "PoolSync",
+                        &hash_addr(&client_addr),
+                        "rejected: not a pool peer",
+                    );
+                } else if let Some(ref db) = self.client_db {
+                    let json_str = String::from_utf8_lossy(&clients_json);
+                    match db.merge_from_json(&json_str) {
+                        Ok(n) => info!(
+                            "pool_sync: merged {} clients from peer {}",
+                            n,
+                            hash_addr(&client_addr)
+                        ),
+                        Err(e) => warn!(
+                            "pool_sync: merge failed from {}: {}",
+                            hash_addr(&client_addr),
+                            e
+                        ),
+                    }
+                }
+            }
+            ControlPayload::RouteSync { subnets_json } => {
+                if session.lock().is_site_peer {
+                    crate::site_sync::handle_route_sync(&subnets_json, &client_addr.to_string());
+                } else {
+                    warn!(
+                        "site_sync: RouteSync from non-peer session {} — dropping",
+                        hash_addr(&client_addr)
+                    );
+                }
+            }
+            ControlPayload::ChainForward { payload } => {
+                if self.config.exit_node_enabled {
+                    let ip_version = payload.first().map(|b| b >> 4);
+                    let min_len = match ip_version {
+                        Some(4) => 20,
+                        Some(6) => 40,
+                        _ => usize::MAX,
+                    };
+                    if payload.len() < min_len {
+                        warn!(
+                            "chain_forward: invalid IP payload from {} (version={:?} len={}) — dropping",
+                            hash_addr(&client_addr),
+                            ip_version,
+                            payload.len()
+                        );
+                    } else {
+                        // C-S-4: Validate that the injected packet's source IP
+                        // matches the session's assigned VPN IP to prevent
+                        // IP spoofing through the exit-node relay path.
+                        let src_ip_ok = {
+                            let sess = session.lock();
+                            match ip_version {
+                                Some(4) => {
+                                    if payload.len() >= 20 {
+                                        let src: [u8; 4] = payload[12..16].try_into().unwrap();
+                                        let pkt_src = std::net::Ipv4Addr::from(src);
+                                        sess.vpn_ip.map_or(false, |vpn| vpn == pkt_src)
+                                    } else {
+                                        false
+                                    }
+                                }
+                                // IPv6: no per-session IPv6 address assigned — reject
+                                _ => false,
+                            }
+                        };
+                        if !src_ip_ok {
+                            warn!(
+                                "chain_forward: source IP mismatch from {} — dropping",
+                                hash_addr(&client_addr)
+                            );
+                        } else if let Some(ref tx) = self.tun_write_tx {
+                            let _ = tx.send(payload).await;
+                        }
+                    }
+                } else {
+                    warn!(
+                        "chain_forward: ChainForward from {} rejected — exit_node_enabled is false",
+                        hash_addr(&client_addr)
+                    );
+                }
+            }
+            ControlPayload::ClientCert { cert_bytes } => {
+                if let Some(ref mtls_cfg) = self.config.mtls {
+                    let session_eph_pub = session.lock().eph_pub;
+                    let ok = crate::mtls::SimpleCert::from_bytes(&cert_bytes)
+                        .map(|c| {
+                            c.client_pub_key == session_eph_pub
+                                && crate::mtls::verify_cert(&c, mtls_cfg)
+                        })
+                        .unwrap_or(false);
+                    session.lock().mtls_ok = ok;
+                    if ok {
+                        debug!("mtls: client {} cert accepted", hash_addr(&client_addr));
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "ClientCert",
+                            &hash_addr(&client_addr),
+                            "accepted",
+                        );
+                    } else {
+                        warn!(
+                            "mtls: client {} cert rejected — Data will be dropped",
+                            hash_addr(&client_addr)
+                        );
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "ClientCert",
+                            &hash_addr(&client_addr),
+                            "rejected",
+                        );
+                        // Notify client so it can re-provision rather than inferring failure from Data drops.
+                        let _ = self
+                            .send_control_message(
+                                &aivpn_common::protocol::ControlPayload::CertRejected {},
+                                session,
+                            )
+                            .await;
+                    }
+                }
+            }
+            ControlPayload::CertRejected {} => {
+                // Server-to-client only; the server never receives this from clients.
+                debug!(
+                    "Unexpected CertRejected from client {}",
+                    hash_addr(&client_addr)
+                );
+            }
+            ControlPayload::DeviceEnrollment {
+                static_pub,
+                dh_proof,
+            } => {
+                let client_id = { session.lock().client_id.clone() };
+                if let (Some(ref db), Some(ref cid)) = (&self.client_db, &client_id) {
+                    // Verify DH proof: X25519(static_priv, server_static_pub) == dh_proof
+                    let server_kp =
+                        crypto::KeyPair::from_private_key(self.config.server_private_key);
+                    let expected_dh = match server_kp.compute_shared(&static_pub) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!(
+                                "DeviceEnrollment from {}: DH error: {}",
+                                hash_addr(&client_addr),
+                                e
+                            );
+                            return Ok(());
+                        }
+                    };
+                    use subtle::ConstantTimeEq;
+                    if expected_dh.ct_eq(&dh_proof).unwrap_u8() == 0 {
+                        warn!(
+                            "DeviceEnrollment from {}: invalid DH proof — rejecting",
+                            hash_addr(&client_addr)
+                        );
+                        self.audit_log.log(
+                            AuditActor::System,
+                            "device_enrollment_rejected",
+                            cid,
+                            "denied",
+                        );
+                        let shutdown = ControlPayload::Shutdown { reason: 3 };
+                        let _ = self.send_control_message(&shutdown, session).await;
+                        let session_id = session.lock().session_id;
+                        self.session_manager.remove_session(&session_id);
+                        return Ok(());
+                    }
+                    match db.enroll_device(cid, &static_pub) {
+                        Ok(true) => info!("Device enrolled and bound for client {}", cid),
+                        Ok(false) => debug!("Device binding verified for client {}", cid),
+                        Err(e) => {
+                            warn!("Device binding mismatch for {}: {}", cid, e);
+                            self.audit_log.log(
+                                AuditActor::System,
+                                "device_binding_mismatch",
+                                cid,
+                                "denied",
+                            );
+                            let shutdown = ControlPayload::Shutdown { reason: 4 };
+                            let _ = self.send_control_message(&shutdown, session).await;
+                            let session_id = session.lock().session_id;
+                            self.session_manager.remove_session(&session_id);
+                        }
+                    }
+                }
+            }
+            ControlPayload::KeepaliveAck { echo_ts } => {
+                debug!(
+                    "KeepaliveAck from {} echo_ts={}",
+                    hash_addr(&client_addr),
+                    echo_ts
+                );
+            }
+            ControlPayload::QualityReport {
+                quality,
+                rtt_ms,
+                loss_ppm,
+                jitter_ms,
+            } => {
+                info!(
+                    "QualityReport from {}: quality={} rtt={}ms loss={}ppm jitter={}ms",
+                    hash_addr(&client_addr),
+                    quality,
+                    rtt_ms,
+                    loss_ppm,
+                    jitter_ms
+                );
+                // Persist quality score on the session for monitoring/metrics.
+                session.lock().client_quality = quality;
+                // Push adaptive hint back so client adjusts keepalive + FEC immediately.
+                let level = aivpn_common::quality::AdaptiveLevel::suggest(quality);
+                if let Err(e) = self
+                    .send_control_message(
+                        &ControlPayload::AdaptiveHint { level: level as u8 },
+                        session,
+                    )
+                    .await
+                {
+                    debug!("AdaptiveHint send failed: {}", e);
+                }
+            }
+            ControlPayload::AdaptiveHint { .. } => {
+                debug!(
+                    "AdaptiveHint from client {} ignored",
+                    hash_addr(&client_addr)
+                );
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Send control message to client
     async fn send_control_message(
         &self,
@@ -1881,12 +2870,7 @@ impl Gateway {
                 .map(packet_mdh_bytes_for_mask)
                 .unwrap_or_else(|| self.mask_catalog.packet_mdh_bytes())
         };
-        Self::send_control_message_via(
-            socket,
-            &mdh,
-            payload,
-            session,
-        ).await
+        Self::send_control_message_via(socket, &mdh, payload, session).await
     }
 
     async fn send_control_message_via(
@@ -1970,7 +2954,7 @@ impl Gateway {
         debug!("ServerHello sent: {} bytes to {}", sent, client_addr);
         Ok(())
     }
-    
+
     /// Build AIVPN packet
     /// Wire format: TAG | MDH | encrypt(pad_len_u16 || plaintext || random_padding)
     fn build_packet(
@@ -1979,10 +2963,10 @@ impl Gateway {
         session: &Arc<parking_lot::Mutex<Session>>,
     ) -> Result<Vec<u8>> {
         let mut sess = session.lock();
-        
+
         // Use unified counter for both nonce and tag
         let (nonce, counter) = sess.next_send_nonce();
-        
+
         // Build padded plaintext: pad_len(u16) || plaintext || random_padding
         // pad_len is inside encryption — invisible to DPI (CRIT-5 fix)
         let pad_len = 16u16;
@@ -1994,19 +2978,15 @@ impl Gateway {
         for _ in 0..pad_len {
             padded.push(rng.gen::<u8>());
         }
-        
+
         let ciphertext = encrypt_payload(&sess.keys.session_key, &nonce, &padded)?;
-        
+
         // Generate tag
         let time_window = crypto::compute_time_window(
             crypto::current_timestamp_ms(),
             aivpn_common::crypto::DEFAULT_WINDOW_MS,
         );
-        let tag = crypto::generate_resonance_tag(
-            &sess.keys.tag_secret,
-            counter,
-            time_window,
-        );
+        let tag = crypto::generate_resonance_tag(&sess.keys.tag_secret, counter, time_window);
         let current_mask = sess.mask.clone();
         drop(sess);
 
@@ -2016,16 +2996,16 @@ impl Gateway {
             .as_ref()
             .map(packet_mdh_bytes_for_mask)
             .unwrap_or_else(|| self.mask_catalog.packet_mdh_bytes());
-        
+
         // Assemble packet: TAG | MDH | ciphertext (no cleartext padding)
         let mut packet = Vec::with_capacity(TAG_SIZE + mdh.len() + ciphertext.len());
         packet.extend_from_slice(&tag);
         packet.extend_from_slice(&mdh);
         packet.extend_from_slice(&ciphertext);
-        
+
         Ok(packet)
     }
-    
+
     /// Compute Shannon entropy of a byte slice (0.0 = uniform, 8.0 = max)
     fn compute_entropy(data: &[u8]) -> f64 {
         if data.is_empty() {
@@ -2045,16 +3025,61 @@ impl Gateway {
         }
         entropy
     }
-    
+
     /// Get mask catalog reference
     pub fn mask_catalog(&self) -> &Arc<MaskCatalog> {
         &self.mask_catalog
     }
-    
+
     /// Get metrics reference
     pub fn metrics(&self) -> &Arc<MetricsCollector> {
         &self.metrics
     }
+}
+
+fn make_kernel_session_add(sess: &crate::session::Session) -> SessionAdd {
+    let client_ip = match sess.client_addr.ip() {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    };
+    let mut ca = [0u8; 28];
+    match sess.client_addr {
+        SocketAddr::V4(ref v4) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v4.port().to_be_bytes());
+            ca[4..8].copy_from_slice(&v4.ip().octets());
+        }
+        SocketAddr::V6(ref v6) => {
+            ca[0..2].copy_from_slice(&(libc::AF_INET6 as u16).to_ne_bytes());
+            ca[2..4].copy_from_slice(&v6.port().to_be_bytes());
+            ca[8..24].copy_from_slice(&v6.ip().octets());
+        }
+    }
+    SessionAdd {
+        session_id: sess.session_id,
+        session_key: sess.keys.session_key,
+        tag_secret: sess.keys.tag_secret,
+        nonce_suffix: sess.keys.prng_seed[..4].try_into().unwrap_or([0u8; 4]),
+        _reserved: [0u8; 28],
+        counter_base: sess.counter,
+        client_ip,
+        client_addr: ca,
+        window_ms: DEFAULT_WINDOW_MS,
+    }
+}
+
+fn make_kernel_update_tags(sess: &crate::session::Session) -> UpdateTagsPayload {
+    // Safety: UpdateTagsPayload is a plain C struct of integers and byte arrays;
+    // zeroed is valid for all fields.
+    let mut payload: UpdateTagsPayload = unsafe { std::mem::zeroed() };
+    payload.session_id = sess.session_id;
+    let mut count = 0usize;
+    for (&counter, tag) in sess.expected_tags.iter().take(256) {
+        payload.entries[count] = TagWindowEntry { tag: *tag, counter };
+        count += 1;
+    }
+    payload.count = count as u32;
+    payload
 }
 
 #[cfg(test)]
@@ -2086,8 +3111,14 @@ mod tests {
         let eph_start = TAG_SIZE + eph_offset;
         let payload_start = TAG_SIZE + handshake_mdh_len;
 
-        assert_eq!(packet_mdh_len, 20, "regular STUN packet MDH length must stay at 20 bytes");
-        assert_eq!(handshake_mdh_len, 52, "handshake MDH length must include embedded eph_pub");
+        assert_eq!(
+            packet_mdh_len, 20,
+            "regular STUN packet MDH length must stay at 20 bytes"
+        );
+        assert_eq!(
+            handshake_mdh_len, 52,
+            "handshake MDH length must include embedded eph_pub"
+        );
         assert_eq!(&packet[eph_start..eph_start + eph_len], &expected_eph);
         assert_eq!(&packet[payload_start..], &[0xabu8; 24]);
     }

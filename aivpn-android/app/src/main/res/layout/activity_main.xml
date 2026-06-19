@@ -56,6 +56,16 @@
                 android:textColor="@color/text_secondary"
                 app:cornerRadius="20dp"
                 app:strokeColor="@color/grey" />
+
+            <ImageButton
+                android:id="@+id/btnOptions"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="4dp"
+                android:src="@android:drawable/ic_menu_more"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/options"
+                android:tint="@color/text_secondary" />
         </LinearLayout>
 
         <!-- Status card -->
@@ -288,7 +298,6 @@
                         android:layout_height="wrap_content"
                         android:inputType="text"
                         android:textColor="@color/text_primary"
-                        android:hint="@string/hint_connection_key_example"
                         android:singleLine="true" />
                 </com.google.android.material.textfield.TextInputLayout>
             </LinearLayout>
@@ -340,9 +349,9 @@
             android:layout_weight="1" />
 
         <TextView
+            android:id="@+id/versionFooter"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/version_footer"
             android:textSize="12sp"
             android:textColor="@color/text_secondary"
             android:layout_marginTop="24dp"

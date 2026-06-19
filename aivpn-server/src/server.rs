@@ -1,20 +1,22 @@
 //! AIVPN Server
-//! 
+//!
 //! Main server entry point
+
+use std::sync::Arc;
 
 use tracing_subscriber::{self, EnvFilter};
 
 use clap::Parser;
 
-use aivpn_common::error::Result;
 use crate::gateway::{Gateway, GatewayConfig};
+use aivpn_common::error::Result;
 
 /// AIVPN Server - Censorship-resistant VPN gateway
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct ServerArgs {
-    /// Listen address
-    #[arg(short, long, default_value = "0.0.0.0:443")]
+    /// Listen address (host:port). Overridden by listen_addr in server.json. Default: 0.0.0.0:443.
+    #[arg(short, long, default_value = "0.0.0.0:443", env = "AIVPN_LISTEN")]
     pub listen: String,
 
     /// TUN device name (random if not specified — avoids fingerprinting)
@@ -53,6 +55,17 @@ pub struct ServerArgs {
     #[arg(long)]
     pub generate_key: bool,
 
+    /// Add a new one-time enrollment client (0.9.0+).
+    /// The first device to connect will have its static X25519 key bound automatically.
+    /// Subsequent connects require the same device key.
+    #[arg(long, value_name = "NAME")]
+    pub add_client_one_time: Option<String>,
+
+    /// Reset device binding for a client by name or ID (0.9.0+).
+    /// Clears the bound device key and re-enables one-time enrollment.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub reset_device: Option<String>,
+
     /// Public IP of this server (embedded into connection keys).
     /// Required when using --add-client or --show-client to generate connection keys.
     #[arg(long, env = "AIVPN_SERVER_IP")]
@@ -73,6 +86,88 @@ pub struct ServerArgs {
     #[cfg(all(feature = "management-api", unix))]
     #[arg(long, env = "AIVPN_MANAGEMENT_SOCKET")]
     pub management_socket: Option<String>,
+
+    /// Validate a mask JSON file and print a quality report.
+    /// Exits 0 on pass, 1 on structural errors.
+    #[arg(long, value_name = "PATH")]
+    pub validate_mask: Option<String>,
+
+    // ── Pool / Enroll ──────────────────────────────────────────────────────────
+    /// Enroll a peer server into the pool.
+    /// Verifies that the peer shares the same server.key fingerprint, then
+    /// pushes the full clients.json and adds the peer to the local pool config.
+    #[arg(long, value_name = "PEER_ADDR")]
+    pub enroll: Option<String>,
+
+    /// Pool configuration JSON file path.
+    /// Contains: {"peers": ["host:port", ...], "sync_port": 444, "sync_key": "hex"}
+    #[arg(long, env = "AIVPN_POOL_CONFIG")]
+    pub pool_config: Option<String>,
+
+    // ── Backup / Restore ───────────────────────────────────────────────────────
+    /// Export server state (clients DB, masks, config) to a tar.gz archive.
+    #[arg(long, value_name = "OUTPUT_PATH")]
+    pub export: Option<String>,
+
+    /// Import server state from a tar.gz archive created by --export.
+    #[arg(long, value_name = "ARCHIVE_PATH")]
+    pub import: Option<String>,
+
+    /// Dry-run mode for --import: print what would change without writing files.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    // ── Per-client QoS ─────────────────────────────────────────────────────────
+    /// Set QoS for a client (by name or ID). Use with --bw-up, --bw-down, --dscp.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub set_client_qos: Option<String>,
+
+    /// Upstream (client→server) bandwidth limit. Example: 10M, 512K, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_up: Option<String>,
+
+    /// Downstream (server→client) bandwidth limit. Example: 50M, 1G.
+    #[arg(long, value_name = "BANDWIDTH")]
+    pub bw_down: Option<String>,
+
+    /// DSCP traffic class name. Examples: EF, AF41, CS1, BE.
+    #[arg(long, value_name = "CLASS")]
+    pub dscp: Option<String>,
+
+    // ── Audit Log ──────────────────────────────────────────────────────────────
+    /// Path to the append-only admin audit log (JSONL format).
+    #[arg(
+        long,
+        env = "AIVPN_AUDIT_LOG",
+        default_value = "/var/log/aivpn/audit.log"
+    )]
+    pub audit_log: String,
+
+    // ── mTLS CA management ─────────────────────────────────────────────────────
+    /// Generate a new ed25519 CA key pair for mTLS client cert signing.
+    /// Prints ca_public_key_hex and ca_private_key_hex to stdout, then exits.
+    #[arg(long)]
+    pub gen_ca: bool,
+
+    /// Sign a client public key with the CA private key and print the cert hex.
+    /// Expects a 64-hex-char (32-byte) X25519 public key.
+    /// Requires --ca-key.
+    #[arg(long, value_name = "PUBKEY_HEX")]
+    pub issue_cert: Option<String>,
+
+    /// CA private key hex string (64 hex chars = 32 bytes) for --issue-cert.
+    #[arg(long, value_name = "HEX")]
+    pub ca_key: Option<String>,
+
+    /// Certificate validity in days (default: 365). Used with --issue-cert.
+    #[arg(long, default_value_t = 365)]
+    pub days: u64,
+
+    /// Allow direct routing between VPN clients (client-to-client relay, 0.9.0+).
+    /// When enabled, packets from one VPN client destined for another VPN IP are
+    /// forwarded directly without leaving the server. Disabled by default.
+    #[arg(long, env = "AIVPN_ALLOW_PEER_ROUTING")]
+    pub allow_peer_routing: bool,
 }
 
 /// AIVPN Server instance
@@ -87,6 +182,21 @@ impl AivpnServer {
         Ok(Self { gateway })
     }
 
+    /// Return a shared reference to the session manager (for pool sync setup).
+    pub fn session_manager(&self) -> Arc<crate::session::SessionManager> {
+        self.gateway.session_manager()
+    }
+
+    /// Return the default MDH bytes from the mask catalog (for pool sync packets).
+    pub fn catalog_mdh(&self) -> Vec<u8> {
+        self.gateway.catalog_mdh()
+    }
+
+    /// Set multi-hop chain forwarder.  Must be called before `run()`.
+    pub fn set_chain_forwarder(&mut self, cf: Arc<crate::chain_forwarder::ChainForwarder>) {
+        self.gateway.set_chain_forwarder(cf);
+    }
+
     /// Run the server
     pub async fn run(self) -> Result<()> {
         self.gateway.run().await
@@ -99,7 +209,7 @@ pub fn init_logging() {
         .with_env_filter(
             EnvFilter::from_default_env()
                 .add_directive("aivpn_server=debug".parse().unwrap())
-                .add_directive("aivpn_common=debug".parse().unwrap())
+                .add_directive("aivpn_common=debug".parse().unwrap()),
         )
         .init();
 }

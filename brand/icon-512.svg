@@ -1,0 +1,41 @@
+<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#1A0E40"/>
+      <stop offset="100%" stop-color="#080418"/>
+    </radialGradient>
+    <filter id="glow-outer">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-mid">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-center">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- Outer ring: lemon, thin, glowing -->
+  <circle cx="256" cy="256" r="196"
+    fill="none" stroke="#E8FF6B" stroke-width="2.5" opacity="0.7"
+    filter="url(#glow-outer)"/>
+
+  <!-- Mid ring: purple, main identity ring -->
+  <circle cx="256" cy="256" r="138"
+    fill="none" stroke="#7B61FF" stroke-width="5" opacity="0.85"
+    filter="url(#glow-mid)"/>
+
+  <!-- Inner ring: soft violet -->
+  <circle cx="256" cy="256" r="80"
+    fill="none" stroke="#9B85FF" stroke-width="3.5" opacity="0.75"/>
+
+  <!-- Center node: small white circle -->
+  <circle cx="256" cy="256" r="18" fill="#7B61FF" opacity="0.6" filter="url(#glow-center)"/>
+  <circle cx="256" cy="256" r="10" fill="#FFFFFF" opacity="0.95"/>
+</svg>

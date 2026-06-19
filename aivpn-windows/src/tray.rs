@@ -155,9 +155,8 @@ fn tray_event_loop(action: Arc<AtomicU8>) {
 #[cfg(windows)]
 fn wake_and_show_window() {
     use winapi::um::winuser::{
-        FindWindowW, IsIconic, IsWindowVisible,
-        ShowWindow, SetForegroundWindow,
-        SW_SHOW, SW_RESTORE,
+        FindWindowW, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        SW_SHOW,
     };
     unsafe {
         let title: Vec<u16> = "AIVPN\0".encode_utf16().collect();

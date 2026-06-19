@@ -1,5 +1,5 @@
 //! Cryptographic primitives for AIVPN
-//! 
+//!
 //! Implements:
 //! - X25519 key exchange
 //! - ChaCha20-Poly1305 AEAD encryption
@@ -9,7 +9,7 @@
 use blake3::Hasher;
 use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
-    ChaCha20Poly1305, Nonce, Key as ChachaKey,
+    ChaCha20Poly1305, Key as ChachaKey, Nonce,
 };
 use hmac::Hmac;
 use rand::RngCore;
@@ -71,15 +71,16 @@ impl KeyPair {
     pub fn generate() -> Self {
         let mut private_key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut private_key_bytes);
-        
+
         // X25519 clamping (RFC 7748)
         private_key_bytes[0] &= 248;
         private_key_bytes[31] &= 127;
         private_key_bytes[31] |= 64;
-        
-        let public_key_bytes = x25519_dalek::x25519(private_key_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
-        
-        Self { 
+
+        let public_key_bytes =
+            x25519_dalek::x25519(private_key_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
+
+        Self {
             private_key_bytes,
             public_key_bytes,
         }
@@ -91,7 +92,8 @@ impl KeyPair {
         key_bytes[0] &= 248;
         key_bytes[31] &= 127;
         key_bytes[31] |= 64;
-        let public_key_bytes = x25519_dalek::x25519(key_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
+        let public_key_bytes =
+            x25519_dalek::x25519(key_bytes, x25519_dalek::X25519_BASEPOINT_BYTES);
         Self {
             private_key_bytes: key_bytes,
             public_key_bytes,
@@ -103,13 +105,20 @@ impl KeyPair {
         self.public_key_bytes
     }
 
+    /// Export private key bytes for secure persistence (e.g., device.key file).
+    pub fn export_private_key(&self) -> [u8; 32] {
+        self.private_key_bytes
+    }
+
     /// Compute shared secret with remote public key
     /// Returns error if the result is all-zero (small subgroup attack)
     pub fn compute_shared(&self, remote_public: &[u8; X25519_PUBLIC_KEY_SIZE]) -> Result<[u8; 32]> {
         let shared = x25519_dalek::x25519(self.private_key_bytes, *remote_public);
         // Reject all-zero shared secret (small subgroup / identity point attack)
         if shared.ct_eq(&[0u8; 32]).into() {
-            return Err(Error::Crypto("DH result is all-zero (possible small subgroup attack)".into()));
+            return Err(Error::Crypto(
+                "DH result is all-zero (possible small subgroup attack)".into(),
+            ));
         }
         Ok(shared)
     }
@@ -136,7 +145,7 @@ pub fn derive_session_keys(
     let session_key_input: Vec<u8> = [ikm.clone(), eph_pub.to_vec()].concat();
     let tag_secret_input: Vec<u8> = [ikm.clone(), eph_pub.to_vec()].concat();
     let prng_seed_input: Vec<u8> = [ikm, eph_pub.to_vec()].concat();
-    
+
     let session_key_hash = blake3::derive_key(HKDF_SESSION_KEY_CONTEXT, &session_key_input);
     let tag_secret_hash = blake3::derive_key(HKDF_TAG_SECRET_CONTEXT, &tag_secret_input);
     let prng_seed_hash = blake3::derive_key(HKDF_PRNG_SEED_CONTEXT, &prng_seed_input);
@@ -156,7 +165,7 @@ pub fn encrypt_payload(
 ) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(ChachaKey::from_slice(key));
     let nonce = Nonce::from_slice(nonce);
-    
+
     let ciphertext = cipher.encrypt(nonce, plaintext)?;
     Ok(ciphertext)
 }
@@ -169,13 +178,13 @@ pub fn decrypt_payload(
 ) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(ChachaKey::from_slice(key));
     let nonce = Nonce::from_slice(nonce);
-    
+
     let plaintext = cipher.decrypt(nonce, ciphertext)?;
     Ok(plaintext)
 }
 
 /// Generate Resonance Tag using HMAC-BLAKE3
-/// 
+///
 /// Tag = HMAC-BLAKE3(tag_secret, counter_bytes || time_window_bytes)
 /// truncated to first 8 bytes.
 /// The first byte is guaranteed NOT to be 1–4 (WireGuard message types),
@@ -188,7 +197,7 @@ pub fn generate_resonance_tag(
     let mut hasher = Hasher::new_keyed(tag_secret);
     hasher.update(&counter.to_le_bytes());
     hasher.update(&time_window.to_le_bytes());
-    
+
     let hash = hasher.finalize();
     let mut tag = [0u8; TAG_SIZE];
     tag.copy_from_slice(&hash.as_bytes()[..TAG_SIZE]);
@@ -212,7 +221,7 @@ pub fn current_timestamp_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -241,8 +250,7 @@ pub fn obfuscate_eph_pub(eph_pub: &mut [u8; 32], server_static_pub: &[u8; 32]) {
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     use hmac::Mac;
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
-        .expect("HMAC can take key of any size");
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(data);
     let result = mac.finalize();
     result.into_bytes().into()
@@ -257,8 +265,12 @@ mod tests {
         let client_keys = KeyPair::generate();
         let server_keys = KeyPair::generate();
 
-        let client_shared = client_keys.compute_shared(&server_keys.public_key_bytes()).unwrap();
-        let server_shared = server_keys.compute_shared(&client_keys.public_key_bytes()).unwrap();
+        let client_shared = client_keys
+            .compute_shared(&server_keys.public_key_bytes())
+            .unwrap();
+        let server_shared = server_keys
+            .compute_shared(&client_keys.public_key_bytes())
+            .unwrap();
 
         assert_eq!(client_shared, server_shared);
     }
